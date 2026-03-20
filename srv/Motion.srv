@@ -1,0 +1,12 @@
+# Motion Service - Request velocity command (holonomic)
+# Client: web_controller
+# Server: motion_server (Ridgeback R100)
+
+# Request
+float64 linear      # Linear velocity x (m/s) - forward/backward
+float64 lateral     # Linear velocity y (m/s) - strafe left/right
+float64 angular     # Angular velocity (rad/s) - rotation
+---
+# Response
+bool success        # True if command was executed
+string message      # Status message
