@@ -57,8 +57,8 @@ Both machines need:
 - This package cloned and built in a ROS2 workspace
 
 ```bash
-cd ~/ros2_ws/src
-git clone git@github.com:SuperMadee/Clearpath_Ridgeback_Motion_Server.git ridgeback_image_motion
+cd ~
+git clone git@github.com:SuperMadee/Clearpath_Ridgeback_Motion_Server.git ridgeback
 cd ~/ros2_ws
 colcon build --packages-select ridgeback_image_motion
 source install/setup.bash
@@ -76,7 +76,7 @@ ssh administrator@192.168.131.1
 
 Run the start script — this pulls the latest code, builds, and launches **motion_server** + **image_publisher**:
 ```bash
-bash ~/ros2_ws/src/ridgeback_image_motion/scripts/ridgeback_start.sh
+bash ~/ridgeback/scripts/ridgeback_start.sh
 ```
 
 This starts:
@@ -91,7 +91,7 @@ This starts:
 
 On the Jetson, run the web controller script:
 ```bash
-bash ~/ros2_ws/src/ridgeback_image_motion/scripts/ridgeback_web.sh
+bash ~/ridgeback/scripts/ridgeback_web.sh
 ```
 
 This starts:

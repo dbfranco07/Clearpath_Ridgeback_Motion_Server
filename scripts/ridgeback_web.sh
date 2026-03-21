@@ -11,7 +11,7 @@ echo "Ridgeback R100 - Web Controller"
 echo "=========================================="
 
 # Navigate to workspace
-cd ~/ros2_ws/src/ridgeback_image_motion
+cd ~/ridgeback
 
 # Pull latest changes
 echo ""
