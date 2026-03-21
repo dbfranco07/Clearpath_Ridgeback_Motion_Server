@@ -46,38 +46,88 @@ A ROS2 Humble package for the **Clearpath Ridgeback R100** omnidirectional robot
 
 ---
 
-## 🚀 Quick Start
+## 🚀 How to Run
 
-### 1️⃣ SSH into the Ridgeback
+This system uses **two machines** — the Ridgeback's onboard PC runs the motion server and image publisher, while the Jetson runs the web controller. Both must be on the same network and use the same `ROS_DOMAIN_ID`.
 
-```bash
-ssh administrator@10.158.39.184
-# Password: clearpath
-source /opt/ros/humble/setup.bash
-```
+### 📋 Prerequisites
 
-### 2️⃣ Clone into ROS2 workspace
+Both machines need:
+- ROS2 Humble sourced (`source /opt/ros/humble/setup.bash`)
+- This package cloned and built in a ROS2 workspace
 
 ```bash
 cd ~/ros2_ws/src
 git clone git@github.com:SuperMadee/Clearpath_Ridgeback_Motion_Server.git ridgeback_image_motion
+cd ~/ros2_ws
+colcon build --packages-select ridgeback_image_motion
+source install/setup.bash
 ```
 
-### 3️⃣ Build & run
+---
 
-**Terminal 1** — Motion server + Image publisher:
+### 🤖 Step 1: Start the Ridgeback (onboard PC)
+
+SSH into the Ridgeback:
+```bash
+ssh administrator@192.168.131.1
+# Password: clearpath
+```
+
+Run the start script — this pulls the latest code, builds, and launches **motion_server** + **image_publisher**:
 ```bash
 bash ~/ros2_ws/src/ridgeback_image_motion/scripts/ridgeback_start.sh
 ```
 
-**Terminal 2** — Web controller:
+This starts:
+- `/motion_server` — listens for `motion_service` calls and publishes to `/r100_0140/cmd_vel`
+- `/image_publisher` — subscribes to RealSense raw images and publishes compressed JPEG
+
+> 💡 The Clearpath platform nodes (motors, LiDAR, IMU, camera driver) are already running via `clearpath-robot.service` on boot.
+
+---
+
+### 🖥️ Step 2: Start the Jetson (web controller)
+
+On the Jetson, run the web controller script:
 ```bash
 bash ~/ros2_ws/src/ridgeback_image_motion/scripts/ridgeback_web.sh
 ```
 
-### 4️⃣ Open the dashboard
+This starts:
+- `web_controller.py` — FastAPI server that subscribes to compressed images, odometry, and LiDAR, and serves the web dashboard
 
-🌐 **http://10.158.39.184:8080**
+---
+
+### 🌐 Step 3: Open the Dashboard
+
+Open a browser on any device connected to the same network:
+
+```
+http://<jetson-ip>:8080
+```
+
+You should see:
+- 📷 Live camera feed (MJPEG from RealSense)
+- 🗺️ Live LiDAR top-down map
+- 🎮 Omnidirectional teleop controls
+- 📊 Real-time velocity, pose, and latency
+
+---
+
+### ✅ Verify Everything Is Connected
+
+On either machine, check that all nodes can see each other:
+```bash
+# List all active nodes
+ros2 node list
+
+# Check image stream is flowing
+ros2 topic hz /r100_0140/image/compressed
+
+# Check motion service is available
+ros2 service list | grep motion
+```
 
 ---
 
