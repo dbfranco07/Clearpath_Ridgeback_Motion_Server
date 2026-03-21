@@ -69,7 +69,7 @@ class RidgebackController(Node):
 
         # Battery subscriber
         self.battery_sub = self.create_subscription(
-            BatteryState, battery_topic, self.battery_callback, reliable_qos
+            BatteryState, battery_topic, self.battery_callback, best_effort_qos
         )
 
         # Battery state
