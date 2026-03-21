@@ -22,7 +22,6 @@ git pull
 # Build
 echo ""
 echo "[2/4] Building package..."
-cd ~/ros2_ws
 colcon build --packages-select ridgeback_image_motion
 
 # Source

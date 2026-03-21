@@ -59,7 +59,7 @@ Both machines need:
 ```bash
 cd ~
 git clone git@github.com:SuperMadee/Clearpath_Ridgeback_Motion_Server.git ridgeback
-cd ~/ros2_ws
+cd ~/ridgeback
 colcon build --packages-select ridgeback_image_motion
 source install/setup.bash
 ```
