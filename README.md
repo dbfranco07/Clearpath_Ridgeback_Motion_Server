@@ -95,6 +95,7 @@ Pull latest code, build, and run:
 cd ~/ridgeback
 git pull
 source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=0
 colcon build --packages-select ridgeback_image_motion
 source install/setup.bash
 ros2 run ridgeback_image_motion motion_server.py
@@ -105,6 +106,7 @@ ros2 run ridgeback_image_motion motion_server.py
 ssh administrator@192.168.131.1
 cd ~/ridgeback
 source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=0
 source install/setup.bash
 ros2 run ridgeback_image_motion image_publisher.py
 ```
@@ -125,6 +127,7 @@ bash ~/ridgeback/scripts/ridgeback_start.sh
 cd ~/ridgeback
 git pull
 source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=0
 colcon build --packages-select ridgeback_image_motion
 source install/setup.bash
 ros2 run ridgeback_image_motion web_controller.py
@@ -158,8 +161,11 @@ You should see:
 
 ### ✅ Verify Everything Is Connected
 
-On either machine, check that all nodes can see each other:
+On either machine, make sure `ROS_DOMAIN_ID` is set first:
 ```bash
+source /opt/ros/humble/setup.bash
+export ROS_DOMAIN_ID=0
+
 # List all active nodes
 ros2 node list
 
