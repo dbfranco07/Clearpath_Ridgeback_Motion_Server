@@ -128,10 +128,14 @@ cd ~/ridgeback
 git pull
 source /opt/ros/humble/setup.bash
 export ROS_DOMAIN_ID=0
+export RMW_FASTRTPS_USE_SHM=0
+export FASTRTPS_DEFAULT_PROFILES_FILE=~/ridgeback/config/fastrtps_profile.xml
 colcon build --packages-select ridgeback_image_motion
 source install/setup.bash
 ros2 run ridgeback_image_motion web_controller.py
 ```
+
+> 💡 The `fastrtps_profile.xml` tells DDS to connect directly to the Ridgeback's WiFi IP (`10.158.39.184`) via unicast, since multicast may be blocked on the network.
 
 Or use the web controller script:
 ```bash
