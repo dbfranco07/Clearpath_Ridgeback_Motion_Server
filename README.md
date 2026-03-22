@@ -46,6 +46,28 @@ A ROS2 Humble package for the **Clearpath Ridgeback R100** omnidirectional robot
 
 ---
 
+## ⚡ Preliminaries — Turning On the Robot
+
+![Ridgeback External Features](docs/ridgeback_external_features_white_bg.png)
+
+1. **Power on** — Press the Power ON/OFF on the Ridgeback chassis.
+2. **Release E-Stop** (if engaged) — twist the four red Run/Stop button on the robot to release it, then press the **Stop Reset** button.
+2. **Check robot light status:**
+   - Front WHITE + Rear RED = Ready ✅
+   - Flashing RED = E-Stop engaged ❌ → release E-Stop + press Stop Reset button
+   - Pulsing ORANGE = Battery is low → connect Ridgeback to charger
+   - Pulsing GREEN = Charger is connected → Ridgeback's battery is charging
+   - Solid GREEN = Charger is connected → Ridgeback's battery is fully charged
+   - Solid RED = MCU is not in contact with the computer ❌ → re-check network configs
+3. **Verify ROS is running** — The `clearpath-robot.service` starts automatically on boot. Check with:
+   ```bash
+   ssh administrator@192.168.131.1 # or ssh administrator@10.158.38.184 if via WiFi
+   # Password: c***r***h
+   sudo systemctl status clearpath-robot.service
+   ```
+
+---
+
 ## 🚀 How to Run
 
 This system uses **two machines** — the Ridgeback's onboard PC runs the motion server and image publisher, while the Jetson runs the web controller. Both must be on the same network and use the same `ROS_DOMAIN_ID`.
@@ -59,7 +81,7 @@ Both machines need:
 
 #### 1. Set up SSH for GitHub
 
-Make sure the machine has an SSH key added to your GitHub account. Then set the remote to use SSH:
+Make sure that both machines has an SSH key added to your GitHub account. Then set the remote to use SSH:
 
 ```bash
 # If cloning fresh
@@ -86,7 +108,7 @@ source install/setup.bash
 
 **Terminal 1** — SSH into the Ridgeback:
 ```bash
-ssh administrator@192.168.131.1
+ssh administrator@192.168.131.1 # or ssh administrator@10.158.39.184 if using WiFi
 # Password: c***r***h
 ```
 
@@ -412,6 +434,14 @@ The system runs on **two computers** that communicate over WiFi using **ROS2 DDS
 - cv_bridge
 - FastAPI + Uvicorn (`pip install fastapi uvicorn`)
 - NumPy
+
+---
+
+## 📚 Documentation
+
+- [User Manual](https://docs.clearpathrobotics.com/docs_robots/indoor_robots/ridgeback/user_manual_ridgeback/)
+- [Tutorials](https://docs.clearpathrobotics.com/docs_robots/indoor_robots/ridgeback/tutorials_ridgeback)
+- [Troubleshooting](https://docs.clearpathrobotics.com/docs_robots/indoor_robots/ridgeback/troubleshooting_ridgeback)
 
 ---
 
