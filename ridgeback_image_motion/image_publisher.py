@@ -22,7 +22,7 @@ class ImagePublisher(Node):
         # Parameters
         self.declare_parameter('image_topic', '/r100_0140/sensors/camera_0/color/image')
         self.declare_parameter('compressed_topic', '/r100_0140/image/compressed')
-        self.declare_parameter('jpeg_quality', 70)
+        self.declare_parameter('jpeg_quality', 95)
         self.declare_parameter('max_fps', 15.0)
 
         image_topic = self.get_parameter('image_topic').value
