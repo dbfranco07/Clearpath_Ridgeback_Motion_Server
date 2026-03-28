@@ -1,18 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Jetson DDS profile: discover Ridgeback on WiFi -->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/FastRTPS_Profiles">
     <profiles>
         <participant profile_name="participant_profile" is_default_profile="true">
             <rtps>
+                <defaultUnicastLocatorList>
+                    <locator>
+                        <udpv4>
+                            <address>10.158.36.125</address>
+                        </udpv4>
+                    </locator>
+                </defaultUnicastLocatorList>
                 <builtin>
-                    <metatrafficMulticastLocatorList>
-                        <locator>
-                            <udpv4>
-                                <address>239.255.0.1</address>
-                                <port>7400</port>
-                            </udpv4>
-                        </locator>
-                    </metatrafficMulticastLocatorList>
                     <initialPeersList>
                         <locator>
                             <udpv4>

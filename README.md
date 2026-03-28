@@ -72,14 +72,12 @@ A ROS2 Humble package for the **Clearpath Ridgeback R100** omnidirectional robot
 
 This system uses **two machines** — the Ridgeback's onboard PC runs the motion server and image publisher, while the Jetson runs the web controller. Both must be on the same network and use the same `ROS_DOMAIN_ID`.
 
-### 📋 Prerequisites
+### 📋 Prerequisites: Cloning the Repository
 
 Both machines need:
 - ROS2 Humble sourced (`source /opt/ros/humble/setup.bash`)
 - SSH key added to GitHub (since HTTPS password auth is not supported)
 - This package cloned and built
-
-#### 1. Set up SSH for GitHub
 
 Make sure that both machines has an SSH key added to your GitHub account. Then set the remote to use SSH:
 
@@ -92,17 +90,6 @@ git clone git@github.com:SuperMadee/Clearpath_Ridgeback_Motion_Server.git ridgeb
 cd ~/ridgeback
 git remote set-url origin git@github.com:SuperMadee/Clearpath_Ridgeback_Motion_Server.git
 ```
-
-#### 2. Build the package
-
-```bash
-cd ~/ridgeback
-source /opt/ros/humble/setup.bash
-colcon build --packages-select ridgeback_image_motion
-source install/setup.bash
-```
-
----
 
 ### 🤖 Step 1: Start the Ridgeback (onboard PC)
 
