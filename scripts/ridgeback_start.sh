@@ -7,7 +7,7 @@ set -e
 
 export ROS_DOMAIN_ID=0
 export RMW_FASTRTPS_USE_SHM=0
-export FASTRTPS_DEFAULT_PROFILES_FILE=~/ridgeback/config/fastrtps_ridgeback.xml
+unset FASTRTPS_DEFAULT_PROFILES_FILE
 
 echo "=========================================="
 echo "Ridgeback R100 - Start Script"

@@ -38,11 +38,10 @@ class ImagePublisher(Node):
         self.publisher_ = self.create_publisher(CompressedImage, compressed_topic, 1)
 
         # Subscriber to raw RealSense images
-        # RealSense driver publishes BEST_EFFORT + VOLATILE — must match or it won't connect
         sensor_qos = QoSProfile(
             depth=1,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
         self.subscription = self.create_subscription(
             Image, image_topic, self.image_callback, sensor_qos
