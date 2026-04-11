@@ -56,10 +56,10 @@ class RidgebackController(Node):
 
         # Subscribers
         self.image_sub = self.create_subscription(
-            CompressedImage, image_topic, self.image_callback, reliable_qos
+            CompressedImage, image_topic, self.image_callback, best_effort_qos
         )
         self.odom_sub = self.create_subscription(
-            Odometry, odom_topic, self.odom_callback, reliable_qos
+            Odometry, odom_topic, self.odom_callback, best_effort_qos
         )
 
         # LiDAR subscriber
@@ -91,6 +91,7 @@ class RidgebackController(Node):
         # State
         self.latest_frame = None
         self.frame_lock = threading.Lock()
+        self.frame_event = threading.Event()
         self.current_linear_vel = 0.0
         self.current_lateral_vel = 0.0
         self.current_angular_vel = 0.0
@@ -134,6 +135,7 @@ class RidgebackController(Node):
 
         with self.frame_lock:
             self.latest_frame = bytes(msg.data)
+        self.frame_event.set()
 
     def odom_callback(self, msg):
         now = self.get_clock().now()
@@ -463,13 +465,12 @@ class TeleopRequest(BaseModel):
 def generate_mjpeg():
     while True:
         if controller:
+            controller.frame_event.wait(timeout=0.5)
+            controller.frame_event.clear()
             frame = controller.get_frame()
             if frame:
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
-                time.sleep(0.05)
-            else:
-                time.sleep(0.1)
         else:
             time.sleep(0.1)
 

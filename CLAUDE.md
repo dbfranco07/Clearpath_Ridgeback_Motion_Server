@@ -18,7 +18,7 @@
 | WiFi | `10.158.39.203` | May change — check `ip a` |
 | Front LiDAR | `192.168.131.20` | Ethernet connected |
 | MCU | `192.168.131.2` | Internal only |
-| Jetson (madee-orin) | `10.158.39.28` | WiFi — may change |
+| Jetson (madee-orin) | `10.158.36.90<` | WiFi — may change |
 
 ```bash
 # SSH into robot
@@ -26,7 +26,7 @@ ssh administrator@192.168.131.1
 # Password: clearpath
 
 # SSH into Jetson
-ssh madee-orin@10.158.39.28
+ssh dbfranco@10.158.36.90<
 
 # Always source ROS2 after login
 source /opt/ros/humble/setup.bash

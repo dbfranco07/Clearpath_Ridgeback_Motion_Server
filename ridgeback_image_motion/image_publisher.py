@@ -22,7 +22,7 @@ class ImagePublisher(Node):
         # Parameters
         self.declare_parameter('image_topic', '/r100_0140/sensors/camera_0/color/image')
         self.declare_parameter('compressed_topic', '/r100_0140/image/compressed')
-        self.declare_parameter('jpeg_quality', 95)
+        self.declare_parameter('jpeg_quality', 75)
         self.declare_parameter('max_fps', 15.0)
 
         image_topic = self.get_parameter('image_topic').value
@@ -40,8 +40,8 @@ class ImagePublisher(Node):
         # Subscriber to raw RealSense images
         sensor_qos = QoSProfile(
             depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE
         )
         self.subscription = self.create_subscription(
             Image, image_topic, self.image_callback, sensor_qos
@@ -58,6 +58,7 @@ class ImagePublisher(Node):
         )
 
         self.frame_count = 0
+        self.last_depth_publish_time = 0.0
 
         self.get_logger().info('Image Publisher started')
         self.get_logger().info(f'  Subscribing to: {image_topic}')
@@ -94,6 +95,11 @@ class ImagePublisher(Node):
             self.get_logger().error(f'Image conversion error: {e}')
 
     def _depth_cb(self, msg: Image):
+        now = self.get_clock().now().nanoseconds / 1e9
+        if now - self.last_depth_publish_time < self.min_interval:
+            return
+        self.last_depth_publish_time = now
+
         try:
             depth = self.bridge.imgmsg_to_cv2(msg, 'passthrough')  # uint16
             success, buf = cv2.imencode('.png', depth)
