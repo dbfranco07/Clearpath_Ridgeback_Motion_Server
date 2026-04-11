@@ -38,13 +38,23 @@ class ImagePublisher(Node):
         self.publisher_ = self.create_publisher(CompressedImage, compressed_topic, 1)
 
         # Subscriber to raw RealSense images
-        qos_profile = QoSProfile(
+        sensor_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL
         )
         self.subscription = self.create_subscription(
-            Image, image_topic, self.image_callback, qos_profile
+            Image, image_topic, self.image_callback, sensor_qos
+        )
+
+        self.depth_pub = self.create_publisher(
+            CompressedImage, '/r100_0140/image/depth_compressed', 10
+        )
+        self.create_subscription(
+            Image,
+            '/r100_0140/sensors/camera_0/depth/image',
+            self._depth_cb,
+            sensor_qos
         )
 
         self.frame_count = 0
@@ -82,6 +92,19 @@ class ImagePublisher(Node):
 
         except Exception as e:
             self.get_logger().error(f'Image conversion error: {e}')
+
+    def _depth_cb(self, msg: Image):
+        try:
+            depth = self.bridge.imgmsg_to_cv2(msg, 'passthrough')  # uint16
+            success, buf = cv2.imencode('.png', depth)
+            if success:
+                out = CompressedImage()
+                out.header = msg.header
+                out.format = '16UC1; png'
+                out.data = buf.tobytes()
+                self.depth_pub.publish(out)
+        except Exception as e:
+            self.get_logger().error(f'Depth conversion error: {e}')
 
 
 def main(args=None):
