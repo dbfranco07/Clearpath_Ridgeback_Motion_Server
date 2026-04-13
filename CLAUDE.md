@@ -357,3 +357,15 @@ sudo systemctl restart clearpath-robot.service
 - **All RED solid** = E-Stop engaged ❌
 - **RED blinking** = ROS not running ❌
 - **YELLOW** = Charging 🔋
+
+
+## Goal
+A user must be able to instruct the Clearpath Robot to go to a certain place, a landmark, and come back to where it started. We will use the Room Number as the landmark. The following are the constraints:
+
+1) User uses natural language instruction 
+2) The robot must be fully autonomous. It must perform SLAM in order to explore its world. By default its map is tabula rasa. 
+3) The robot may use memory system to remember where it has visited. The memory system can be used as reference to navigate back to its starting position.
+4) Never initialize the robot map using a pre-loaded map.
+5) The robot may use a VLM to recognize places and read room numbers. 
+6) You must use an onboard Jetson Orin as a safety controller in case the robot loses its network connection
+7) At all times you must consider safety of the operator and people around the robot workspace
