@@ -1,0 +1,24 @@
+# Safety Controller Parameters
+# Tune these based on the robot's physical dimensions and environment
+
+safety_controller:
+  ros__parameters:
+    # Ridgeback R100 is roughly 960×793mm — use 0.5m padding for danger zone
+    danger_zone_m: 0.45        # Hard stop: obstacle closer than this → emergency stop
+    warning_zone_m: 0.8        # Warning: obstacle in this range (shown in UI)
+    lidar_timeout_s: 2.0       # Seconds without LiDAR data before emergency stop
+    front_cone_deg: 60.0       # Check ±60° ahead for forward-motion stops
+    status_rate_hz: 5.0
+
+    lidar_topic: /r100_0140/sensors/lidar2d_0/scan
+    odom_topic: /r100_0140/platform/odom/filtered
+    cmd_vel_override_topic: /safety/cmd_vel_override
+    status_topic: /safety/status
+
+cmd_vel_mux:
+  ros__parameters:
+    output_topic: /r100_0140/cmd_vel
+    safety_timeout_s: 1.0      # Safety override holds for 1s after last trigger
+    nav2_timeout_s: 0.5        # Nav2 source times out if no new cmd for 0.5s
+    teleop_timeout_s: 0.3      # Teleop source times out quickly for safety
+    publish_rate_hz: 20.0

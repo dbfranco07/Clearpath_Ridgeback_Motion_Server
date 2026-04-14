@@ -1,0 +1,10 @@
+# Store a room→coordinate mapping in memory
+string room_id          # Room number or label (e.g. "305")
+float64 map_x           # Robot position in map frame when room was detected
+float64 map_y
+float64 map_yaw
+float32 confidence      # Detection confidence (0.0-1.0)
+string session_id       # Optional session identifier
+---
+bool success
+string message

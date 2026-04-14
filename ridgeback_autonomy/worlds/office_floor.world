@@ -1,0 +1,220 @@
+<?xml version="1.0" ?>
+<!--
+  Simplified Office Floor Gazebo World
+  =====================================
+  A single hallway with 6 numbered doors/rooms on each side.
+  Room numbers are labeled with 3D text meshes (or colored markers).
+
+  Layout:
+    - Central hallway (20m × 3m)
+    - 3 rooms on each side, numbered 301-306
+    - Doorway openings allow robot to enter rooms
+    - Some furniture (chairs, desks) as dynamic obstacle proxies
+
+  Use with TurtleBot3 or Ridgeback URDF.
+-->
+<sdf version="1.6">
+  <world name="office_floor">
+
+    <!-- Lighting -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <light type="point" name="ceiling_light_1">
+      <pose>0 0 3 0 0 0</pose>
+      <diffuse>1 1 1 1</diffuse>
+      <specular>0.1 0.1 0.1 1</specular>
+      <attenuation>
+        <range>10</range>
+        <constant>0.2</constant>
+        <linear>0.1</linear>
+        <quadratic>0.01</quadratic>
+      </attenuation>
+    </light>
+
+    <!-- Physics -->
+    <physics type="ode">
+      <real_time_update_rate>1000.0</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+    </physics>
+
+    <!-- Ground plane -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>50 50</size></plane></geometry>
+          <surface><friction><ode><mu>100</mu><mu2>50</mu2></ode></friction></surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>50 50</size></plane></geometry>
+          <material><script>
+            <uri>file://media/materials/scripts/gazebo.material</uri>
+            <name>Gazebo/Grey</name>
+          </script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         HALLWAY WALLS
+         Main corridor: X=-12 to X=12, Y=-1.5 to Y=1.5
+         Height: 3m
+         ═══════════════════════════════════════════════════════════ -->
+
+    <!-- North wall (y = 1.5) -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 1.5 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>24 0.15 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>24 0.15 3</size></box></geometry>
+          <material><ambient>0.9 0.9 0.9 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- South wall (y = -1.5) -->
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -1.5 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>24 0.15 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>24 0.15 3</size></box></geometry>
+          <material><ambient>0.9 0.9 0.9 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- East wall -->
+    <model name="wall_east">
+      <static>true</static>
+      <pose>12 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.15 3 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.15 3 3</size></box></geometry>
+          <material><ambient>0.9 0.9 0.9 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- West wall -->
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-12 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.15 3 3</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.15 3 3</size></box></geometry>
+          <material><ambient>0.9 0.9 0.9 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         ROOM WALLS (North side — rooms 301, 303, 305)
+         Each room: 4m wide, 4m deep, doorway in south wall
+         ═══════════════════════════════════════════════════════════ -->
+
+    <!-- Room 301 (x: -10 to -6, y: 1.5 to 5.5) -->
+    <model name="room301_north"><static>true</static><pose>-8 5.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>4 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>4 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room301_east"><static>true</static><pose>-6 3.5 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.15 4 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>0.15 4 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room301_west"><static>true</static><pose>-10 3.5 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.15 4 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>0.15 4 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <!-- South wall with 1m doorway centered -->
+    <model name="room301_south_l"><static>true</static><pose>-9.5 1.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>1 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room301_south_r"><static>true</static><pose>-6.5 1.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>1 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <!-- Room number sign (colored box as placeholder for text) -->
+    <model name="sign_301"><static>true</static><pose>-8 1.6 2 0 0 0</pose>
+      <link name="link">
+        <visual name="v"><geometry><box><size>0.6 0.05 0.3</size></box></geometry>
+          <material><ambient>0 0.5 1 1</ambient><diffuse>0 0.5 1 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Room 303 (x: -2 to 2, y: 1.5 to 5.5) -->
+    <model name="room303_north"><static>true</static><pose>0 5.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>4 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>4 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room303_east"><static>true</static><pose>2 3.5 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.15 4 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>0.15 4 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room303_west"><static>true</static><pose>-2 3.5 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.15 4 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>0.15 4 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room303_south_l"><static>true</static><pose>-1.5 1.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>1 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room303_south_r"><static>true</static><pose>1.5 1.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>1 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="sign_303"><static>true</static><pose>0 1.6 2 0 0 0</pose>
+      <link name="link">
+        <visual name="v"><geometry><box><size>0.6 0.05 0.3</size></box></geometry>
+          <material><ambient>0 0.5 1 1</ambient><diffuse>0 0.5 1 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Room 305 (x: 6 to 10, y: 1.5 to 5.5) -->
+    <model name="room305_north"><static>true</static><pose>8 5.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>4 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>4 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room305_east"><static>true</static><pose>10 3.5 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.15 4 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>0.15 4 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room305_west"><static>true</static><pose>6 3.5 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>0.15 4 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>0.15 4 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room305_south_l"><static>true</static><pose>6.5 1.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>1 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="room305_south_r"><static>true</static><pose>9.5 1.575 1.5 0 0 0</pose>
+      <link name="link"><collision name="c"><geometry><box><size>1 0.15 3</size></box></geometry></collision>
+      <visual name="v"><geometry><box><size>1 0.15 3</size></box></geometry><material><ambient>0.85 0.85 0.85 1</ambient></material></visual></link></model>
+    <model name="sign_305"><static>true</static><pose>8 1.6 2 0 0 0</pose>
+      <link name="link">
+        <visual name="v"><geometry><box><size>0.6 0.05 0.3</size></box></geometry>
+          <material><ambient>0 0.5 1 1</ambient><diffuse>0 0.5 1 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         OBSTACLES (simulate chairs / carts in hallway)
+         ═══════════════════════════════════════════════════════════ -->
+
+    <!-- Chair near room 303 -->
+    <model name="obstacle_chair_1">
+      <static>false</static>
+      <pose>3.5 0.5 0.25 0 0 0</pose>
+      <link name="link">
+        <inertial><mass>5</mass></inertial>
+        <collision name="c"><geometry><box><size>0.5 0.5 0.5</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.5 0.5 0.5</size></box></geometry>
+          <material><ambient>0.6 0.4 0.2 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- Cart blocking part of hallway -->
+    <model name="obstacle_cart_1">
+      <static>false</static>
+      <pose>-5 -0.8 0.4 0 0 0.3</pose>
+      <link name="link">
+        <inertial><mass>20</mass></inertial>
+        <collision name="c"><geometry><box><size>0.8 0.5 0.8</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.8 0.5 0.8</size></box></geometry>
+          <material><ambient>0.7 0.7 0.7 1</ambient></material></visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

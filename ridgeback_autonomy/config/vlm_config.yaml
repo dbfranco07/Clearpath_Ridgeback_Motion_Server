@@ -1,0 +1,49 @@
+# VLM Perception Node Configuration
+# Adjust vllm_endpoint and model_name for your deployment
+
+vlm_perception:
+  ros__parameters:
+    # VLLM server running Qwen2.5-VL-27B (or change to your model)
+    # Update this IP to wherever your VLLM server is running
+    vllm_endpoint: http://10.158.36.90:8000/v1/chat/completions
+
+    # Model identifier as loaded by VLLM
+    # For Qwen: "Qwen/Qwen2.5-VL-7B-Instruct" or "Qwen/Qwen2.5-VL-72B-Instruct"
+    model_name: Qwen/Qwen2.5-VL-7B-Instruct
+
+    # How often to capture and analyze a frame
+    # Slower during normal operation; can be reduced when actively searching
+    capture_interval_s: 3.0
+
+    # Image quality settings (smaller = faster VLM response)
+    jpeg_quality: 85
+    max_image_width: 640       # Resize image to this width before sending
+
+    # HTTP timeout for VLLM requests (27B model may be slow)
+    request_timeout_s: 20.0
+
+    # Logging
+    max_log_entries: 100
+    active: true               # Set false to disable VLM (save compute)
+
+    # ROS2 topics
+    image_topic: /r100_0140/image/compressed
+    perception_topic: /vlm/perception
+
+spatial_memory:
+  ros__parameters:
+    db_path: ~/ridgeback_memory.db
+    odom_topic: /r100_0140/platform/odom/filtered
+    perception_topic: /vlm/perception
+    auto_store_detections: true      # Automatically store VLM room detections
+    min_confidence_to_store: 0.6     # Minimum confidence before storing
+
+mission_orchestrator:
+  ros__parameters:
+    odom_topic: /r100_0140/platform/odom/filtered
+    map_topic: /map
+    nav2_action: navigate_to_pose
+    explore_goal_tolerance_m: 0.8
+    arrive_tolerance_m: 1.0
+    status_rate_hz: 2.0
+    max_exploration_time_s: 600.0    # 10 minute exploration timeout
