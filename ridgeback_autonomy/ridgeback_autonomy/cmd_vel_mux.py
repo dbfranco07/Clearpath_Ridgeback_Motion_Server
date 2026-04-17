@@ -40,6 +40,7 @@ class CmdVelMux(Node):
         self.declare_parameter('publish_rate_hz', 20.0)
         self.declare_parameter('apply_axis_mask', True)
         self.declare_parameter('axis_mask_status_timeout_s', 0.5)
+        self.declare_parameter('require_safety_status', True)
 
         output_topic = self.get_parameter('output_topic').value
         self.safety_timeout = self.get_parameter('safety_timeout_s').value
@@ -48,6 +49,7 @@ class CmdVelMux(Node):
         publish_rate = self.get_parameter('publish_rate_hz').value
         self.apply_axis_mask = self.get_parameter('apply_axis_mask').value
         self.mask_timeout = self.get_parameter('axis_mask_status_timeout_s').value
+        self.require_safety_status = self.get_parameter('require_safety_status').value
 
         # QoS
         reliable_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
@@ -144,10 +146,11 @@ class CmdVelMux(Node):
         status_stale = (time.time() - self.status_last_time) > self.mask_timeout
 
         if status_stale:
-            # No recent safety data — fail safe: zero everything
-            out.linear.x = 0.0
-            out.linear.y = 0.0
-            out.angular.z = 0.0
+            if self.require_safety_status:
+                # No recent safety data — fail safe: zero everything
+                out.linear.x = 0.0
+                out.linear.y = 0.0
+                out.angular.z = 0.0
             return out
 
         if out.linear.x > 0 and self._block_pos_x:

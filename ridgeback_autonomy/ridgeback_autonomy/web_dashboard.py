@@ -725,13 +725,13 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
   <!-- Teleop -->
   <div class="panel" id="teleop-panel">
     <h2>MANUAL CONTROL</h2>
-    <div style="font-size:0.7rem; color:#888; margin-bottom:4px">WASD/Arrows=move Q/E=rotate Space=stop</div>
+    <div style="font-size:0.7rem; color:#888; margin-bottom:4px">WASD/Arrows=move Q/E=rotate Space=stop | Click dir=start, click again=stop</div>
     <div class="dpad">
       <button class="dpad-btn" id="btn-fl"  data-lin="1"  data-lat="1"  data-ang="0">↖</button>
       <button class="dpad-btn" id="btn-f"   data-lin="1"  data-lat="0"  data-ang="0">↑</button>
       <button class="dpad-btn" id="btn-fr"  data-lin="1"  data-lat="-1" data-ang="0">↗</button>
       <button class="dpad-btn" id="btn-sl"  data-lin="0"  data-lat="1"  data-ang="0">←</button>
-      <button class="dpad-btn dpad-stop" id="btn-stop" onclick="sendStop()">■</button>
+      <button class="dpad-btn dpad-stop" id="btn-stop" onclick="stopTeleop()">■</button>
       <button class="dpad-btn" id="btn-sr"  data-lin="0"  data-lat="-1" data-ang="0">→</button>
       <button class="dpad-btn" id="btn-bl"  data-lin="-1" data-lat="1"  data-ang="0">↙</button>
       <button class="dpad-btn" id="btn-b"   data-lin="-1" data-lat="0"  data-ang="0">↓</button>
@@ -830,19 +830,17 @@ async function sendMissionCmd(cmd) {
 
 // ── Teleop Buttons ────────────────────────────────────────────────────────
 document.querySelectorAll('.dpad-btn[data-lin]').forEach(btn => {
-  btn.addEventListener('mousedown', () => startBtnTeleop(btn));
-  btn.addEventListener('touchstart', e => { e.preventDefault(); startBtnTeleop(btn); });
+  btn.addEventListener('click', () => toggleBtnTeleop(btn));
 });
-document.addEventListener('mouseup', stopTeleop);
-document.addEventListener('touchend', stopTeleop);
 
-function startBtnTeleop(btn) {
+function toggleBtnTeleop(btn) {
   if (keyTeleopActive) return;
+  if (activeBtn === btn) { stopTeleop(); return; }
   if (activeBtn) { activeBtn.classList.remove('active'); }
   activeBtn = btn;
   btn.classList.add('active');
-  sendTeleopFromBtn(btn);
   clearInterval(teleopInterval);
+  sendTeleopFromBtn(btn);
   teleopInterval = setInterval(() => sendTeleopFromBtn(btn), 80);
 }
 
