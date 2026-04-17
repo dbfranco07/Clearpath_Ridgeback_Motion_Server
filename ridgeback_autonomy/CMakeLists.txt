@@ -6,6 +6,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(std_msgs REQUIRED)
@@ -36,10 +37,7 @@ install(PROGRAMS
 )
 
 # Install Python package for imports
-install(DIRECTORY ridgeback_autonomy/
-  DESTINATION lib/python3/dist-packages/${PROJECT_NAME}
-  FILES_MATCHING PATTERN "*.py"
-)
+ament_python_install_package(${PROJECT_NAME})
 
 # Install config files
 install(DIRECTORY config/

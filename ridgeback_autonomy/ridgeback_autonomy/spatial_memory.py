@@ -78,7 +78,7 @@ class SpatialMemoryNode(Node):
         self.declare_parameter('auto_store_detections', True)  # Auto-store VLM detections
         self.declare_parameter('min_confidence_to_store', 0.6)
 
-        db_path = self.get_parameter('db_path').value
+        db_path = os.path.expanduser(self.get_parameter('db_path').value)
         odom_topic = self.get_parameter('odom_topic').value
         perception_topic = self.get_parameter('perception_topic').value
         self.auto_store = self.get_parameter('auto_store_detections').value
