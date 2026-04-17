@@ -30,6 +30,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import CompressedImage, LaserScan, BatteryState
 from nav_msgs.msg import Odometry, OccupancyGrid
+from std_msgs.msg import Bool
 from ridgeback_autonomy.msg import SafetyStatus, MissionStatus, Perception
 from ridgeback_autonomy.srv import MissionCommand, QueryLocation, GetAllLocations
 
@@ -59,6 +60,10 @@ class TeleopCmd(BaseModel):
 
 class MissionCmd(BaseModel):
     command: str
+
+
+class RearOverrideCmd(BaseModel):
+    enabled: bool
 
 
 # ── ROS2 Node ──────────────────────────────────────────────────────────────
@@ -118,6 +123,8 @@ class AutonomousDashboard(Node):
 
         # Publishers (teleop goes through cmd_vel_mux)
         self.teleop_pub = self.create_publisher(Twist, '/cmd_vel_teleop', cmd_qos)
+        # Latched so safety_controller gets the current state even after restart
+        self.rear_override_pub = self.create_publisher(Bool, '/safety/rear_override', latch_qos)
 
         # Service clients
         self.mission_client = self.create_client(
@@ -165,8 +172,14 @@ class AutonomousDashboard(Node):
         # Safety
         self.safety_status = {
             'is_safe': True, 'closest_m': 99.0,
-            'stop_active': False, 'status_text': 'No data', 'lidar_active': False
+            'stop_active': False, 'status_text': 'No data', 'lidar_active': False,
+            'block_pos_x': False, 'block_neg_x': False,
+            'block_pos_y': False, 'block_neg_y': False,
+            'block_pos_yaw': False, 'block_neg_yaw': False,
+            'clearance_fwd': -1.0, 'clearance_rev': -1.0,
+            'clearance_left': -1.0, 'clearance_right': -1.0,
         }
+        self.rear_override_active = False
 
         # Mission
         self.mission_status = {
@@ -275,8 +288,24 @@ class AutonomousDashboard(Node):
             'closest_m': msg.closest_obstacle_m,
             'stop_active': msg.emergency_stop_active,
             'status_text': msg.status_text,
-            'lidar_active': msg.lidar_active
+            'lidar_active': msg.lidar_active,
+            'block_pos_x': msg.block_pos_x,
+            'block_neg_x': msg.block_neg_x,
+            'block_pos_y': msg.block_pos_y,
+            'block_neg_y': msg.block_neg_y,
+            'block_pos_yaw': msg.block_pos_yaw,
+            'block_neg_yaw': msg.block_neg_yaw,
+            'clearance_fwd': msg.clearance_forward_m,
+            'clearance_rev': msg.clearance_reverse_m,
+            'clearance_left': msg.clearance_left_m,
+            'clearance_right': msg.clearance_right_m,
         }
+
+    def set_rear_override(self, enabled: bool):
+        self.rear_override_active = enabled
+        msg = Bool()
+        msg.data = enabled
+        self.rear_override_pub.publish(msg)
 
     def _mission_cb(self, msg: MissionStatus):
         self.mission_status = {
@@ -513,6 +542,12 @@ def stop():
     return {'ok': True}
 
 
+@app.post('/rear_override')
+def rear_override(cmd: RearOverrideCmd):
+    ros_node.set_rear_override(cmd.enabled)
+    return {'ok': True, 'enabled': cmd.enabled}
+
+
 @app.post('/reset_pose')
 def reset_pose():
     ros_node.reset_pose()
@@ -611,6 +646,16 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 .safety-stop { color: #ed1c24; font-weight: bold; }
 .stat { color: #888; }
 .stat span { color: #4fc3f7; }
+/* Directional block indicators */
+.block-grid { display: grid; grid-template-columns: repeat(3, 28px); grid-template-rows: repeat(3, 28px); gap: 2px; margin: 6px auto; width: fit-content; }
+.block-cell { width: 28px; height: 28px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 0.65rem; font-weight: bold; }
+.block-free { background: rgba(76,175,80,0.2); border: 1px solid #4caf50; color: #4caf50; }
+.block-blocked { background: rgba(237,28,36,0.4); border: 1px solid #ed1c24; color: #ed1c24; }
+.block-na { background: rgba(100,100,100,0.1); border: 1px solid rgba(255,255,255,0.1); color: #555; }
+.btn-rear-override { font-size: 0.7rem; padding: 3px 8px; }
+.btn-rear-override.active { background: #ed1c24; color: #fff; }
+.clearance-row { display: flex; gap: 8px; font-size: 0.7rem; color: #888; flex-wrap: wrap; margin-top: 4px; }
+.clearance-row span { color: #4fc3f7; }
 /* LiDAR mini canvas in teleop panel */
 #lidar-mini { display: block; margin: 8px auto 0; }
 /* Memory panel (inside mission panel) */
@@ -713,6 +758,31 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
       <button class="btn btn-secondary" style="padding:2px 6px; font-size:0.7rem" onclick="resetPose()">⊙</button>
     </div>
     <canvas id="lidar-mini" width="200" height="200"></canvas>
+    <!-- Directional block indicators -->
+    <div style="margin-top:8px; font-size:0.7rem; color:#888">AXIS BLOCKS</div>
+    <div class="block-grid">
+      <div class="block-cell block-na" id="blk-fl">↖</div>
+      <div class="block-cell block-free" id="blk-f">+X</div>
+      <div class="block-cell block-na" id="blk-fr">↗</div>
+      <div class="block-cell block-free" id="blk-l">+Y</div>
+      <div class="block-cell block-na" style="font-size:0.5rem">BOT</div>
+      <div class="block-cell block-free" id="blk-r">-Y</div>
+      <div class="block-cell block-na" id="blk-rl">↙</div>
+      <div class="block-cell block-free" id="blk-b">-X</div>
+      <div class="block-cell block-na" id="blk-rr">↘</div>
+    </div>
+    <div style="display:flex; gap:6px; align-items:center; margin-top:4px">
+      <div class="block-cell block-free" id="blk-ccw" style="width:auto; padding:0 6px">↺ CCW</div>
+      <div class="block-cell block-free" id="blk-cw"  style="width:auto; padding:0 6px">↻ CW</div>
+      <button class="btn btn-secondary btn-rear-override" id="btn-rear-override"
+              onclick="toggleRearOverride()">REV UNLOCK</button>
+    </div>
+    <div class="clearance-row">
+      Fwd:<span id="clr-fwd">--</span>m
+      Rev:<span id="clr-rev">--</span>m
+      L:<span id="clr-l">--</span>m
+      R:<span id="clr-r">--</span>m
+    </div>
   </div>
 
   <!-- VLM Perception Log -->
@@ -874,6 +944,35 @@ async function updateStatus() {
       safetyEl.textContent = `● SAFETY OK  ${safety.closest_m > 0 ? safety.closest_m.toFixed(1)+'m' : ''}`;
     }
 
+    // Per-axis block indicators
+    function setBlock(id, blocked) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.className = el.className.replace(/block-(free|blocked)/g, blocked ? 'block-blocked' : 'block-free');
+    }
+    setBlock('blk-f',   safety.block_pos_x);
+    setBlock('blk-b',   safety.block_neg_x);
+    setBlock('blk-l',   safety.block_pos_y);
+    setBlock('blk-r',   safety.block_neg_y);
+    setBlock('blk-ccw', safety.block_pos_yaw);
+    setBlock('blk-cw',  safety.block_neg_yaw);
+    // Diagonal indicators: blocked if either contributing axis is blocked
+    setBlock('blk-fl', safety.block_pos_x || safety.block_pos_y);
+    setBlock('blk-fr', safety.block_pos_x || safety.block_neg_y);
+    setBlock('blk-rl', safety.block_neg_x || safety.block_pos_y);
+    setBlock('blk-rr', safety.block_neg_x || safety.block_neg_y);
+
+    // Clearance display
+    function fmtClr(v) { return (v >= 0) ? v.toFixed(2) : 'blind'; }
+    const cFwd = document.getElementById('clr-fwd');
+    const cRev = document.getElementById('clr-rev');
+    const cL   = document.getElementById('clr-l');
+    const cR   = document.getElementById('clr-r');
+    if (cFwd) cFwd.textContent = fmtClr(safety.clearance_fwd ?? -1);
+    if (cRev) cRev.textContent = fmtClr(safety.clearance_rev ?? -1);
+    if (cL)   cL.textContent   = fmtClr(safety.clearance_left ?? -1);
+    if (cR)   cR.textContent   = fmtClr(safety.clearance_right ?? -1);
+
     // Mission state
     const stateEl = document.getElementById('mission-state');
     stateEl.className = `mission-state state-${mission.state}`;
@@ -1010,6 +1109,23 @@ async function loadMemory() {
         <span class="memory-pos">(${r.x.toFixed(1)}, ${r.y.toFixed(1)}) ×${r.count}</span>
        </div>`
     ).join('');
+  } catch(e) {}
+}
+
+// ── Rear Override Toggle ──────────────────────────────────────────────────
+let rearOverrideEnabled = false;
+
+async function toggleRearOverride() {
+  rearOverrideEnabled = !rearOverrideEnabled;
+  const btn = document.getElementById('btn-rear-override');
+  btn.textContent = rearOverrideEnabled ? 'REV LOCKED' : 'REV UNLOCK';
+  btn.classList.toggle('active', rearOverrideEnabled);
+  try {
+    await fetch('/rear_override', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: rearOverrideEnabled})
+    });
   } catch(e) {}
 }
 

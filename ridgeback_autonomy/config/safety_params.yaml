@@ -15,10 +15,22 @@ safety_controller:
     cmd_vel_override_topic: /safety/cmd_vel_override
     status_topic: /safety/status
 
+    # Soft bumper — per-axis directional block
+    chassis_half_x_m: 0.48          # Robot half-length (front/rear from LiDAR)
+    chassis_half_y_m: 0.40          # Robot half-width  (left/right from LiDAR)
+    axis_block_enter_m: 0.20        # Block axis when obstacle < 0.20m from body edge
+    axis_block_exit_m: 0.25         # Release axis when obstacle > 0.25m from body edge
+    axis_block_release_scans: 3     # Consecutive clear scans before releasing block
+    rotation_corner_margin_m: 0.20  # Corner clearance required to allow rotation
+    rear_blind_default_block: true  # Block reverse (-x) by default (no rear LiDAR)
+    min_valid_range_m: 0.05         # Drop LiDAR returns below this distance
+
 cmd_vel_mux:
   ros__parameters:
     output_topic: /r100_0140/cmd_vel
-    safety_timeout_s: 1.0      # Safety override holds for 1s after last trigger
-    nav2_timeout_s: 0.5        # Nav2 source times out if no new cmd for 0.5s
-    teleop_timeout_s: 0.3      # Teleop source times out quickly for safety
+    safety_timeout_s: 1.0           # Safety override holds for 1s after last trigger
+    nav2_timeout_s: 0.5             # Nav2 source times out if no new cmd for 0.5s
+    teleop_timeout_s: 0.3           # Teleop source times out quickly for safety
     publish_rate_hz: 20.0
+    apply_axis_mask: true           # Enable per-axis soft bumper masking
+    axis_mask_status_timeout_s: 0.5 # Fail-safe: block all if /safety/status stale
