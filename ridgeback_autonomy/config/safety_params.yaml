@@ -28,9 +28,16 @@ safety_controller:
 cmd_vel_mux:
   ros__parameters:
     output_topic: /r100_0140/cmd_vel
-    safety_timeout_s: 1.0           # Safety override holds for 1s after last trigger
+    safety_timeout_s: 0.2           # Safety override holds for 0.2s after last trigger
     nav2_timeout_s: 0.5             # Nav2 source times out if no new cmd for 0.5s
-    teleop_timeout_s: 0.3           # Teleop source times out quickly for safety
+    teleop_timeout_s: 0.5           # Teleop source window (motion_server publishes at 10Hz)
     publish_rate_hz: 20.0
     apply_axis_mask: true           # Enable per-axis soft bumper masking
-    axis_mask_status_timeout_s: 0.5 # Fail-safe: block all if /safety/status stale
+    axis_mask_status_timeout_s: 1.0 # Fail-safe: block all if /safety/status stale
+    require_safety_status: true
+
+motion_server:
+  ros__parameters:
+    output_topic: /cmd_vel_teleop
+    publish_rate_hz: 10.0
+    watchdog_s: 5.0                 # Stop if no command received for 5s

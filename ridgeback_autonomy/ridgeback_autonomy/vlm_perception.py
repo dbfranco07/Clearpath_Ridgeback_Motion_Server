@@ -21,13 +21,12 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from sensor_msgs.msg import CompressedImage
 
 import base64
-import json
 import re
 import threading
 import time
-import urllib.request
-import urllib.error
 from datetime import datetime
+
+from openai import OpenAI
 
 import numpy as np
 
@@ -54,7 +53,7 @@ class VlmPerceptionNode(Node):
         super().__init__('vlm_perception')
 
         # Parameters
-        self.declare_parameter('vllm_endpoint', 'http://localhost:8000/v1/chat/completions')
+        self.declare_parameter('vllm_endpoint', 'http://localhost:8000')
         self.declare_parameter('model_name', 'Qwen/Qwen2.5-VL-7B-Instruct')
         self.declare_parameter('capture_interval_s', 3.0)     # Seconds between captures
         self.declare_parameter('jpeg_quality', 85)
@@ -81,18 +80,19 @@ class VlmPerceptionNode(Node):
                 'Install with: pip install python-dotenv'
             )
 
-        self.vllm_endpoint = self.get_parameter('vllm_endpoint').value
         self.model_name = self.get_parameter('model_name').value
-
-        if 'VLM_ENDPOINT' in _dotenv:
-            host = _dotenv['VLM_ENDPOINT'].rstrip('/')
-            port = _dotenv.get('VLM_PORT', '')
-            self.vllm_endpoint = f'{host}:{port}/v1/chat/completions' if port else f'{host}/v1/chat/completions'
-            self.get_logger().info(f'.env: VLM endpoint -> {self.vllm_endpoint}')
 
         if 'VLM_MODEL_NAME' in _dotenv:
             self.model_name = _dotenv['VLM_MODEL_NAME']
             self.get_logger().info(f'.env: model -> {self.model_name}')
+
+        # Build OpenAI-compatible client pointing at the vLLM server
+        _host = _dotenv.get('VLM_ENDPOINT', 'http://localhost').rstrip('/')
+        _port = _dotenv.get('VLM_PORT', '')
+        _base_url = f'{_host}:{_port}/v1' if _port else f'{_host}/v1'
+        self.enable_thinking = _dotenv.get('VLM_THINK', 'false').lower() == 'true'
+        self.vlm_client = OpenAI(base_url=_base_url, api_key='EMPTY')
+
         self.capture_interval = self.get_parameter('capture_interval_s').value
         self.jpeg_quality = self.get_parameter('jpeg_quality').value
         self.max_width = self.get_parameter('max_image_width').value
@@ -130,8 +130,9 @@ class VlmPerceptionNode(Node):
         self.capture_timer = self.create_timer(self.capture_interval, self._capture_timer_cb)
 
         self.get_logger().info('VLM Perception Node started')
-        self.get_logger().info(f'  VLLM endpoint: {self.vllm_endpoint}')
+        self.get_logger().info(f'  VLLM base URL: {_base_url}')
         self.get_logger().info(f'  Model: {self.model_name}')
+        self.get_logger().info(f'  Thinking: {self.enable_thinking}')
         self.get_logger().info(f'  Capture interval: {self.capture_interval}s')
 
     def _image_cb(self, msg: CompressedImage):
@@ -174,35 +175,30 @@ class VlmPerceptionNode(Node):
             if img_b64 is None:
                 return
 
-            # Build request payload (OpenAI-compatible vision format)
-            payload = {
-                'model': self.model_name,
-                'messages': [
+            # Query vLLM via OpenAI-compatible SDK
+            t0 = time.time()
+            response = self.vlm_client.chat.completions.create(
+                model=self.model_name,
+                messages=[
                     {'role': 'system', 'content': SYSTEM_PROMPT},
                     {
                         'role': 'user',
                         'content': [
                             {
                                 'type': 'image_url',
-                                'image_url': {
-                                    'url': f'data:image/jpeg;base64,{img_b64}'
-                                }
+                                'image_url': {'url': f'data:image/jpeg;base64,{img_b64}'}
                             },
                             {'type': 'text', 'text': USER_PROMPT}
                         ]
                     }
                 ],
-                'max_tokens': 256,
-                'temperature': 0.1
-            }
-
-            # HTTP POST to VLLM
-            t0 = time.time()
-            response_text = self._http_post(payload)
+                max_tokens=256,
+                temperature=0.1,
+                timeout=self.request_timeout,
+                extra_body={'chat_template_kwargs': {'enable_thinking': self.enable_thinking}}
+            )
             latency_ms = (time.time() - t0) * 1000
-
-            if response_text is None:
-                return
+            response_text = response.choices[0].message.content
 
             # Parse response
             parsed = self._parse_response(response_text)
@@ -277,29 +273,6 @@ class VlmPerceptionNode(Node):
 
         except Exception as e:
             self.get_logger().error(f'Image prepare failed: {e}')
-            return None
-
-    def _http_post(self, payload: dict) -> str | None:
-        """Send POST request to VLLM and return the response content string."""
-        try:
-            data = json.dumps(payload).encode('utf-8')
-            req = urllib.request.Request(
-                self.vllm_endpoint,
-                data=data,
-                headers={'Content-Type': 'application/json'},
-                method='POST'
-            )
-            with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
-                result = json.loads(resp.read().decode('utf-8'))
-                return result['choices'][0]['message']['content']
-        except urllib.error.URLError as e:
-            self.get_logger().warn(f'VLLM request failed: {e.reason}')
-            return None
-        except (KeyError, json.JSONDecodeError) as e:
-            self.get_logger().warn(f'VLLM response parse error: {e}')
-            return None
-        except Exception as e:
-            self.get_logger().error(f'VLLM unexpected error: {e}')
             return None
 
     def _parse_response(self, text: str) -> dict:

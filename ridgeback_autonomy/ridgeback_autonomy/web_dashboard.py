@@ -33,6 +33,7 @@ from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import Bool
 from ridgeback_autonomy.msg import SafetyStatus, MissionStatus, Perception
 from ridgeback_autonomy.srv import MissionCommand, QueryLocation, GetAllLocations
+from ridgeback_image_motion.srv import Motion
 
 import cv2
 import numpy as np
@@ -125,13 +126,16 @@ class AutonomousDashboard(Node):
             Perception, '/vlm/perception', self._perception_cb, reliable_qos
         )
 
-        # Publishers (teleop goes through cmd_vel_mux)
+        # Publishers — fallback if motion_service unavailable
         self.teleop_pub = self.create_publisher(Twist, '/cmd_vel_teleop', cmd_qos)
         # Latched so safety_controller gets the current state even after restart
         self.rear_override_pub = self.create_publisher(Bool, '/safety/rear_override', latch_qos)
         self.soft_bumper_pub = self.create_publisher(Bool, '/safety/soft_bumper_enabled', latch_qos)
 
         # Service clients
+        self.motion_client = self.create_client(
+            Motion, 'motion_service', callback_group=self.cb_group
+        )
         self.mission_client = self.create_client(
             MissionCommand, 'mission/command', callback_group=self.cb_group
         )
@@ -351,11 +355,19 @@ class AutonomousDashboard(Node):
     # ── Teleop ─────────────────────────────────────────────────────────────
 
     def teleop(self, linear: float, lateral: float, angular: float):
-        msg = Twist()
-        msg.linear.x = float(linear)
-        msg.linear.y = float(lateral)
-        msg.angular.z = float(angular)
-        self.teleop_pub.publish(msg)
+        if self.motion_client.service_is_ready():
+            req = Motion.Request()
+            req.linear = float(linear)
+            req.lateral = float(lateral)
+            req.angular = float(angular)
+            self.motion_client.call_async(req)
+        else:
+            # Fallback: publish through cmd_vel_mux
+            msg = Twist()
+            msg.linear.x = float(linear)
+            msg.linear.y = float(lateral)
+            msg.angular.z = float(angular)
+            self.teleop_pub.publish(msg)
 
     def stop_teleop(self):
         self.teleop(0.0, 0.0, 0.0)
@@ -869,7 +881,7 @@ function toggleBtnTeleop(btn) {
   btn.classList.add('active');
   clearInterval(teleopInterval);
   sendTeleopFromBtn(btn);
-  teleopInterval = setInterval(() => sendTeleopFromBtn(btn), 80);
+  teleopInterval = setInterval(() => sendTeleopFromBtn(btn), 50);
 }
 
 function sendTeleopFromBtn(btn) {
