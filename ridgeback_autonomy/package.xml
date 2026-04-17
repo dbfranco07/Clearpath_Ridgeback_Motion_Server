@@ -4,6 +4,7 @@
   <name>ridgeback_autonomy</name>
   <version>1.0.0</version>
   <description>Autonomous navigation stack for Clearpath Ridgeback R100 — SLAM, Nav2, VLM perception, spatial memory, safety controller</description>
+  <maintainer email="dbfranco@up.edu.ph">Deo Franco</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
