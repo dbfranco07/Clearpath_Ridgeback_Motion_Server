@@ -6,7 +6,7 @@ safety_controller:
     # Ridgeback R100 is roughly 960×793mm — use 0.5m padding for danger zone
     danger_zone_m: 0.45        # Hard stop: obstacle closer than this → emergency stop
     warning_zone_m: 0.8        # Warning: obstacle in this range (shown in UI)
-    lidar_timeout_s: 2.0       # Seconds without LiDAR data before emergency stop
+    lidar_timeout_s: 4.0       # Seconds without LiDAR data before emergency stop
     front_cone_deg: 60.0       # Check ±60° ahead for forward-motion stops
     status_rate_hz: 5.0
 

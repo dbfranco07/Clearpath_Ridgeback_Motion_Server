@@ -149,6 +149,7 @@ class AutonomousDashboard(Node):
         self.latest_frame = None
         self.frame_lock = threading.Lock()
         self.frame_event = threading.Event()
+        self.last_frame_time = 0.0
 
         # Odometry
         self.odom_x = 0.0
@@ -210,6 +211,7 @@ class AutonomousDashboard(Node):
     def _image_cb(self, msg: CompressedImage):
         with self.frame_lock:
             self.latest_frame = bytes(msg.data)
+        self.last_frame_time = time.time()
         self.frame_event.set()
 
     def _odom_cb(self, msg: Odometry):
@@ -382,6 +384,13 @@ class AutonomousDashboard(Node):
         with self.frame_lock:
             return self.latest_frame
 
+    def get_camera_status(self) -> dict:
+        age = time.time() - self.last_frame_time if self.last_frame_time > 0 else -1.0
+        return {
+            'has_frame': self.last_frame_time > 0,
+            'last_frame_age_s': round(age, 1) if age >= 0 else -1.0
+        }
+
     def mjpeg_generator(self):
         while True:
             self.frame_event.wait(timeout=2.0)
@@ -519,6 +528,11 @@ def video_feed():
     )
 
 
+@app.get('/camera_status')
+def camera_status():
+    return JSONResponse(ros_node.get_camera_status())
+
+
 @app.get('/status')
 def status():
     return JSONResponse(ros_node.get_status())
@@ -611,12 +625,13 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 .header { background: rgba(0,0,0,0.5); border-bottom: 2px solid #f7941d; padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; }
 .header h1 { color: #f7941d; font-size: 1.2rem; letter-spacing: 2px; }
 .header .sub { color: #888; font-size: 0.75rem; }
-.grid { display: grid; grid-template-columns: 1fr 1fr 1fr; grid-template-rows: auto auto; gap: 12px; padding: 12px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; grid-template-rows: auto auto; gap: 12px; padding: 12px; }
 .panel { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px; }
 .panel h2 { color: #f7941d; font-size: 0.85rem; letter-spacing: 1px; margin-bottom: 10px; border-bottom: 1px solid rgba(247,148,29,0.3); padding-bottom: 6px; }
 /* Camera */
-#camera-panel { grid-column: 1; grid-row: 1; }
+#camera-panel { grid-column: 1; grid-row: 1; position: relative; }
 #camera-feed { width: 100%; border-radius: 4px; display: block; }
+#camera-overlay { display: none; position: absolute; top: 36px; left: 12px; right: 12px; background: rgba(237,28,36,0.85); color: #fff; font-size: 0.75rem; padding: 6px 10px; border-radius: 4px; border: 1px solid #ed1c24; text-align: center; }
 /* Mission Control */
 #mission-panel { grid-column: 2; grid-row: 1; }
 .mission-input { display: flex; gap: 8px; margin-bottom: 10px; }
@@ -646,6 +661,11 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 /* Map Panel */
 #map-panel { grid-column: 3; grid-row: 1 / 3; }
 #map-canvas { width: 100%; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #1a1a2e; }
+/* LiDAR Panel */
+#lidar-panel { grid-column: 4; grid-row: 1 / 3; }
+#lidar-canvas { display: block; width: 100%; height: 500px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #0a0a0a; }
+.lidar-info { display: flex; gap: 12px; margin-top: 6px; font-size: 0.75rem; color: #888; }
+.lidar-info span { color: #4fc3f7; }
 .map-legend { display: flex; gap: 12px; margin-top: 6px; font-size: 0.7rem; }
 .legend-item { display: flex; align-items: center; gap: 4px; }
 .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
@@ -664,6 +684,8 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 .pose-val span { color: #4fc3f7; font-size: 0.9rem; }
 /* VLM Log Panel */
 #vlm-panel { grid-column: 2; grid-row: 2; }
+/* LiDAR mini canvas in teleop panel — hidden, replaced by full panel */
+#lidar-mini { display: none; }
 #vlm-log { height: 260px; overflow-y: auto; font-size: 0.72rem; }
 .vlm-entry { padding: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 4px; }
 .vlm-time { color: #888; }
@@ -711,6 +733,7 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
   <div class="panel" id="camera-panel">
     <h2>CAMERA FEED</h2>
     <img id="camera-feed" src="/video_feed" alt="Camera Feed">
+    <div id="camera-overlay">⚠ NO CAMERA — run image_publisher on Ridgeback</div>
   </div>
 
   <!-- Mission Control -->
@@ -751,6 +774,16 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
       <div class="legend-item"><div class="legend-dot" style="background:#1e1e1e"></div> Obstacle</div>
       <div class="legend-item"><div class="legend-dot" style="background:#f7941d"></div> Robot</div>
       <div class="legend-item"><div class="legend-dot" style="background:#4caf50"></div> Room</div>
+    </div>
+  </div>
+
+  <!-- LiDAR Scan -->
+  <div class="panel" id="lidar-panel">
+    <h2>LIDAR SCAN</h2>
+    <canvas id="lidar-canvas" width="600" height="600"></canvas>
+    <div class="lidar-info">
+      Closest: <span id="lidar-closest">--</span>m &nbsp;
+      Points: <span id="lidar-points">--</span>
     </div>
   </div>
 
@@ -837,8 +870,8 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 // ── State ────────────────────────────────────────────────────────────────
 let activeBtn = null;
 let teleopInterval = null;
-let keysDown = {};
-let keyTeleopActive = false;
+let keyboardInterval = null;
+const keyState = {};
 
 // ── Mission Control ───────────────────────────────────────────────────────
 function sendMission() {
@@ -874,7 +907,7 @@ document.querySelectorAll('.dpad-btn[data-lin]').forEach(btn => {
 });
 
 function toggleBtnTeleop(btn) {
-  if (keyTeleopActive) return;
+  if (keyboardInterval) return;
   if (activeBtn === btn) { stopTeleop(); return; }
   if (activeBtn) { activeBtn.classList.remove('active'); }
   activeBtn = btn;
@@ -894,7 +927,7 @@ function sendTeleopFromBtn(btn) {
 }
 
 function stopTeleop() {
-  if (keyTeleopActive) return;
+  if (keyboardInterval) return;
   clearInterval(teleopInterval);
   if (activeBtn) { activeBtn.classList.remove('active'); activeBtn = null; }
   sendStop();
@@ -916,50 +949,65 @@ async function resetPose() {
   fetch('/reset_pose', {method: 'POST'}).catch(() => {});
 }
 
-// ── Keyboard Teleop ───────────────────────────────────────────────────────
-document.addEventListener('keydown', e => {
-  if (e.target.tagName === 'INPUT') return;
-  if (keysDown[e.key]) return;
-  keysDown[e.key] = true;
-  if (['w','a','s','d','q','e','ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
-    e.preventDefault();
-    keyTeleopActive = true;
-    sendKeyTeleop();
-  }
-});
-document.addEventListener('keyup', e => {
-  delete keysDown[e.key];
-  if (!Object.keys(keysDown).some(k =>
-    ['w','a','s','d','q','e','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(k))) {
-    keyTeleopActive = false;
-    sendStop();
-  } else {
-    sendKeyTeleop();
-  }
-});
+// ── Keyboard Teleop — 20 Hz repeat while keys held ────────────────────────
+const MOVE_KEYS = ['w','a','s','d','q','e','arrowup','arrowdown','arrowleft','arrowright'];
 
-function sendKeyTeleop() {
+function updateFromKeyboard() {
   const linSpd = parseFloat(document.getElementById('spd-linear').value);
   const angSpd = parseFloat(document.getElementById('spd-angular').value);
   let lin = 0, lat = 0, ang = 0;
-  if (keysDown['w'] || keysDown['ArrowUp'])    lin  =  1;
-  if (keysDown['s'] || keysDown['ArrowDown'])  lin  = -1;
-  if (keysDown['a'] || keysDown['ArrowLeft'])  lat  =  1;
-  if (keysDown['d'] || keysDown['ArrowRight']) lat  = -1;
-  if (keysDown['q']) ang =  1;
-  if (keysDown['e']) ang = -1;
-  if (keysDown[' ']) { sendStop(); return; }
+  if (keyState['w'] || keyState['arrowup'])    lin  =  1;
+  if (keyState['s'] || keyState['arrowdown'])  lin  = -1;
+  if (keyState['a'] || keyState['arrowleft'])  lat  =  1;
+  if (keyState['d'] || keyState['arrowright']) lat  = -1;
+  if (keyState['q']) ang =  1;
+  if (keyState['e']) ang = -1;
   sendTeleop(lin * linSpd, lat * linSpd, ang * angSpd);
 }
+
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  const key = e.key.toLowerCase();
+  if (key === ' ') { e.preventDefault(); sendStop(); return; }
+  if (!MOVE_KEYS.includes(key)) return;
+  e.preventDefault();
+  if (keyState[key]) return;   // already held
+  keyState[key] = true;
+  // Kill button teleop loop when keyboard takes over
+  if (teleopInterval) { clearInterval(teleopInterval); teleopInterval = null; }
+  if (activeBtn) { activeBtn.classList.remove('active'); activeBtn = null; }
+  if (!keyboardInterval) {
+    updateFromKeyboard();
+    keyboardInterval = setInterval(updateFromKeyboard, 50);
+  }
+});
+
+document.addEventListener('keyup', e => {
+  const key = e.key.toLowerCase();
+  delete keyState[key];
+  if (Object.keys(keyState).length === 0 && keyboardInterval) {
+    clearInterval(keyboardInterval);
+    keyboardInterval = null;
+    sendTeleop(0, 0, 0);
+  }
+});
 
 // ── Status Polling ────────────────────────────────────────────────────────
 async function updateStatus() {
   try {
-    const [status, safety, mission] = await Promise.all([
+    const [status, safety, mission, camStatus] = await Promise.all([
       fetch('/status').then(r => r.json()),
       fetch('/safety').then(r => r.json()),
-      fetch('/mission_status').then(r => r.json())
+      fetch('/mission_status').then(r => r.json()),
+      fetch('/camera_status').then(r => r.json())
     ]);
+
+    // Camera availability indicator
+    const camOverlay = document.getElementById('camera-overlay');
+    if (camOverlay) {
+      const noFeed = !camStatus.has_frame || camStatus.last_frame_age_s > 3.0;
+      camOverlay.style.display = noFeed ? 'block' : 'none';
+    }
 
     // Odometry
     document.getElementById('val-x').textContent = status.x.toFixed(2);
@@ -1036,50 +1084,101 @@ async function updateStatus() {
   } catch(e) {}
 }
 
-// ── LiDAR Mini Canvas ────────────────────────────────────────────────────
+// ── LiDAR Canvas ─────────────────────────────────────────────────────────
+const LIDAR_SCALE = 60;       // pixels per meter
+const LIDAR_MAX_RANGE = 4.0;  // meters to display
+
 async function updateLidar() {
   try {
     const data = await fetch('/lidar').then(r => r.json());
     if (!data.ranges) return;
-    drawLidarMini(data);
+    drawLidar(data);
   } catch(e) {}
 }
 
-function drawLidarMini(data) {
-  const canvas = document.getElementById('lidar-mini');
+function drawLidar(data) {
+  const canvas = document.getElementById('lidar-canvas');
+  if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  const cx = canvas.width / 2, cy = canvas.height / 2;
-  const maxPx = canvas.width / 2 - 4;
-  const maxRange = data.range_max || 10;
+  const w = canvas.width, h = canvas.height;
+  const cx = w / 2, cy = h / 2;
+  const rangeMax = Math.min(data.range_max || 10, LIDAR_MAX_RANGE);
 
-  ctx.fillStyle = '#0d0f1a';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Background
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, w, h);
 
-  // Range rings
-  ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+  // Range rings with meter labels
+  ctx.strokeStyle = '#1a2a1a';
   ctx.lineWidth = 1;
-  for (let r = 1; r <= 4; r++) {
+  ctx.font = '11px monospace';
+  ctx.fillStyle = '#2a4a2a';
+  for (let r = 1; r <= rangeMax; r++) {
+    const pr = r * LIDAR_SCALE;
     ctx.beginPath();
-    ctx.arc(cx, cy, r / maxRange * maxPx, 0, 2 * Math.PI);
+    ctx.arc(cx, cy, pr, 0, Math.PI * 2);
     ctx.stroke();
+    ctx.fillText(r + 'm', cx + pr + 3, cy - 3);
   }
 
-  // Scan points
-  data.ranges.forEach((range, i) => {
-    if (!isFinite(range) || range <= 0.05) return;
-    const angle = data.angle_min + i * data.angle_increment - Math.PI / 2;
-    const px = cx + Math.cos(angle) * (range / maxRange * maxPx);
-    const py = cy + Math.sin(angle) * (range / maxRange * maxPx);
-    const t = Math.min(1, range / maxRange);
-    ctx.fillStyle = `hsl(${120 * t}, 90%, 55%)`;
-    ctx.fillRect(px - 1, py - 1, 2, 2);
-  });
+  // Axis cross (forward=up, right=+canvas-x matches robot +y convention)
+  ctx.strokeStyle = '#1a3a1a';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(cx, cy - rangeMax * LIDAR_SCALE - 10); ctx.lineTo(cx, cy + rangeMax * LIDAR_SCALE + 10); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - rangeMax * LIDAR_SCALE - 10, cy); ctx.lineTo(cx + rangeMax * LIDAR_SCALE + 10, cy); ctx.stroke();
+
+  // Forward label
+  ctx.fillStyle = '#2a6a2a';
+  ctx.font = '10px monospace';
+  ctx.fillText('FWD', cx + 4, cy - rangeMax * LIDAR_SCALE - 2);
+
+  // Scan points — forward=up, left=right (robot frame: x=fwd, y=left)
+  let validCount = 0;
+  let closestRange = Infinity;
+  const angleMin = data.angle_min;
+  const angleInc = data.angle_increment;
+
+  for (let i = 0; i < data.ranges.length; i++) {
+    const range = data.ranges[i];
+    if (!isFinite(range) || range < 0.05 || range > rangeMax) continue;
+    validCount++;
+    if (range < closestRange) closestRange = range;
+
+    const angle = angleMin + i * angleInc;
+    // robot x=forward→canvas-up, robot y=left→canvas-left
+    const px = cx - range * Math.sin(angle) * LIDAR_SCALE;
+    const py = cy - range * Math.cos(angle) * LIDAR_SCALE;
+
+    // Distance gradient: red (close) → yellow → green (far)
+    const t = Math.min(range / rangeMax, 1.0);
+    let r, g, b;
+    if (t < 0.33) {
+      r = 255; g = Math.floor(t * 3 * 255); b = 0;
+    } else if (t < 0.66) {
+      r = Math.floor((1 - (t - 0.33) * 3) * 255); g = 255; b = 0;
+    } else {
+      r = 0; g = 255; b = Math.floor((t - 0.66) * 3 * 255);
+    }
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.beginPath();
+    ctx.arc(px, py, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
 
   // Robot dot
   ctx.beginPath();
-  ctx.arc(cx, cy, 5, 0, 2 * Math.PI);
+  ctx.arc(cx, cy, 6, 0, Math.PI * 2);
   ctx.fillStyle = '#f7941d';
   ctx.fill();
+  ctx.strokeStyle = '#ffc107';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Update info bar
+  const elClosest = document.getElementById('lidar-closest');
+  const elPoints = document.getElementById('lidar-points');
+  if (elClosest) elClosest.textContent = isFinite(closestRange) ? closestRange.toFixed(2) : '--';
+  if (elPoints) elPoints.textContent = validCount;
 }
 
 // ── SLAM Map Canvas ───────────────────────────────────────────────────────
@@ -1203,7 +1302,7 @@ async function toggleRearOverride() {
 
 // ── Polling Intervals ─────────────────────────────────────────────────────
 setInterval(updateStatus, 1500);
-setInterval(updateLidar, 250);
+setInterval(updateLidar, 200);
 setInterval(updateMap, 2000);
 setInterval(updatePerceptionLog, 1000);
 setInterval(loadMemory, 5000);
