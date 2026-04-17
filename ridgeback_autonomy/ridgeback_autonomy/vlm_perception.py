@@ -65,8 +65,34 @@ class VlmPerceptionNode(Node):
         self.declare_parameter('perception_topic', '/vlm/perception')
         self.declare_parameter('active', True)                # Can be toggled at runtime
 
+        # .env override — load deployment-specific VLM config.
+        # Looks for .env at $RIDGEBACK_ENV_FILE or $CWD/.env; falls back to yaml params.
+        import os as _os
+        _env_file = _os.environ.get('RIDGEBACK_ENV_FILE', _os.path.join(_os.getcwd(), '.env'))
+        try:
+            from dotenv import dotenv_values as _dotenv_values
+            _dotenv = _dotenv_values(_env_file) if _os.path.exists(_env_file) else {}
+            if _dotenv:
+                self.get_logger().info(f'.env loaded from {_env_file}')
+        except ImportError:
+            _dotenv = {}
+            self.get_logger().warn(
+                'python-dotenv not installed — .env support disabled. '
+                'Install with: pip install python-dotenv'
+            )
+
         self.vllm_endpoint = self.get_parameter('vllm_endpoint').value
         self.model_name = self.get_parameter('model_name').value
+
+        if 'VLM_ENDPOINT' in _dotenv:
+            host = _dotenv['VLM_ENDPOINT'].rstrip('/')
+            port = _dotenv.get('VLM_PORT', '')
+            self.vllm_endpoint = f'{host}:{port}/v1/chat/completions' if port else f'{host}/v1/chat/completions'
+            self.get_logger().info(f'.env: VLM endpoint -> {self.vllm_endpoint}')
+
+        if 'VLM_MODEL_NAME' in _dotenv:
+            self.model_name = _dotenv['VLM_MODEL_NAME']
+            self.get_logger().info(f'.env: model -> {self.model_name}')
         self.capture_interval = self.get_parameter('capture_interval_s').value
         self.jpeg_quality = self.get_parameter('jpeg_quality').value
         self.max_width = self.get_parameter('max_image_width').value

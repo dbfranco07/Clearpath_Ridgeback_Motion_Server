@@ -125,6 +125,9 @@ class SafetyController(Node):
         self.rear_override_sub = self.create_subscription(
             Bool, '/safety/rear_override', self._rear_override_cb, latch_qos
         )
+        self.soft_bumper_sub = self.create_subscription(
+            Bool, '/safety/soft_bumper_enabled', self._soft_bumper_cb, latch_qos
+        )
 
         # ── Publishers ─────────────────────────────────────────────────────
         self.override_pub = self.create_publisher(Twist, override_topic, reliable_qos)
@@ -139,6 +142,7 @@ class SafetyController(Node):
         self.current_linear_vel = 0.0
         self.current_angular_vel = 0.0
         self.rear_override = False
+        self.soft_bumper_enabled = True
 
         # Per-axis hysteresis flags
         self._ax = {
@@ -177,6 +181,14 @@ class SafetyController(Node):
         if self.rear_override != prev:
             self.get_logger().info(
                 f'Rear override: {"ENABLED — reverse allowed" if self.rear_override else "DISABLED — reverse blocked"}'
+            )
+
+    def _soft_bumper_cb(self, msg: Bool):
+        prev = self.soft_bumper_enabled
+        self.soft_bumper_enabled = msg.data
+        if self.soft_bumper_enabled != prev:
+            self.get_logger().info(
+                f'Soft bumper: {"ENABLED — directional blocking active" if self.soft_bumper_enabled else "DISABLED — directional blocking suppressed"}'
             )
 
     def _odom_cb(self, msg: Odometry):
@@ -285,16 +297,23 @@ class SafetyController(Node):
         # Update hysteresis flags.
         # For release: flag stays blocked while obs_occupied is True.
         # For assert:  flag sets blocked immediately when obs_enter is True.
-        for key, flag in self._ax.items():
-            # Pass obs_enter as "obstacle_present" — drives immediate assert.
-            # Also force "still occupied" when in the hysteresis exit band.
-            flag.update(obs_enter[key] or (flag.blocked and obs_occupied[key]))
+        if self.soft_bumper_enabled:
+            for key, flag in self._ax.items():
+                # Pass obs_enter as "obstacle_present" — drives immediate assert.
+                # Also force "still occupied" when in the hysteresis exit band.
+                flag.update(obs_enter[key] or (flag.blocked and obs_occupied[key]))
 
-        # Rear blind-spot default: -x is blocked unless operator enables rear_override.
-        # Rotation's rear-corner (RR/RL) contribution is already excluded from the scan loop
-        # when rear_default_block=True, so only the front corners gate rotation here.
-        if self.rear_default_block and not self.rear_override:
-            self._ax['neg_x'].blocked = True
+            # Rear blind-spot default: -x is blocked unless operator enables rear_override.
+            # Rotation's rear-corner (RR/RL) contribution is already excluded from the scan loop
+            # when rear_default_block=True, so only the front corners gate rotation here.
+            if self.rear_default_block and not self.rear_override:
+                self._ax['neg_x'].blocked = True
+        else:
+            # Soft bumper disabled: clear all axis flags immediately.
+            # Emergency e-stop (closest_all / front cone) remains fully active.
+            for flag in self._ax.values():
+                flag.blocked = False
+                flag._clear_count = 0
 
         # Store clearances (body-edge distance; -1 = blind / no measurement)
         def _clr_val(v):
@@ -389,6 +408,7 @@ class SafetyController(Node):
         msg.clearance_reverse_m = self._clr['rev']
         msg.clearance_left_m = self._clr['left']
         msg.clearance_right_m = self._clr['right']
+        msg.soft_bumper_enabled = self.soft_bumper_enabled
 
         self.status_pub.publish(msg)
 

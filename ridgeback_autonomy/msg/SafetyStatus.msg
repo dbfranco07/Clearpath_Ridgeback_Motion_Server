@@ -22,3 +22,6 @@ float32 clearance_forward_m
 float32 clearance_reverse_m
 float32 clearance_left_m
 float32 clearance_right_m
+
+# Soft bumper state — True = directional blocking active, False = suppressed by operator
+bool soft_bumper_enabled

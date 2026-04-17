@@ -66,6 +66,10 @@ class RearOverrideCmd(BaseModel):
     enabled: bool
 
 
+class SoftBumperCmd(BaseModel):
+    enabled: bool
+
+
 # ── ROS2 Node ──────────────────────────────────────────────────────────────
 
 class AutonomousDashboard(Node):
@@ -125,6 +129,7 @@ class AutonomousDashboard(Node):
         self.teleop_pub = self.create_publisher(Twist, '/cmd_vel_teleop', cmd_qos)
         # Latched so safety_controller gets the current state even after restart
         self.rear_override_pub = self.create_publisher(Bool, '/safety/rear_override', latch_qos)
+        self.soft_bumper_pub = self.create_publisher(Bool, '/safety/soft_bumper_enabled', latch_qos)
 
         # Service clients
         self.mission_client = self.create_client(
@@ -178,8 +183,10 @@ class AutonomousDashboard(Node):
             'block_pos_yaw': False, 'block_neg_yaw': False,
             'clearance_fwd': -1.0, 'clearance_rev': -1.0,
             'clearance_left': -1.0, 'clearance_right': -1.0,
+            'soft_bumper_enabled': True,
         }
         self.rear_override_active = False
+        self.soft_bumper_enabled = True
 
         # Mission
         self.mission_status = {
@@ -299,6 +306,7 @@ class AutonomousDashboard(Node):
             'clearance_rev': msg.clearance_reverse_m,
             'clearance_left': msg.clearance_left_m,
             'clearance_right': msg.clearance_right_m,
+            'soft_bumper_enabled': msg.soft_bumper_enabled,
         }
 
     def set_rear_override(self, enabled: bool):
@@ -306,6 +314,12 @@ class AutonomousDashboard(Node):
         msg = Bool()
         msg.data = enabled
         self.rear_override_pub.publish(msg)
+
+    def set_soft_bumper(self, enabled: bool):
+        self.soft_bumper_enabled = enabled
+        msg = Bool()
+        msg.data = enabled
+        self.soft_bumper_pub.publish(msg)
 
     def _mission_cb(self, msg: MissionStatus):
         self.mission_status = {
@@ -548,6 +562,12 @@ def rear_override(cmd: RearOverrideCmd):
     return {'ok': True, 'enabled': cmd.enabled}
 
 
+@app.post('/soft_bumper')
+def soft_bumper(cmd: SoftBumperCmd):
+    ros_node.set_soft_bumper(cmd.enabled)
+    return {'ok': True, 'enabled': cmd.enabled}
+
+
 @app.post('/reset_pose')
 def reset_pose():
     ros_node.reset_pose()
@@ -777,6 +797,14 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
       <button class="btn btn-secondary btn-rear-override" id="btn-rear-override"
               onclick="toggleRearOverride()">REV UNLOCK</button>
     </div>
+    <div style="display:flex; gap:6px; align-items:center; margin-top:6px">
+      <button class="btn btn-secondary" id="btn-soft-bumper"
+              onclick="toggleSoftBumper()"
+              style="font-size:0.75rem; font-weight:bold; padding:5px 10px; width:100%;
+                     background:rgba(76,175,80,0.3); border-color:#4caf50; color:#4caf50">
+        SOFT BUMPER: ON
+      </button>
+    </div>
     <div class="clearance-row">
       Fwd:<span id="clr-fwd">--</span>m
       Rev:<span id="clr-rev">--</span>m
@@ -960,6 +988,19 @@ async function updateStatus() {
     setBlock('blk-rl', safety.block_neg_x || safety.block_pos_y);
     setBlock('blk-rr', safety.block_neg_x || safety.block_neg_y);
 
+    // Soft bumper button sync (ground-truth from safety controller)
+    const sbEnabled = safety.soft_bumper_enabled ?? true;
+    if (sbEnabled !== softBumperEnabled) {
+      softBumperEnabled = sbEnabled;
+      const sbBtn = document.getElementById('btn-soft-bumper');
+      if (sbBtn) {
+        sbBtn.textContent = sbEnabled ? 'SOFT BUMPER: ON' : 'SOFT BUMPER: OFF';
+        sbBtn.style.background = sbEnabled ? 'rgba(76,175,80,0.3)' : 'rgba(237,28,36,0.3)';
+        sbBtn.style.borderColor = sbEnabled ? '#4caf50' : '#ed1c24';
+        sbBtn.style.color = sbEnabled ? '#4caf50' : '#ed1c24';
+      }
+    }
+
     // Clearance display
     function fmtClr(v) { return (v >= 0) ? v.toFixed(2) : 'blind'; }
     const cFwd = document.getElementById('clr-fwd');
@@ -1107,6 +1148,27 @@ async function loadMemory() {
         <span class="memory-pos">(${r.x.toFixed(1)}, ${r.y.toFixed(1)}) ×${r.count}</span>
        </div>`
     ).join('');
+  } catch(e) {}
+}
+
+// ── Soft Bumper Toggle ────────────────────────────────────────────────────
+let softBumperEnabled = true;
+
+async function toggleSoftBumper() {
+  softBumperEnabled = !softBumperEnabled;
+  const btn = document.getElementById('btn-soft-bumper');
+  if (btn) {
+    btn.textContent = softBumperEnabled ? 'SOFT BUMPER: ON' : 'SOFT BUMPER: OFF';
+    btn.style.background = softBumperEnabled ? 'rgba(76,175,80,0.3)' : 'rgba(237,28,36,0.3)';
+    btn.style.borderColor = softBumperEnabled ? '#4caf50' : '#ed1c24';
+    btn.style.color = softBumperEnabled ? '#4caf50' : '#ed1c24';
+  }
+  try {
+    await fetch('/soft_bumper', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: softBumperEnabled})
+    });
   } catch(e) {}
 }
 

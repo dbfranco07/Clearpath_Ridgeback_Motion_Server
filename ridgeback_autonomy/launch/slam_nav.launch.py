@@ -12,8 +12,8 @@ Topic remappings:
 """
 
 from launch import LaunchDescription
-from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch_ros.actions import Node, SetRemap
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
@@ -55,15 +55,21 @@ def generate_launch_description():
         ),
 
         # Nav2 Bringup (navigation stack — uses /map from SLAM Toolbox)
-        IncludeLaunchDescription(
-            PythonLaunchDescriptionSource([
-                nav2_pkg, '/launch/navigation_launch.py'
-            ]),
-            launch_arguments={
-                'use_sim_time': LaunchConfiguration('use_sim_time'),
-                'params_file': LaunchConfiguration('nav2_params'),
-                # Nav2 publishes cmd_vel to this topic — cmd_vel_mux picks it up
-                'cmd_vel_topic': '/cmd_vel_nav2',
-            }.items()
-        ),
+        # GroupAction + SetRemap injects TF remappings into all Nav2 nodes so they
+        # read from /r100_0140/tf instead of the global /tf (same pattern as SLAM Toolbox).
+        GroupAction([
+            SetRemap(src='/tf',        dst='/r100_0140/tf'),
+            SetRemap(src='/tf_static', dst='/r100_0140/tf_static'),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource([
+                    nav2_pkg, '/launch/navigation_launch.py'
+                ]),
+                launch_arguments={
+                    'use_sim_time': LaunchConfiguration('use_sim_time'),
+                    'params_file': LaunchConfiguration('nav2_params'),
+                    # Nav2 publishes cmd_vel to this topic — cmd_vel_mux picks it up
+                    'cmd_vel_topic': '/cmd_vel_nav2',
+                }.items()
+            ),
+        ]),
     ])
