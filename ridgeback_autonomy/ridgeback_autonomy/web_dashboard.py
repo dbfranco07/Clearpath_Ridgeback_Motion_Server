@@ -1159,7 +1159,7 @@ def main(args=None):
     host = '0.0.0.0'
 
     uvicorn.run(
-        'ridgeback_autonomy.web_dashboard:app',
+        app,
         host=host,
         port=port,
         log_level='warning'
