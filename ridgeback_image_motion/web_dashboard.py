@@ -724,12 +724,35 @@ def create_app(node: DashboardNode) -> FastAPI:
         node.add_chat("user", request.message)
         node.add_log("vlm", f"Chat query: {request.message}")
         try:
-            response = node.vlm_client.chat.completions.create(
-                model=node.vlm_config.model_name,
-                messages=chat_completion_messages(
+            latest_frame = node.latest_frame_copy()
+            if latest_frame:
+                image_b64 = base64.b64encode(latest_frame).decode("utf-8")
+                user_content: list[dict[str, Any]] = [
+                    {
+                        "type": "text",
+                        "text": f"User question about current camera view: {request.message}",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                    },
+                ]
+                messages: list[dict[str, Any]] = [
+                    {
+                        "role": "system",
+                        "content": "You are a concise assistant for a Ridgeback R100 autonomous navigation dashboard. Use the provided camera image when relevant. Answer in 1-5 sentences and be direct.",
+                    },
+                    {"role": "user", "content": user_content},
+                ]
+            else:
+                messages = chat_completion_messages(
                     request.message,
                     system_prompt="You are a concise assistant for a Ridgeback R100 autonomous navigation dashboard. Answer in 1-5 sentences and be direct.",
-                ),
+                )
+
+            response = node.vlm_client.chat.completions.create(
+                model=node.vlm_config.model_name,
+                messages=messages,
                 temperature=0.4,
                 max_tokens=200,
                 extra_body={"chat_template_kwargs": {"enable_thinking": node.vlm_config.enable_thinking}},
