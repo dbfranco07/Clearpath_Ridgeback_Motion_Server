@@ -23,8 +23,12 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, CompressedImage, LaserScan
 import uvicorn
 
-from ridgeback_image_motion.spatial_memory import SpatialMemory
-from ridgeback_image_motion.vlm_client import build_vlm_client, chat_completion_messages
+try:
+    from ridgeback_image_motion.spatial_memory import SpatialMemory
+    from ridgeback_image_motion.vlm_client import build_vlm_client, chat_completion_messages
+except ImportError:
+    from spatial_memory import SpatialMemory
+    from vlm_client import build_vlm_client, chat_completion_messages
 
 
 class MissionRequest(BaseModel):
