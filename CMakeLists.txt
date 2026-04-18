@@ -28,7 +28,7 @@ install(PROGRAMS
 
 # Install Python package for imports
 install(DIRECTORY ridgeback_image_motion/
-  DESTINATION lib/python3/dist-packages/${PROJECT_NAME}
+  DESTINATION lib/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.py"
 )
 
