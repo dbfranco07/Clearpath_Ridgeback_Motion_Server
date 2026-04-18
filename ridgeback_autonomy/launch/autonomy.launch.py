@@ -21,8 +21,9 @@ from launch.actions import (
     DeclareLaunchArgument, IncludeLaunchDescription,
     TimerAction, LogInfo
 )
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -45,6 +46,10 @@ def generate_launch_description():
                               description='Launch VLM perception node'),
         DeclareLaunchArgument('launch_dashboard', default_value='true',
                               description='Launch web dashboard on port 8081'),
+        DeclareLaunchArgument('launch_memory', default_value='true',
+                      description='Launch spatial memory node'),
+        DeclareLaunchArgument('launch_mission', default_value='true',
+                      description='Launch mission orchestrator'),
 
         LogInfo(msg='========================================'),
         LogInfo(msg='Ridgeback Autonomy — Full Stack Launch'),
@@ -71,6 +76,10 @@ def generate_launch_description():
         # ── Tier 2: SLAM Toolbox (after 2s — let safety come up first) ────
         TimerAction(
             period=2.0,
+            condition=IfCondition(PythonExpression([
+                "'", LaunchConfiguration('launch_slam'), "' == 'true' or '",
+                LaunchConfiguration('launch_nav2'), "' == 'true'"
+            ])),
             actions=[
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource([
@@ -80,6 +89,8 @@ def generate_launch_description():
                         'use_sim_time': LaunchConfiguration('use_sim_time'),
                         'slam_params': slam_params,
                         'nav2_params': nav2_params,
+                        'launch_slam': LaunchConfiguration('launch_slam'),
+                        'launch_nav2': LaunchConfiguration('launch_nav2'),
                     }.items()
                 )
             ]
@@ -93,6 +104,7 @@ def generate_launch_description():
                     package='ridgeback_autonomy',
                     executable='vlm_perception.py',
                     name='vlm_perception',
+                    condition=IfCondition(LaunchConfiguration('launch_vlm')),
                     parameters=[vlm_config],
                     output='screen',
                     emulate_tty=True
@@ -101,6 +113,7 @@ def generate_launch_description():
                     package='ridgeback_autonomy',
                     executable='spatial_memory.py',
                     name='spatial_memory',
+                    condition=IfCondition(LaunchConfiguration('launch_memory')),
                     parameters=[vlm_config],
                     output='screen',
                     emulate_tty=True
@@ -116,6 +129,10 @@ def generate_launch_description():
                     package='ridgeback_autonomy',
                     executable='mission_orchestrator.py',
                     name='mission_orchestrator',
+                    condition=IfCondition(PythonExpression([
+                        "'", LaunchConfiguration('launch_mission'), "' == 'true' and '",
+                        LaunchConfiguration('launch_nav2'), "' == 'true'"
+                    ])),
                     parameters=[vlm_config],
                     output='screen',
                     emulate_tty=True
@@ -131,6 +148,7 @@ def generate_launch_description():
                     package='ridgeback_autonomy',
                     executable='web_dashboard.py',
                     name='web_dashboard',
+                    condition=IfCondition(LaunchConfiguration('launch_dashboard')),
                     output='screen',
                     emulate_tty=True
                 ),

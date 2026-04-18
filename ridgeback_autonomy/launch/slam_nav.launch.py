@@ -14,6 +14,7 @@ Topic remappings:
 from launch import LaunchDescription
 from launch_ros.actions import Node, SetRemap
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, GroupAction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
@@ -30,6 +31,8 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('slam_params', default_value=slam_params),
         DeclareLaunchArgument('nav2_params', default_value=nav2_params),
+        DeclareLaunchArgument('launch_slam', default_value='true'),
+        DeclareLaunchArgument('launch_nav2', default_value='true'),
 
         # Static TF: map → odom (initial transform, SLAM will update this)
         # Note: SLAM Toolbox manages the map→odom transform itself once running
@@ -39,6 +42,7 @@ def generate_launch_description():
             package='slam_toolbox',
             executable='async_slam_toolbox_node',
             name='slam_toolbox',
+            condition=IfCondition(LaunchConfiguration('launch_slam')),
             parameters=[
                 LaunchConfiguration('slam_params'),
                 {'use_sim_time': LaunchConfiguration('use_sim_time')}
@@ -71,5 +75,5 @@ def generate_launch_description():
                     'cmd_vel_topic': '/cmd_vel_nav2',
                 }.items()
             ),
-        ]),
+        ], condition=IfCondition(LaunchConfiguration('launch_nav2'))),
     ])
