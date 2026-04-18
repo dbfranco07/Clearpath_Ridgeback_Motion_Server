@@ -7,6 +7,7 @@ endif()
 
 # Find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -27,10 +28,7 @@ install(PROGRAMS
 )
 
 # Install Python package for imports
-install(DIRECTORY ridgeback_image_motion/
-  DESTINATION lib/${PROJECT_NAME}
-  FILES_MATCHING PATTERN "*.py"
-)
+ament_python_install_package(${PROJECT_NAME})
 
 # Install launch files
 install(DIRECTORY ridgeback_image_motion/launch/

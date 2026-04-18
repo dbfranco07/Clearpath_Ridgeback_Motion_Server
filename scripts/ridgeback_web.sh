@@ -47,4 +47,10 @@ echo "[5/5] Starting autonomy dashboard..."
 echo "=========================================="
 echo "Open in browser: http://$(hostname -I | awk '{print $1}'):8081"
 echo "=========================================="
-ros2 run ridgeback_image_motion web_dashboard.py
+if ros2 pkg executables ridgeback_image_motion | grep -q "web_dashboard.py"; then
+	ros2 run ridgeback_image_motion web_dashboard.py
+else
+	echo "[WARN] ros2 run entrypoint not found; falling back to python module launch"
+	export PYTHONPATH="$PWD:${PYTHONPATH}"
+	python3 -m ridgeback_image_motion.web_dashboard
+fi
