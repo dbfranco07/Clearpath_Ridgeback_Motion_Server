@@ -24,7 +24,8 @@ git pull
 # Build
 echo ""
 echo "[2/5] Building package..."
-colcon build --packages-select ridgeback_image_motion
+# colcon build --packages-select ridgeback_image_motion
+colcon build --packages-select ridgeback_image_motion --cmake-clean-cache
 
 # Source
 echo ""
