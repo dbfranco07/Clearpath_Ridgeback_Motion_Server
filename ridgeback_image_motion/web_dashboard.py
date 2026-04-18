@@ -495,7 +495,7 @@ def create_app(node: DashboardNode) -> FastAPI:
         node.mission_history.append({"timestamp": time.strftime("%H:%M:%S"), "command": request.command})
         if len(node.mission_history) > 40:
             node.mission_history.pop(0)
-      node.memory.record_mission(request.command)
+        node.memory.record_mission(request.command)
         node.add_log("mission", request.command)
         return JSONResponse({"ok": True, "accepted": request.command})
 
