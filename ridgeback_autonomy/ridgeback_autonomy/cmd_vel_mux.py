@@ -75,6 +75,7 @@ class CmdVelMux(Node):
 
         # State
         self.safety_active = False
+        self.safety_enabled = True
         self.safety_cmd = Twist()
         self.nav2_cmd = Twist()
         self.teleop_cmd = Twist()
@@ -110,6 +111,7 @@ class CmdVelMux(Node):
 
     def _safety_status_cb(self, msg: SafetyStatus):
         self.safety_active = msg.emergency_stop_active
+        self.safety_enabled = msg.safety_enabled
         self.status_last_time = time.time()
         self._block_pos_x = msg.block_pos_x
         self._block_neg_x = msg.block_neg_x
@@ -119,12 +121,12 @@ class CmdVelMux(Node):
         self._block_neg_yaw = msg.block_neg_yaw
 
     def _nav2_cb(self, msg: Twist):
-        if not self.safety_active:
+        if not self.safety_active or not self.safety_enabled:
             self.nav2_cmd = msg
             self.nav2_last_time = time.time()
 
     def _teleop_cb(self, msg: Twist):
-        if not self.safety_active:
+        if not self.safety_active or not self.safety_enabled:
             self.teleop_cmd = msg
             self.teleop_last_time = time.time()
 
@@ -142,6 +144,10 @@ class CmdVelMux(Node):
         out.angular.x = twist.angular.x
         out.angular.y = twist.angular.y
         out.angular.z = twist.angular.z
+
+        # When safety is fully disabled, bypass all masking.
+        if not self.safety_enabled:
+            return out
 
         status_stale = (time.time() - self.status_last_time) > self.mask_timeout
 
@@ -172,8 +178,10 @@ class CmdVelMux(Node):
         now = time.time()
         output = Twist()
 
-        # Priority 1: Safety override (full stop)
-        if self.safety_active or (now - self.safety_last_time < self.safety_timeout):
+        # Priority 1: Safety override (full stop) — skipped when safety is disabled.
+        if self.safety_enabled and (
+            self.safety_active or (now - self.safety_last_time < self.safety_timeout)
+        ):
             output = self.safety_cmd  # Always zero Twist from safety controller
             new_source = 'safety'
 

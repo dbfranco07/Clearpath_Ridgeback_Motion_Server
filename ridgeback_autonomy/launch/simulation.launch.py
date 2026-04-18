@@ -131,7 +131,7 @@ def generate_launch_description():
                     parameters=[
                         vlm_config,
                         {'use_sim_time': True,
-                         'vllm_endpoint': 'http://localhost:9999/v1/chat/completions'}
+                         'vllm_endpoint': 'http://localhost:9999'}
                     ],
                     output='screen',
                     emulate_tty=True

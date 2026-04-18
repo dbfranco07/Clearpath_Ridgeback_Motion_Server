@@ -5,11 +5,10 @@ vlm_perception:
   ros__parameters:
     # VLLM server running Qwen2.5-VL-27B (or change to your model)
     # Update this IP to wherever your VLLM server is running
-    vllm_endpoint: http://10.158.36.90:8000
+    vllm_endpoint: http://202.92.159.240:8000
 
     # Model identifier as loaded by VLLM
-    # For Qwen: "Qwen/Qwen2.5-VL-7B-Instruct" or "Qwen/Qwen2.5-VL-72B-Instruct"
-    model_name: Qwen/Qwen2.5-VL-7B-Instruct
+    model_name: Qwen/Qwen3.5-27B
 
     # How often to capture and analyze a frame
     # Slower during normal operation; can be reduced when actively searching

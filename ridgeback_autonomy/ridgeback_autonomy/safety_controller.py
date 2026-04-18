@@ -128,6 +128,9 @@ class SafetyController(Node):
         self.soft_bumper_sub = self.create_subscription(
             Bool, '/safety/soft_bumper_enabled', self._soft_bumper_cb, latch_qos
         )
+        self.safety_enabled_sub = self.create_subscription(
+            Bool, '/safety/enabled', self._safety_enabled_cb, latch_qos
+        )
 
         # ── Publishers ─────────────────────────────────────────────────────
         self.override_pub = self.create_publisher(Twist, override_topic, reliable_qos)
@@ -143,6 +146,7 @@ class SafetyController(Node):
         self.current_angular_vel = 0.0
         self.rear_override = False
         self.soft_bumper_enabled = True
+        self.safety_enabled = True
 
         # Per-axis hysteresis flags
         self._ax = {
@@ -190,6 +194,18 @@ class SafetyController(Node):
             self.get_logger().info(
                 f'Soft bumper: {"ENABLED — directional blocking active" if self.soft_bumper_enabled else "DISABLED — directional blocking suppressed"}'
             )
+
+    def _safety_enabled_cb(self, msg: Bool):
+        prev = self.safety_enabled
+        self.safety_enabled = msg.data
+        if self.safety_enabled != prev:
+            if self.safety_enabled:
+                self.get_logger().warn('Safety ENABLED — all enforcement active')
+            else:
+                self.get_logger().warn('Safety DISABLED — testing mode, no emergency stops')
+                # Clear any active e-stop since enforcement is off
+                self.emergency_stop = False
+                self.stop_reason = ''
 
     def _odom_cb(self, msg: Odometry):
         self.current_linear_vel = msg.twist.twist.linear.x
@@ -326,7 +342,11 @@ class SafetyController(Node):
         # ── Legacy emergency stop ─────────────────────────────────────────
         was_emergency = self.emergency_stop
 
-        if closest_all < self.danger_zone * 0.5:
+        if not self.safety_enabled:
+            # Safety enforcement disabled — never trigger e-stop, keep telemetry only.
+            self.emergency_stop = False
+            self.stop_reason = ''
+        elif closest_all < self.danger_zone * 0.5:
             self.emergency_stop = True
             self.stop_reason = f'Obstacle {closest_all:.2f}m — critical zone'
         elif (self._is_front_obstacle_within(msg, self.danger_zone)
@@ -361,10 +381,15 @@ class SafetyController(Node):
         elapsed = time.time() - self.last_lidar_time
         if elapsed > self.lidar_timeout and self.lidar_active:
             self.lidar_active = False
-            self.emergency_stop = True
-            self.stop_reason = f'LiDAR silent for {elapsed:.1f}s (timeout: {self.lidar_timeout}s)'
-            self.get_logger().error(f'SAFETY STOP: {self.stop_reason}')
-            self._publish_stop_override()
+            if self.safety_enabled:
+                self.emergency_stop = True
+                self.stop_reason = f'LiDAR silent for {elapsed:.1f}s (timeout: {self.lidar_timeout}s)'
+                self.get_logger().error(f'SAFETY STOP: {self.stop_reason}')
+                self._publish_stop_override()
+            else:
+                self.get_logger().warn(
+                    f'LiDAR silent for {elapsed:.1f}s — safety disabled, no e-stop'
+                )
 
     # ── Publishing ──────────────────────────────────────────────────────────
 
@@ -387,7 +412,11 @@ class SafetyController(Node):
         msg.emergency_stop_active = self.emergency_stop
         msg.stop_reason = self.stop_reason
 
-        if self.emergency_stop:
+        msg.safety_enabled = self.safety_enabled
+
+        if not self.safety_enabled:
+            msg.status_text = 'SAFETY DISABLED — testing mode'
+        elif self.emergency_stop:
             msg.status_text = f'STOP: {self.stop_reason}'
         elif not self.lidar_active:
             msg.status_text = 'WARNING: LiDAR inactive'

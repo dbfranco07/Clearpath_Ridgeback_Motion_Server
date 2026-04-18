@@ -71,6 +71,20 @@ class SoftBumperCmd(BaseModel):
     enabled: bool
 
 
+class SafetyEnabledCmd(BaseModel):
+    enabled: bool
+
+
+class MoveRequest(BaseModel):
+    distance: float = 0.5
+    speed: float = 0.2
+
+
+class RotateRequest(BaseModel):
+    angle: float = 90.0
+    speed: float = 0.5
+
+
 # ── ROS2 Node ──────────────────────────────────────────────────────────────
 
 class AutonomousDashboard(Node):
@@ -131,6 +145,7 @@ class AutonomousDashboard(Node):
         # Latched so safety_controller gets the current state even after restart
         self.rear_override_pub = self.create_publisher(Bool, '/safety/rear_override', latch_qos)
         self.soft_bumper_pub = self.create_publisher(Bool, '/safety/soft_bumper_enabled', latch_qos)
+        self.safety_enabled_pub = self.create_publisher(Bool, '/safety/enabled', latch_qos)
 
         # Service clients
         self.motion_client = self.create_client(
@@ -144,6 +159,11 @@ class AutonomousDashboard(Node):
         )
 
         # ── State ──────────────────────────────────────────────────────────
+
+        # Safety toggle — seed latched topic so nodes get the default on subscribe
+        _safety_init = Bool()
+        _safety_init.data = True
+        self.safety_enabled_pub.publish(_safety_init)
 
         # Camera
         self.latest_frame = None
@@ -189,9 +209,11 @@ class AutonomousDashboard(Node):
             'clearance_fwd': -1.0, 'clearance_rev': -1.0,
             'clearance_left': -1.0, 'clearance_right': -1.0,
             'soft_bumper_enabled': True,
+            'safety_enabled': True,
         }
         self.rear_override_active = False
         self.soft_bumper_enabled = True
+        self.safety_enabled = True
 
         # Mission
         self.mission_status = {
@@ -204,17 +226,44 @@ class AutonomousDashboard(Node):
         self.perception_lock = threading.Lock()
         self.max_perception_log = 50
 
+        # Motion log + latency (ported from web_controller)
+        self.log_buffer: list = []
+        self.max_logs = 30
+        self.image_latency_ms = 0.0
+        self.motion_latency_ms = 0.0
+        self.odom_latency_ms = 0.0
+
+        # Move/rotate state
+        self.is_moving = False
+        self.motion_status = 'Ready'
+        self.stop_motion = threading.Event()
+        self.motion_thread = None
+        self.max_linear_accel = 1.0
+        self.max_angular_accel = 2.0
+
         self.get_logger().info('Autonomous Dashboard node started')
 
     # ── Subscribers ────────────────────────────────────────────────────────
 
     def _image_cb(self, msg: CompressedImage):
+        try:
+            now = self.get_clock().now()
+            stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+            self.image_latency_ms = (now - stamp).nanoseconds / 1e6
+        except Exception:
+            pass
         with self.frame_lock:
             self.latest_frame = bytes(msg.data)
         self.last_frame_time = time.time()
         self.frame_event.set()
 
     def _odom_cb(self, msg: Odometry):
+        try:
+            now = self.get_clock().now()
+            stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+            self.odom_latency_ms = (now - stamp).nanoseconds / 1e6
+        except Exception:
+            pass
         self.vel_linear = msg.twist.twist.linear.x
         self.vel_lateral = msg.twist.twist.linear.y
         self.vel_angular = msg.twist.twist.angular.z
@@ -313,6 +362,7 @@ class AutonomousDashboard(Node):
             'clearance_left': msg.clearance_left_m,
             'clearance_right': msg.clearance_right_m,
             'soft_bumper_enabled': msg.soft_bumper_enabled,
+            'safety_enabled': msg.safety_enabled,
         }
 
     def set_rear_override(self, enabled: bool):
@@ -326,6 +376,120 @@ class AutonomousDashboard(Node):
         msg = Bool()
         msg.data = enabled
         self.soft_bumper_pub.publish(msg)
+
+    def set_safety_enabled(self, enabled: bool):
+        self.safety_enabled = enabled
+        msg = Bool()
+        msg.data = enabled
+        self.safety_enabled_pub.publish(msg)
+
+    # ── Motion log ─────────────────────────────────────────────────────────
+
+    def add_log(self, entry: str):
+        ts = time.strftime('%H:%M:%S')
+        self.log_buffer.append(f'[{ts}] {entry}')
+        if len(self.log_buffer) > self.max_logs:
+            self.log_buffer.pop(0)
+
+    # ── Move / Rotate (closed-loop, ported from web_controller) ────────────
+
+    def ramp_velocity(self, current, target, max_accel, dt):
+        if abs(target - current) < 0.01:
+            return target
+        max_change = max_accel * dt
+        return min(current + max_change, target) if target > current else max(current - max_change, target)
+
+    def move_straight(self, distance: float, speed: float):
+        if self.is_moving:
+            self.stop_motion.set()
+        self.stop_motion.clear()
+        self.is_moving = True
+        self.motion_status = f'Moving {distance:.2f}m at {speed:.2f}m/s'
+        direction = 1.0 if distance >= 0 else -1.0
+        initial_velocity = min(abs(speed), 0.15) * direction
+        self.add_log(f'Starting move: {distance}m at {speed}m/s')
+        self.teleop(initial_velocity, 0.0, 0.0)
+
+        def _task():
+            start_x, start_y = self.odom_x, self.odom_y
+            target_dist = abs(distance)
+            target_vel = abs(speed) * direction
+            cur_vel = initial_velocity
+            dt = 0.02
+            while not self.stop_motion.is_set():
+                traveled = math.sqrt((self.odom_x - start_x) ** 2 + (self.odom_y - start_y) ** 2)
+                remaining = target_dist - traveled
+                if traveled >= target_dist:
+                    break
+                decel_vel = max(0.05, remaining * 2) * direction
+                tv = decel_vel if remaining < 0.1 and abs(decel_vel) < abs(target_vel) else target_vel
+                cur_vel = self.ramp_velocity(cur_vel, tv, self.max_linear_accel, dt)
+                self.teleop(cur_vel, 0.0, 0.0)
+                self.motion_status = f'Moving {traveled:.2f}/{target_dist:.2f}m'
+                time.sleep(dt)
+            # Ramp to zero
+            while abs(cur_vel) > 0.01 and not self.stop_motion.is_set():
+                cur_vel = self.ramp_velocity(cur_vel, 0.0, self.max_linear_accel * 2, dt)
+                self.teleop(cur_vel, 0.0, 0.0)
+                time.sleep(dt)
+            self.teleop(0.0, 0.0, 0.0)
+            self.is_moving = False
+            if not self.stop_motion.is_set():
+                self.motion_status = f'Moved {target_dist:.2f}m'
+                self.add_log(f'MOTION complete: moved {target_dist:.2f}m')
+
+        self.motion_thread = threading.Thread(target=_task, daemon=True)
+        self.motion_thread.start()
+        return True
+
+    def rotate(self, angle_deg: float, speed: float):
+        if self.is_moving:
+            self.stop_motion.set()
+        self.stop_motion.clear()
+        self.is_moving = True
+        self.motion_status = f'Rotating {angle_deg:.1f}° at {speed:.2f}r/s'
+        direction = 1.0 if angle_deg >= 0 else -1.0
+        initial_velocity = min(abs(speed), 0.3) * direction
+        self.add_log(f'Starting rotate: {angle_deg}° at {speed}r/s')
+        self.teleop(0.0, 0.0, initial_velocity)
+
+        def _task():
+            target_angle = abs(math.radians(angle_deg))
+            target_vel = abs(speed) * direction
+            cur_vel = initial_velocity
+            dt = 0.02
+            total_rotated = 0.0
+            last_yaw = self.odom_yaw
+            while not self.stop_motion.is_set():
+                delta = self.odom_yaw - last_yaw
+                if delta > math.pi:
+                    delta -= 2 * math.pi
+                elif delta < -math.pi:
+                    delta += 2 * math.pi
+                total_rotated += abs(delta)
+                last_yaw = self.odom_yaw
+                remaining = target_angle - total_rotated
+                if total_rotated >= target_angle:
+                    break
+                decel_vel = max(0.1, remaining * 2) * direction
+                tv = decel_vel if remaining < 0.1 and abs(decel_vel) < abs(target_vel) else target_vel
+                cur_vel = self.ramp_velocity(cur_vel, tv, self.max_angular_accel, dt)
+                self.teleop(0.0, 0.0, cur_vel)
+                self.motion_status = f'Rotating {math.degrees(total_rotated):.1f}/{abs(angle_deg):.1f}°'
+                time.sleep(dt)
+            while abs(cur_vel) > 0.01 and not self.stop_motion.is_set():
+                cur_vel = self.ramp_velocity(cur_vel, 0.0, self.max_angular_accel * 2, dt)
+                self.teleop(0.0, 0.0, cur_vel)
+                time.sleep(dt)
+            self.teleop(0.0, 0.0, 0.0)
+            self.is_moving = False
+            if not self.stop_motion.is_set():
+                self.motion_status = f'Rotated {abs(angle_deg):.1f}°'
+                self.add_log(f'MOTION complete: rotated {abs(angle_deg):.1f}°')
+
+        self.motion_thread = threading.Thread(target=_task, daemon=True)
+        self.motion_thread.start()
+        return True
 
     def _mission_cb(self, msg: MissionStatus):
         self.mission_status = {
@@ -357,12 +521,17 @@ class AutonomousDashboard(Node):
     # ── Teleop ─────────────────────────────────────────────────────────────
 
     def teleop(self, linear: float, lateral: float, angular: float):
+        is_stop = linear == 0.0 and lateral == 0.0 and angular == 0.0
         if self.motion_client.service_is_ready():
             req = Motion.Request()
             req.linear = float(linear)
             req.lateral = float(lateral)
             req.angular = float(angular)
-            self.motion_client.call_async(req)
+            send_time = time.time()
+            future = self.motion_client.call_async(req)
+            future.add_done_callback(
+                lambda f, t=send_time: setattr(self, 'motion_latency_ms', (time.time() - t) * 1000)
+            )
         else:
             # Fallback: publish through cmd_vel_mux
             msg = Twist()
@@ -370,8 +539,15 @@ class AutonomousDashboard(Node):
             msg.linear.y = float(lateral)
             msg.angular.z = float(angular)
             self.teleop_pub.publish(msg)
+        if is_stop:
+            self.add_log('STOP')
+        elif not self.is_moving:
+            self.add_log(f'MOTION lin={linear:.2f} lat={lateral:.2f} ang={angular:.2f}')
 
     def stop_teleop(self):
+        if self.is_moving:
+            self.stop_motion.set()
+            self.is_moving = False
         self.teleop(0.0, 0.0, 0.0)
 
     def reset_pose(self):
@@ -415,7 +591,14 @@ class AutonomousDashboard(Node):
             'vel_lateral': round(self.vel_lateral, 3),
             'vel_angular': round(self.vel_angular, 3),
             'battery_v': round(self.battery_voltage, 2),
-            'battery_pct': round(self.battery_pct * 100, 1)
+            'battery_pct': round(self.battery_pct * 100, 1),
+            'logs': self.log_buffer[-5:],
+            'latency': {
+                'image_ms': round(self.image_latency_ms, 1),
+                'motion_ms': round(self.motion_latency_ms, 1),
+                'odom_ms': round(self.odom_latency_ms, 1),
+            },
+            'motion_status': self.motion_status,
         }
 
     def get_lidar_data(self) -> dict | None:
@@ -594,6 +777,24 @@ def soft_bumper(cmd: SoftBumperCmd):
     return {'ok': True, 'enabled': cmd.enabled}
 
 
+@app.post('/safety_enabled')
+def safety_enabled(cmd: SafetyEnabledCmd):
+    ros_node.set_safety_enabled(cmd.enabled)
+    return {'ok': True, 'enabled': cmd.enabled}
+
+
+@app.post('/move')
+def move(req: MoveRequest):
+    success = ros_node.move_straight(req.distance, req.speed)
+    return {'ok': success, 'status': ros_node.motion_status}
+
+
+@app.post('/rotate')
+def rotate_endpoint(req: RotateRequest):
+    success = ros_node.rotate(req.angle, req.speed)
+    return {'ok': success, 'status': ros_node.motion_status}
+
+
 @app.post('/reset_pose')
 def reset_pose():
     ros_node.reset_pose()
@@ -621,22 +822,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <title>Ridgeback — Autonomous Dashboard</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0e0e0; font-family: 'Courier New', monospace; min-height: 100vh; }
+body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0e0e0; font-family: 'Courier New', monospace; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
 .header { background: rgba(0,0,0,0.5); border-bottom: 2px solid #f7941d; padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; }
 .header h1 { color: #f7941d; font-size: 1.2rem; letter-spacing: 2px; }
 .header .sub { color: #888; font-size: 0.75rem; }
-.grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; grid-template-rows: auto auto; gap: 12px; padding: 12px; }
-.panel { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 12px; }
+.grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 10px; overflow: hidden; }
+.panel { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 10px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .panel h2 { color: #f7941d; font-size: 0.85rem; letter-spacing: 1px; margin-bottom: 10px; border-bottom: 1px solid rgba(247,148,29,0.3); padding-bottom: 6px; }
 /* Camera */
 #camera-panel { grid-column: 1; grid-row: 1; position: relative; }
-#camera-feed { width: 100%; border-radius: 4px; display: block; }
+#camera-feed { width: 100%; border-radius: 4px; display: block; object-fit: contain; min-height: 0; max-height: calc(100% - 28px); }
 #camera-overlay { display: none; position: absolute; top: 36px; left: 12px; right: 12px; background: rgba(237,28,36,0.85); color: #fff; font-size: 0.75rem; padding: 6px 10px; border-radius: 4px; border: 1px solid #ed1c24; text-align: center; }
 /* Mission Control */
 #mission-panel { grid-column: 2; grid-row: 1; }
 .mission-input { display: flex; gap: 8px; margin-bottom: 10px; }
 .mission-input input { flex: 1; background: rgba(255,255,255,0.1); border: 1px solid rgba(247,148,29,0.5); color: #e0e0e0; padding: 8px; border-radius: 4px; font-family: monospace; }
 .mission-input input::placeholder { color: #666; }
+.autopilot-forms { margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.autopilot-row { display: flex; gap: 6px; }
+.autopilot-row input { width: 70px; }
+.autopilot-row button { min-width: 44px; }
 .btn { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 0.8rem; transition: all 0.2s; }
 .btn-primary { background: #f7941d; color: #000; }
 .btn-primary:hover { background: #ffc107; }
@@ -660,10 +865,10 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 .quick-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 /* Map Panel */
 #map-panel { grid-column: 3; grid-row: 1 / 3; }
-#map-canvas { width: 100%; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #1a1a2e; }
+#map-canvas { width: 100%; aspect-ratio: 1 / 1; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #1a1a2e; max-height: calc(100% - 42px); }
 /* LiDAR Panel */
 #lidar-panel { grid-column: 4; grid-row: 1 / 3; }
-#lidar-canvas { display: block; width: 100%; height: 500px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #0a0a0a; }
+#lidar-canvas { display: block; width: 100%; aspect-ratio: 1 / 1; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #0a0a0a; max-height: calc(100% - 56px); }
 .lidar-info { display: flex; gap: 12px; margin-top: 6px; font-size: 0.75rem; color: #888; }
 .lidar-info span { color: #4fc3f7; }
 .map-legend { display: flex; gap: 12px; margin-top: 6px; font-size: 0.7rem; }
@@ -671,47 +876,42 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
 /* Teleop Panel */
 #teleop-panel { grid-column: 1; grid-row: 2; }
-.dpad { display: grid; grid-template-columns: repeat(3, 44px); grid-template-rows: repeat(3, 44px); gap: 4px; margin: 8px auto; width: fit-content; }
-.dpad-btn { width: 44px; height: 44px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; color: #e0e0e0; cursor: pointer; font-size: 1rem; display: flex; align-items: center; justify-content: center; transition: all 0.1s; user-select: none; }
+.dpad { display: grid; grid-template-columns: repeat(3, clamp(44px, 6vh, 60px)); grid-template-rows: repeat(3, clamp(44px, 6vh, 60px)); gap: 4px; margin: 8px auto; width: fit-content; }
+.dpad-btn { width: clamp(44px, 6vh, 60px); height: clamp(44px, 6vh, 60px); background: linear-gradient(160deg, rgba(247,148,29,0.18), rgba(255,255,255,0.08)); border: 1px solid rgba(255,255,255,0.25); border-radius: 10px; color: #e0e0e0; cursor: pointer; font-size: 1.15rem; display: flex; align-items: center; justify-content: center; transition: all 0.1s; user-select: none; }
 .dpad-btn:hover { background: rgba(247,148,29,0.3); border-color: #f7941d; }
 .dpad-btn.active { background: #f7941d; color: #000; border-color: #ffc107; }
 .dpad-stop { background: rgba(237,28,36,0.3); border-color: #ed1c24; }
 .speed-sliders { display: flex; gap: 10px; margin-top: 8px; font-size: 0.75rem; }
 .speed-sliders label { display: flex; flex-direction: column; gap: 2px; }
 .speed-sliders input[type=range] { width: 100px; }
-.pose-row { display: flex; gap: 16px; margin-top: 8px; }
+.pose-row { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
 .pose-val { font-size: 0.75rem; }
 .pose-val span { color: #4fc3f7; font-size: 0.9rem; }
 /* VLM Log Panel */
 #vlm-panel { grid-column: 2; grid-row: 2; }
-/* LiDAR mini canvas in teleop panel — hidden, replaced by full panel */
-#lidar-mini { display: none; }
-#vlm-log { height: 260px; overflow-y: auto; font-size: 0.72rem; }
+#vlm-log { flex: 1; min-height: 0; overflow-y: auto; font-size: 0.72rem; }
 .vlm-entry { padding: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 4px; }
 .vlm-time { color: #888; }
 .vlm-env { color: #4fc3f7; }
 .vlm-room { background: rgba(247,148,29,0.3); border: 1px solid #f7941d; border-radius: 3px; padding: 1px 5px; color: #f7941d; font-weight: bold; }
 .vlm-obstacle { color: #ed1c24; }
 .vlm-desc { color: #aaa; margin-top: 2px; line-height: 1.3; }
-/* Safety + Status bar */
-.status-bar { grid-column: 1 / 4; display: flex; gap: 12px; padding: 8px 12px; background: rgba(0,0,0,0.3); border-top: 1px solid rgba(255,255,255,0.1); margin: 0 -12px -12px; border-radius: 0 0 8px 8px; font-size: 0.75rem; }
+/* Bottom status strip */
+.status-strip { margin: 0 10px 10px; min-height: 72px; max-height: 84px; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; display: grid; grid-template-columns: 1.2fr auto auto auto auto auto 1.6fr auto auto auto auto; gap: 8px; align-items: center; padding: 8px 10px; overflow: hidden; }
 .safety-ok { color: #4caf50; }
 .safety-warn { color: #ffc107; }
 .safety-stop { color: #ed1c24; font-weight: bold; }
-.stat { color: #888; }
-.stat span { color: #4fc3f7; }
-/* Directional block indicators */
-.block-grid { display: grid; grid-template-columns: repeat(3, 28px); grid-template-rows: repeat(3, 28px); gap: 2px; margin: 6px auto; width: fit-content; }
-.block-cell { width: 28px; height: 28px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 0.65rem; font-weight: bold; }
+.stat { color: #888; font-size: 0.72rem; white-space: nowrap; }
+.stat span { color: #4fc3f7; font-size: 0.78rem; }
+.motion-strip { overflow-x: auto; white-space: nowrap; font-size: 0.68rem; color: #9ad2ff; border: 1px solid rgba(79,195,247,0.3); border-radius: 4px; padding: 4px 6px; }
+.axis-strip { display: flex; gap: 4px; align-items: center; }
+.block-cell { min-width: 38px; height: 26px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 0.62rem; font-weight: bold; padding: 0 4px; }
 .block-free { background: rgba(76,175,80,0.2); border: 1px solid #4caf50; color: #4caf50; }
 .block-blocked { background: rgba(237,28,36,0.4); border: 1px solid #ed1c24; color: #ed1c24; }
-.block-na { background: rgba(100,100,100,0.1); border: 1px solid rgba(255,255,255,0.1); color: #555; }
 .btn-rear-override { font-size: 0.7rem; padding: 3px 8px; }
 .btn-rear-override.active { background: #ed1c24; color: #fff; }
 .clearance-row { display: flex; gap: 8px; font-size: 0.7rem; color: #888; flex-wrap: wrap; margin-top: 4px; }
 .clearance-row span { color: #4fc3f7; }
-/* LiDAR mini canvas in teleop panel */
-#lidar-mini { display: block; margin: 8px auto 0; }
 /* Memory panel (inside mission panel) */
 #memory-list { max-height: 80px; overflow-y: auto; margin-top: 6px; font-size: 0.72rem; }
 .memory-row { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
@@ -761,6 +961,19 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
         <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.7rem" onclick="loadMemory()">⟳ Refresh</button>
       </div>
       <div id="memory-list"></div>
+    </div>
+    <div class="autopilot-forms">
+      <div style="font-size:0.72rem; color:#888">AUTOPILOT</div>
+      <div class="autopilot-row">
+        <input id="move-dist" type="number" step="0.1" value="0.5" placeholder="dist m">
+        <input id="move-speed" type="number" step="0.05" value="0.2" placeholder="speed">
+        <button class="btn btn-primary" onclick="autopilotMove()">GO</button>
+      </div>
+      <div class="autopilot-row">
+        <input id="rot-angle" type="number" step="5" value="90" placeholder="angle">
+        <input id="rot-speed" type="number" step="0.1" value="0.5" placeholder="speed">
+        <button class="btn btn-primary" onclick="autopilotRotate()">GO</button>
+      </div>
     </div>
   </div>
 
@@ -822,34 +1035,6 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
       <div class="pose-val">Yaw:<span id="val-yaw">0.0</span>°</div>
       <button class="btn btn-secondary" style="padding:2px 6px; font-size:0.7rem" onclick="resetPose()">⊙</button>
     </div>
-    <canvas id="lidar-mini" width="200" height="200"></canvas>
-    <!-- Directional block indicators -->
-    <div style="margin-top:8px; font-size:0.7rem; color:#888">AXIS BLOCKS</div>
-    <div class="block-grid">
-      <div class="block-cell block-na" id="blk-fl">↖</div>
-      <div class="block-cell block-free" id="blk-f">+X</div>
-      <div class="block-cell block-na" id="blk-fr">↗</div>
-      <div class="block-cell block-free" id="blk-l">+Y</div>
-      <div class="block-cell block-na" style="font-size:0.5rem">BOT</div>
-      <div class="block-cell block-free" id="blk-r">-Y</div>
-      <div class="block-cell block-na" id="blk-rl">↙</div>
-      <div class="block-cell block-free" id="blk-b">-X</div>
-      <div class="block-cell block-na" id="blk-rr">↘</div>
-    </div>
-    <div style="display:flex; gap:6px; align-items:center; margin-top:4px">
-      <div class="block-cell block-free" id="blk-ccw" style="width:auto; padding:0 6px">↺ CCW</div>
-      <div class="block-cell block-free" id="blk-cw"  style="width:auto; padding:0 6px">↻ CW</div>
-      <button class="btn btn-secondary btn-rear-override" id="btn-rear-override"
-              onclick="toggleRearOverride()">REV UNLOCK</button>
-    </div>
-    <div style="display:flex; gap:6px; align-items:center; margin-top:6px">
-      <button class="btn btn-secondary" id="btn-soft-bumper"
-              onclick="toggleSoftBumper()"
-              style="font-size:0.75rem; font-weight:bold; padding:5px 10px; width:100%;
-                     background:rgba(76,175,80,0.3); border-color:#4caf50; color:#4caf50">
-        SOFT BUMPER: ON
-      </button>
-    </div>
     <div class="clearance-row">
       Fwd:<span id="clr-fwd">--</span>m
       Rev:<span id="clr-rev">--</span>m
@@ -866,12 +1051,45 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 
 </div>
 
+<div class="status-strip">
+  <div id="strip-safety" class="safety-ok">● SAFETY OK</div>
+  <div class="stat">BATT <span id="stat-batt-v">0.0V</span></div>
+  <div class="stat">CHG <span id="stat-batt-pct">0.0%</span></div>
+  <div class="stat">IMG <span id="lat-image">0ms</span></div>
+  <div class="stat">MOT <span id="lat-motion">0ms</span></div>
+  <div class="stat">ODO <span id="lat-odom">0ms</span></div>
+  <div id="motion-log" class="motion-strip">[log] ready</div>
+  <div class="axis-strip">
+    <div class="block-cell block-free" id="blk-f">+X</div>
+    <div class="block-cell block-free" id="blk-b">-X</div>
+    <div class="block-cell block-free" id="blk-l">+Y</div>
+    <div class="block-cell block-free" id="blk-r">-Y</div>
+    <div class="block-cell block-free" id="blk-ccw">+YAW</div>
+    <div class="block-cell block-free" id="blk-cw">-YAW</div>
+  </div>
+  <button class="btn btn-secondary" id="btn-safety-enabled"
+          onclick="toggleSafetyEnabled()"
+          style="font-size:0.72rem; font-weight:bold; padding:4px 8px;
+                 background:rgba(76,175,80,0.3); border:1px solid #4caf50; color:#4caf50;">
+    SAFETY ENABLED: ON
+  </button>
+  <button class="btn btn-secondary" id="btn-soft-bumper"
+          onclick="toggleSoftBumper()"
+          style="font-size:0.72rem; font-weight:bold; padding:4px 8px;
+                 background:rgba(76,175,80,0.3); border:1px solid #4caf50; color:#4caf50;">
+    SOFT BUMPER: ON
+  </button>
+  <button class="btn btn-secondary btn-rear-override" id="btn-rear-override"
+          onclick="toggleRearOverride()">REV UNLOCK</button>
+</div>
+
 <script>
 // ── State ────────────────────────────────────────────────────────────────
 let activeBtn = null;
 let teleopInterval = null;
 let keyboardInterval = null;
 const keyState = {};
+let safetyEnabled = true;
 
 // ── Mission Control ───────────────────────────────────────────────────────
 function sendMission() {
@@ -949,6 +1167,40 @@ async function resetPose() {
   fetch('/reset_pose', {method: 'POST'}).catch(() => {});
 }
 
+async function autopilotMove() {
+  const dist = parseFloat(document.getElementById('move-dist').value);
+  const speed = parseFloat(document.getElementById('move-speed').value);
+  if (!isFinite(dist) || !isFinite(speed) || speed <= 0.0) return;
+  try {
+    const r = await fetch('/move', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({distance: dist, speed: speed})
+    });
+    const data = await r.json();
+    document.getElementById('mission-response').textContent = `→ ${data.status || 'Move sent'}`;
+  } catch(e) {
+    document.getElementById('mission-response').textContent = `Error: ${e}`;
+  }
+}
+
+async function autopilotRotate() {
+  const angle = parseFloat(document.getElementById('rot-angle').value);
+  const speed = parseFloat(document.getElementById('rot-speed').value);
+  if (!isFinite(angle) || !isFinite(speed) || speed <= 0.0) return;
+  try {
+    const r = await fetch('/rotate', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({angle: angle, speed: speed})
+    });
+    const data = await r.json();
+    document.getElementById('mission-response').textContent = `→ ${data.status || 'Rotate sent'}`;
+  } catch(e) {
+    document.getElementById('mission-response').textContent = `Error: ${e}`;
+  }
+}
+
 // ── Keyboard Teleop — 20 Hz repeat while keys held ────────────────────────
 const MOVE_KEYS = ['w','a','s','d','q','e','arrowup','arrowdown','arrowleft','arrowright'];
 
@@ -1016,18 +1268,35 @@ async function updateStatus() {
 
     // Safety header
     const safetyEl = document.getElementById('header-safety');
+    const stripSafetyEl = document.getElementById('strip-safety');
     if (safety.stop_active) {
       safetyEl.className = 'safety-stop';
       safetyEl.textContent = `▲ SAFETY STOP: ${safety.status_text}`;
+      if (stripSafetyEl) {
+        stripSafetyEl.className = 'safety-stop';
+        stripSafetyEl.textContent = `▲ ${safety.status_text}`;
+      }
     } else if (!safety.lidar_active) {
       safetyEl.className = 'safety-warn';
       safetyEl.textContent = `⚠ LIDAR INACTIVE`;
+      if (stripSafetyEl) {
+        stripSafetyEl.className = 'safety-warn';
+        stripSafetyEl.textContent = '⚠ LIDAR INACTIVE';
+      }
     } else if (safety.closest_m < 0.8) {
       safetyEl.className = 'safety-warn';
       safetyEl.textContent = `⚠ OBSTACLE ${safety.closest_m.toFixed(2)}m`;
+      if (stripSafetyEl) {
+        stripSafetyEl.className = 'safety-warn';
+        stripSafetyEl.textContent = `⚠ OBSTACLE ${safety.closest_m.toFixed(2)}m`;
+      }
     } else {
       safetyEl.className = 'safety-ok';
       safetyEl.textContent = `● SAFETY OK  ${safety.closest_m > 0 ? safety.closest_m.toFixed(1)+'m' : ''}`;
+      if (stripSafetyEl) {
+        stripSafetyEl.className = 'safety-ok';
+        stripSafetyEl.textContent = `● SAFETY OK ${safety.closest_m > 0 ? safety.closest_m.toFixed(1) + 'm' : ''}`;
+      }
     }
 
     // Per-axis block indicators
@@ -1042,11 +1311,23 @@ async function updateStatus() {
     setBlock('blk-r',   safety.block_neg_y);
     setBlock('blk-ccw', safety.block_pos_yaw);
     setBlock('blk-cw',  safety.block_neg_yaw);
-    // Diagonal indicators: blocked if either contributing axis is blocked
-    setBlock('blk-fl', safety.block_pos_x || safety.block_pos_y);
-    setBlock('blk-fr', safety.block_pos_x || safety.block_neg_y);
-    setBlock('blk-rl', safety.block_neg_x || safety.block_pos_y);
-    setBlock('blk-rr', safety.block_neg_x || safety.block_neg_y);
+
+    // Telemetry strip values
+    const battV = document.getElementById('stat-batt-v');
+    const battPct = document.getElementById('stat-batt-pct');
+    const latImg = document.getElementById('lat-image');
+    const latMot = document.getElementById('lat-motion');
+    const latOdo = document.getElementById('lat-odom');
+    const motionLog = document.getElementById('motion-log');
+    if (battV) battV.textContent = `${status.battery_v.toFixed(1)}V`;
+    if (battPct) battPct.textContent = `${status.battery_pct.toFixed(1)}%`;
+    if (latImg) latImg.textContent = `${(status.latency?.image_ms ?? 0).toFixed(0)}ms`;
+    if (latMot) latMot.textContent = `${(status.latency?.motion_ms ?? 0).toFixed(0)}ms`;
+    if (latOdo) latOdo.textContent = `${(status.latency?.odom_ms ?? 0).toFixed(0)}ms`;
+    if (motionLog) {
+      const parts = status.logs && status.logs.length ? status.logs : [status.motion_status || 'Ready'];
+      motionLog.textContent = parts.join(' | ');
+    }
 
     // Soft bumper button sync (ground-truth from safety controller)
     const sbEnabled = safety.soft_bumper_enabled ?? true;
@@ -1059,6 +1340,19 @@ async function updateStatus() {
         sbBtn.style.borderColor = sbEnabled ? '#4caf50' : '#ed1c24';
         sbBtn.style.color = sbEnabled ? '#4caf50' : '#ed1c24';
       }
+    }
+
+    // Master safety toggle sync
+    const serverSafetyEnabled = safety.safety_enabled ?? true;
+    if (serverSafetyEnabled !== safetyEnabled) {
+      safetyEnabled = serverSafetyEnabled;
+    }
+    const seBtn = document.getElementById('btn-safety-enabled');
+    if (seBtn) {
+      seBtn.textContent = safetyEnabled ? 'SAFETY ENABLED: ON' : 'SAFETY ENABLED: OFF';
+      seBtn.style.background = safetyEnabled ? 'rgba(76,175,80,0.3)' : 'rgba(237,28,36,0.3)';
+      seBtn.style.borderColor = safetyEnabled ? '#4caf50' : '#ed1c24';
+      seBtn.style.color = safetyEnabled ? '#4caf50' : '#ed1c24';
     }
 
     // Clearance display
@@ -1085,8 +1379,16 @@ async function updateStatus() {
 }
 
 // ── LiDAR Canvas ─────────────────────────────────────────────────────────
-const LIDAR_SCALE = 60;       // pixels per meter
 const LIDAR_MAX_RANGE = 4.0;  // meters to display
+
+function syncCanvasToDisplaySize(canvas) {
+  const rect = canvas.getBoundingClientRect();
+  const size = Math.max(200, Math.floor(Math.min(rect.width, rect.height || rect.width)));
+  if (canvas.width !== size || canvas.height !== size) {
+    canvas.width = size;
+    canvas.height = size;
+  }
+}
 
 async function updateLidar() {
   try {
@@ -1099,10 +1401,12 @@ async function updateLidar() {
 function drawLidar(data) {
   const canvas = document.getElementById('lidar-canvas');
   if (!canvas) return;
+  syncCanvasToDisplaySize(canvas);
   const ctx = canvas.getContext('2d');
   const w = canvas.width, h = canvas.height;
   const cx = w / 2, cy = h / 2;
   const rangeMax = Math.min(data.range_max || 10, LIDAR_MAX_RANGE);
+  const lidarScale = Math.min(w, h) / (2 * (rangeMax + 0.25));
 
   // Background
   ctx.fillStyle = '#0a0a0a';
@@ -1114,7 +1418,7 @@ function drawLidar(data) {
   ctx.font = '11px monospace';
   ctx.fillStyle = '#2a4a2a';
   for (let r = 1; r <= rangeMax; r++) {
-    const pr = r * LIDAR_SCALE;
+    const pr = r * lidarScale;
     ctx.beginPath();
     ctx.arc(cx, cy, pr, 0, Math.PI * 2);
     ctx.stroke();
@@ -1124,13 +1428,13 @@ function drawLidar(data) {
   // Axis cross (forward=up, right=+canvas-x matches robot +y convention)
   ctx.strokeStyle = '#1a3a1a';
   ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(cx, cy - rangeMax * LIDAR_SCALE - 10); ctx.lineTo(cx, cy + rangeMax * LIDAR_SCALE + 10); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(cx - rangeMax * LIDAR_SCALE - 10, cy); ctx.lineTo(cx + rangeMax * LIDAR_SCALE + 10, cy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy - rangeMax * lidarScale - 10); ctx.lineTo(cx, cy + rangeMax * lidarScale + 10); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - rangeMax * lidarScale - 10, cy); ctx.lineTo(cx + rangeMax * lidarScale + 10, cy); ctx.stroke();
 
   // Forward label
   ctx.fillStyle = '#2a6a2a';
   ctx.font = '10px monospace';
-  ctx.fillText('FWD', cx + 4, cy - rangeMax * LIDAR_SCALE - 2);
+  ctx.fillText('FWD', cx + 4, cy - rangeMax * lidarScale - 2);
 
   // Scan points — forward=up, left=right (robot frame: x=fwd, y=left)
   let validCount = 0;
@@ -1146,8 +1450,8 @@ function drawLidar(data) {
 
     const angle = angleMin + i * angleInc;
     // robot x=forward→canvas-up, robot y=left→canvas-left
-    const px = cx - range * Math.sin(angle) * LIDAR_SCALE;
-    const py = cy - range * Math.cos(angle) * LIDAR_SCALE;
+    const px = cx - range * Math.sin(angle) * lidarScale;
+    const py = cy - range * Math.cos(angle) * lidarScale;
 
     // Distance gradient: red (close) → yellow → green (far)
     const t = Math.min(range / rangeMax, 1.0);
@@ -1174,6 +1478,15 @@ function drawLidar(data) {
   ctx.lineWidth = 2;
   ctx.stroke();
 
+  // Forward arrow tip
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - 26);
+  ctx.lineTo(cx - 7, cy - 14);
+  ctx.lineTo(cx + 7, cy - 14);
+  ctx.closePath();
+  ctx.fillStyle = '#ffc107';
+  ctx.fill();
+
   // Update info bar
   const elClosest = document.getElementById('lidar-closest');
   const elPoints = document.getElementById('lidar-points');
@@ -1187,16 +1500,19 @@ async function updateMap() {
     const data = await fetch('/map').then(r => r.json());
     if (!data.image_b64) return;
     const canvas = document.getElementById('map-canvas');
+    syncCanvasToDisplaySize(canvas);
     const ctx = canvas.getContext('2d');
     const img = new Image();
     img.onload = () => {
-      canvas.width = img.width;
-      canvas.height = img.height;
-      ctx.drawImage(img, 0, 0);
+      const size = Math.min(canvas.width, canvas.height);
+      ctx.clearRect(0, 0, size, size);
+      ctx.drawImage(img, 0, 0, size, size);
       // Draw robot position
       const [rx, ry] = data.robot_px || [0, 0];
+      const sx = img.width > 0 ? (size / img.width) : 1.0;
+      const sy = img.height > 0 ? (size / img.height) : 1.0;
       ctx.beginPath();
-      ctx.arc(rx, ry, 6, 0, 2 * Math.PI);
+      ctx.arc(rx * sx, ry * sy, 6, 0, 2 * Math.PI);
       ctx.fillStyle = '#f7941d';
       ctx.fill();
       ctx.strokeStyle = '#ffc107';
@@ -1205,12 +1521,12 @@ async function updateMap() {
       // Draw room markers
       (data.rooms || []).forEach(room => {
         ctx.beginPath();
-        ctx.arc(room.px, room.py, 5, 0, 2 * Math.PI);
+        ctx.arc(room.px * sx, room.py * sy, 5, 0, 2 * Math.PI);
         ctx.fillStyle = '#4caf50';
         ctx.fill();
         ctx.fillStyle = '#fff';
         ctx.font = '10px monospace';
-        ctx.fillText(room.room_id, room.px + 8, room.py + 4);
+        ctx.fillText(room.room_id, room.px * sx + 8, room.py * sy + 4);
       });
     };
     img.src = 'data:image/png;base64,' + data.image_b64;
@@ -1264,6 +1580,7 @@ async function loadMemory() {
 
 // ── Soft Bumper Toggle ────────────────────────────────────────────────────
 let softBumperEnabled = true;
+let rearOverrideEnabled = false;
 
 async function toggleSoftBumper() {
   softBumperEnabled = !softBumperEnabled;
@@ -1283,8 +1600,27 @@ async function toggleSoftBumper() {
   } catch(e) {}
 }
 
+// ── Safety Enabled Toggle ─────────────────────────────────────────────────
+
+async function toggleSafetyEnabled() {
+  safetyEnabled = !safetyEnabled;
+  const btn = document.getElementById('btn-safety-enabled');
+  if (btn) {
+    btn.textContent = safetyEnabled ? 'SAFETY ENABLED: ON' : 'SAFETY ENABLED: OFF';
+    btn.style.background = safetyEnabled ? 'rgba(76,175,80,0.3)' : 'rgba(237,28,36,0.3)';
+    btn.style.borderColor = safetyEnabled ? '#4caf50' : '#ed1c24';
+    btn.style.color = safetyEnabled ? '#4caf50' : '#ed1c24';
+  }
+  try {
+    await fetch('/safety_enabled', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: safetyEnabled})
+    });
+  } catch(e) {}
+}
+
 // ── Rear Override Toggle ──────────────────────────────────────────────────
-let rearOverrideEnabled = false;
 
 async function toggleRearOverride() {
   rearOverrideEnabled = !rearOverrideEnabled;

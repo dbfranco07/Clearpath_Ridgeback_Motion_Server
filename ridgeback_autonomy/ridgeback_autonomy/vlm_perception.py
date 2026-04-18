@@ -86,10 +86,16 @@ class VlmPerceptionNode(Node):
             self.model_name = _dotenv['VLM_MODEL_NAME']
             self.get_logger().info(f'.env: model -> {self.model_name}')
 
-        # Build OpenAI-compatible client pointing at the vLLM server
-        _host = _dotenv.get('VLM_ENDPOINT', 'http://localhost').rstrip('/')
-        _port = _dotenv.get('VLM_PORT', '')
-        _base_url = f'{_host}:{_port}/v1' if _port else f'{_host}/v1'
+        # Build OpenAI-compatible client pointing at the vLLM server.
+        # Fall back to the ROS param so yaml config and sim launch work without .env.
+        import re as _re
+        _ros_endpoint = self.get_parameter('vllm_endpoint').value
+        _host = _dotenv.get('VLM_ENDPOINT', _ros_endpoint).rstrip('/')
+        _port = _dotenv.get('VLM_PORT', '').strip()
+        # Strip any port already embedded in _host so VLM_PORT is the sole authority.
+        _host_no_port = _re.sub(r':\d+$', '', _host)
+        _base = f'{_host_no_port}:{_port}' if _port else _host_no_port
+        _base_url = f'{_base.rstrip("/")}/v1'
         self.enable_thinking = _dotenv.get('VLM_THINK', 'false').lower() == 'true'
         self.vlm_client = OpenAI(base_url=_base_url, api_key='EMPTY')
 

@@ -25,3 +25,6 @@ float32 clearance_right_m
 
 # Soft bumper state — True = directional blocking active, False = suppressed by operator
 bool soft_bumper_enabled
+
+# Master safety toggle — False = all safety enforcement disabled (testing mode only)
+bool safety_enabled
