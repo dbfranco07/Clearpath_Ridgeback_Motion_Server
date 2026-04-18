@@ -32,7 +32,11 @@ git pull
 
 # Build both packages
 echo "[2/5] Building packages..."
-colcon build --packages-select ridgeback_image_motion ridgeback_autonomy
+# `ridgeback_autonomy` lives in a nested folder under this repo.
+# Explicit base paths ensure colcon discovers both packages reliably.
+colcon build \
+	--base-paths . ./ridgeback_autonomy \
+	--packages-select ridgeback_image_motion ridgeback_autonomy
 
 # Source
 echo "[3/5] Sourcing workspace..."
@@ -49,7 +53,11 @@ echo "=========================================="
 echo "Launch toggles:"
 echo "  slam=$LAUNCH_SLAM nav2=$LAUNCH_NAV2 vlm=$LAUNCH_VLM"
 echo "  memory=$LAUNCH_MEMORY mission=$LAUNCH_MISSION dashboard=$LAUNCH_DASHBOARD"
-echo "Web Dashboard: http://$(hostname -I | awk '{print $1}'):8081"
+if [ "$LAUNCH_DASHBOARD" = "true" ]; then
+	echo "Web Dashboard: http://$(hostname -I | awk '{print $1}'):8081"
+else
+	echo "Web Dashboard: disabled"
+fi
 echo "Teleop UI:     http://$(hostname -I | awk '{print $1}'):8080 (if running)"
 echo "=========================================="
 ros2 launch ridgeback_autonomy autonomy.launch.py \
