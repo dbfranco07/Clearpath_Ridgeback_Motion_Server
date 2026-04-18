@@ -21,6 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 install(PROGRAMS
   ridgeback_image_motion/image_publisher.py
   ridgeback_image_motion/web_controller.py
+  ridgeback_image_motion/web_dashboard.py
   ridgeback_image_motion/motion_server.py
   DESTINATION lib/${PROJECT_NAME}
 )
@@ -29,6 +30,12 @@ install(PROGRAMS
 install(DIRECTORY ridgeback_image_motion/
   DESTINATION lib/python3/dist-packages/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.py"
+)
+
+# Install launch files
+install(DIRECTORY ridgeback_image_motion/launch/
+  DESTINATION share/${PROJECT_NAME}
+  FILES_MATCHING PATTERN "*.launch.py"
 )
 
 ament_package()

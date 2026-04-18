@@ -7,9 +7,10 @@ set -e
 export ROS_DOMAIN_ID=0
 export RMW_FASTRTPS_USE_SHM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE=~/ridgeback/config/fastrtps_jetson.xml
+export RIDGEBACK_ENV_FILE=~/ridgeback/ridgeback_image_motion/.env
 
 echo "=========================================="
-echo "Ridgeback R100 - Web Controller"
+echo "Ridgeback R100 - Jetson Autonomy Dashboard"
 echo "=========================================="
 
 # Navigate to workspace
@@ -30,16 +31,18 @@ echo ""
 echo "[3/5] Sourcing workspace..."
 source install/setup.bash
 
-# Kill any previous instance on port 8080
+# Kill any previous instance on port 8081
 echo ""
-echo "[4/5] Clearing port 8080..."
-kill $(lsof -t -i:8080) 2>/dev/null || true
+echo "[4/5] Clearing port 8081..."
+if pids=$(lsof -t -i:8081); then
+	kill $pids 2>/dev/null || true
+fi
 sleep 1
 
 # Run
 echo ""
-echo "[5/5] Starting web controller..."
+echo "[5/5] Starting autonomy dashboard..."
 echo "=========================================="
-echo "Open in browser: http://$(hostname -I | awk '{print $1}'):8080"
+echo "Open in browser: http://$(hostname -I | awk '{print $1}'):8081"
 echo "=========================================="
-ros2 run ridgeback_image_motion web_controller.py
+ros2 run ridgeback_image_motion web_dashboard.py
