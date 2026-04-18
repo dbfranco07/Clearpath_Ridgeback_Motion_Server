@@ -23,6 +23,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, CompressedImage, LaserScan
 import uvicorn
 
+from ridgeback_image_motion.srv import Motion
+
 try:
     from ridgeback_image_motion.spatial_memory import SpatialMemory
     from ridgeback_image_motion.vlm_client import build_vlm_client, chat_completion_messages
@@ -37,6 +39,13 @@ class MissionRequest(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+
+
+class TeleopRequest(BaseModel):
+    linear: float = 0.0
+    lateral: float = 0.0
+    angular: float = 0.0
+    source: str = "keyboard"
 
 
 PAGE_HTML = """<!DOCTYPE html>
@@ -82,13 +91,22 @@ PAGE_HTML = """<!DOCTYPE html>
     .metric .s { margin-top: 4px; font-size: 12px; color: var(--muted); }
     .main { min-height: 0; display: grid; grid-template-columns: 1.25fr 0.95fr; gap: 12px; }
     .left, .right { min-height: 0; display: grid; gap: 12px; }
-    .left { grid-template-rows: 1.08fr 0.92fr; }
-    .right { grid-template-rows: 0.52fr 0.72fr 0.76fr; }
+    .left { grid-template-rows: 1fr 1fr; }
+    .right { grid-template-rows: 0.50fr 0.42fr 0.68fr 0.62fr; }
     .camera, .map, .chat, .logs { min-height: 0; padding: 12px; display: grid; grid-template-rows: auto 1fr; }
     .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
     .panel-head h2 { margin: 0; font-size: 15px; }
     .panel-head span { color: var(--muted); font-size: 12px; }
-    .camera img, .map img { width: 100%; height: 100%; object-fit: contain; background: #0a0f1d; border-radius: 12px; }
+    .media-frame { width: 100%; height: 100%; min-height: 0; border-radius: 12px; background: #0a0f1d; overflow: hidden; display: grid; place-items: center; }
+    .media-frame.portrait { aspect-ratio: 3 / 4; max-width: min(100%, 420px); justify-self: center; }
+    .media-frame img { width: 100%; height: 100%; object-fit: cover; }
+    #mapImage { object-fit: contain; image-rendering: pixelated; background: #0a0f1d; }
+    .teleop { min-height: 0; padding: 12px; display: grid; grid-template-rows: auto auto auto 1fr; gap: 10px; }
+    .teleop-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .key { border-radius: 10px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); min-height: 38px; font-weight: 700; letter-spacing: .04em; }
+    .key.active { background: linear-gradient(180deg, #7ab7ff, #5f8cff); color: #08101f; border-color: transparent; }
+    .teleop-meta { display: grid; gap: 6px; }
+    .teleop-line { color: var(--muted); font-size: 12px; }
     .scroll { min-height: 0; overflow: auto; padding-right: 4px; }
     .chat-feed, .log-feed { display: grid; gap: 8px; align-content: start; }
     .bubble { background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
@@ -103,7 +121,7 @@ PAGE_HTML = """<!DOCTYPE html>
       .shell { height: auto; min-height: 100vh; }
       .main, .topbar { grid-template-columns: 1fr; }
       .left, .right { grid-template-rows: auto; }
-      .camera, .map, .chat, .logs, .title, .mission, .stats { min-height: 240px; }
+      .camera, .map, .chat, .logs, .teleop, .title, .mission, .stats { min-height: 240px; }
     }
   </style>
 </head>
@@ -132,16 +150,37 @@ PAGE_HTML = """<!DOCTYPE html>
     <div class="main">
       <div class="left">
         <section class="camera">
-          <div class="panel-head"><h2>Camera</h2><span id="cameraMeta">stream</span></div>
-          <img src="/video_feed" alt="Camera feed" />
+          <div class="panel-head"><h2>Camera</h2><span id="cameraMeta">portrait stream</span></div>
+          <div class="media-frame portrait">
+            <img id="cameraImage" src="/video_feed" alt="Camera feed" />
+          </div>
         </section>
         <section class="map">
-          <div class="panel-head"><h2>SLAM Map</h2><span id="mapMeta">OccupancyGrid</span></div>
-          <img id="mapImage" src="/api/map.png" alt="Map" />
+          <div class="panel-head"><h2>SLAM Map</h2><span id="mapMeta">OccupancyGrid portrait</span></div>
+          <div class="media-frame portrait">
+            <img id="mapImage" src="/api/map.png" alt="Map" />
+          </div>
         </section>
       </div>
 
       <div class="right">
+        <section class="teleop title">
+          <div class="panel-head"><h2>Manual Teleop</h2><span id="teleopState">idle</span></div>
+          <div class="teleop-meta">
+            <div class="teleop-line">Keyboard: W A S D for translation, Q/E for rotation.</div>
+            <div class="teleop-line">Focus is ignored while typing in input boxes.</div>
+            <div class="teleop-line" id="teleopVelocity">vx 0.00 • vy 0.00 • wz 0.00</div>
+          </div>
+          <div class="teleop-grid">
+            <button class="key" id="key-q" disabled>Q</button>
+            <button class="key" id="key-w" disabled>W</button>
+            <button class="key" id="key-e" disabled>E</button>
+            <button class="key" id="key-a" disabled>A</button>
+            <button class="key" id="key-s" disabled>S</button>
+            <button class="key" id="key-d" disabled>D</button>
+          </div>
+          <button class="btn secondary" onclick="sendTeleopStop()">Stop Robot</button>
+        </section>
         <section class="logs">
           <div class="panel-head"><h2>VLM Logs</h2><span>External vLLM chat + perception notes</span></div>
           <div class="scroll">
@@ -168,6 +207,9 @@ PAGE_HTML = """<!DOCTYPE html>
     let lastMapStamp = "";
     let lastLogCount = 0;
     let lastChatCount = 0;
+    const pressedKeys = new Set();
+    let teleopTimer = null;
+    let teleopSpeeds = { linear: 0.28, lateral: 0.28, angular: 0.85 };
 
     function kvLine(label, value) {
       return `<div class="bubble"><div class="role">${label}</div><div class="body">${value}</div></div>`;
@@ -185,6 +227,7 @@ PAGE_HTML = """<!DOCTYPE html>
     async function refreshStatus() {
       const response = await fetch('/api/status');
       const data = await response.json();
+      teleopSpeeds = data.teleop?.speeds || teleopSpeeds;
       const stats = [
         ['Battery', `${data.battery_pct.toFixed(0)}%`, data.battery_voltage.toFixed(1) + ' V'],
         ['Pose', `${data.pose.x.toFixed(2)}, ${data.pose.y.toFixed(2)}`, `yaw ${data.pose.yaw_deg.toFixed(1)}°`],
@@ -198,6 +241,10 @@ PAGE_HTML = """<!DOCTYPE html>
         <div class="metric"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
       document.getElementById('connectionText').textContent = data.connected ? 'Connected to ROS topics' : 'Waiting for ROS topics';
       document.getElementById('statusMeta').textContent = `${data.mission.state} • ${data.vlm.chat_count} chats`;
+      document.getElementById('cameraMeta').textContent = `portrait stream • ${data.latency.image_ms.toFixed(0)} ms`;
+      document.getElementById('teleopState').textContent = data.teleop?.status || 'idle';
+      const t = data.teleop?.last || {linear: 0, lateral: 0, angular: 0};
+      document.getElementById('teleopVelocity').textContent = `vx ${Number(t.linear).toFixed(2)} • vy ${Number(t.lateral).toFixed(2)} • wz ${Number(t.angular).toFixed(2)}`;
 
       const statusItems = [
         ['Connection', data.connected ? 'ROS topics active' : 'No active topics'],
@@ -265,6 +312,102 @@ PAGE_HTML = """<!DOCTYPE html>
       await refreshStatus();
     }
 
+    function shouldIgnoreKeyEvents(event) {
+      const tag = (event.target?.tagName || '').toLowerCase();
+      return tag === 'input' || tag === 'textarea';
+    }
+
+    function updateKeyHighlights() {
+      ['w', 'a', 's', 'd', 'q', 'e'].forEach((key) => {
+        const el = document.getElementById(`key-${key}`);
+        if (!el) return;
+        el.classList.toggle('active', pressedKeys.has(key));
+      });
+    }
+
+    function computeTeleopVector() {
+      let linear = 0.0;
+      let lateral = 0.0;
+      let angular = 0.0;
+      if (pressedKeys.has('w')) linear += teleopSpeeds.linear;
+      if (pressedKeys.has('s')) linear -= teleopSpeeds.linear;
+      if (pressedKeys.has('a')) lateral += teleopSpeeds.lateral;
+      if (pressedKeys.has('d')) lateral -= teleopSpeeds.lateral;
+      if (pressedKeys.has('q')) angular += teleopSpeeds.angular;
+      if (pressedKeys.has('e')) angular -= teleopSpeeds.angular;
+      return { linear, lateral, angular };
+    }
+
+    async function sendTeleop(linear, lateral, angular, source = 'keyboard') {
+      await fetch('/api/teleop', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ linear, lateral, angular, source })
+      });
+    }
+
+    async function sendTeleopStop() {
+      pressedKeys.clear();
+      updateKeyHighlights();
+      await sendTeleop(0.0, 0.0, 0.0, 'stop_button');
+      await refreshStatus();
+    }
+
+    async function teleopTick() {
+      const cmd = computeTeleopVector();
+      await sendTeleop(cmd.linear, cmd.lateral, cmd.angular, 'keyboard');
+    }
+
+    function ensureTeleopLoop() {
+      if (teleopTimer !== null) return;
+      teleopTimer = setInterval(teleopTick, 120);
+    }
+
+    function maybeStopTeleopLoop() {
+      if (pressedKeys.size > 0) return;
+      if (teleopTimer !== null) {
+        clearInterval(teleopTimer);
+        teleopTimer = null;
+      }
+      sendTeleop(0.0, 0.0, 0.0, 'keyboard_release');
+    }
+
+    window.addEventListener('keydown', (event) => {
+      if (event.repeat || shouldIgnoreKeyEvents(event)) return;
+      const key = event.key.toLowerCase();
+      if (!['w', 'a', 's', 'd', 'q', 'e'].includes(key)) return;
+      event.preventDefault();
+      pressedKeys.add(key);
+      updateKeyHighlights();
+      ensureTeleopLoop();
+      teleopTick();
+    });
+
+    window.addEventListener('keyup', (event) => {
+      if (shouldIgnoreKeyEvents(event)) return;
+      const key = event.key.toLowerCase();
+      if (!['w', 'a', 's', 'd', 'q', 'e'].includes(key)) return;
+      event.preventDefault();
+      pressedKeys.delete(key);
+      updateKeyHighlights();
+      maybeStopTeleopLoop();
+    });
+
+    window.addEventListener('blur', () => {
+      if (pressedKeys.size === 0) return;
+      pressedKeys.clear();
+      updateKeyHighlights();
+      maybeStopTeleopLoop();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') {
+        pressedKeys.clear();
+        updateKeyHighlights();
+        maybeStopTeleopLoop();
+      }
+    });
+
     document.getElementById('chatInput').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         sendChat();
@@ -295,6 +438,10 @@ class DashboardNode(Node):
         self.declare_parameter("lidar_topic", "/r100_0140/sensors/lidar2d_0/scan")
         self.declare_parameter("battery_topic", "/r100_0140/platform/bms/state")
         self.declare_parameter("map_topic", "/map")
+        self.declare_parameter("motion_service", "motion_service")
+        self.declare_parameter("teleop_linear_speed", 0.28)
+        self.declare_parameter("teleop_lateral_speed", 0.28)
+        self.declare_parameter("teleop_angular_speed", 0.85)
 
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         latch_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
@@ -304,6 +451,11 @@ class DashboardNode(Node):
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
         self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
         self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self._map_cb, latch_qos)
+
+        self.motion_client = self.create_client(Motion, self.get_parameter("motion_service").value)
+        self.teleop_linear_speed = float(self.get_parameter("teleop_linear_speed").value)
+        self.teleop_lateral_speed = float(self.get_parameter("teleop_lateral_speed").value)
+        self.teleop_angular_speed = float(self.get_parameter("teleop_angular_speed").value)
 
         self.latest_frame: bytes | None = None
         self.latest_frame_stamp = ""
@@ -325,6 +477,8 @@ class DashboardNode(Node):
         self.odom_latency_ms = 0.0
         self.vlm_client, self.vlm_config = build_vlm_client()
         self.connected = True
+        self.teleop_status = "idle"
+        self.last_teleop = {"linear": 0.0, "lateral": 0.0, "angular": 0.0, "source": "none"}
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
 
@@ -385,7 +539,8 @@ class DashboardNode(Node):
             image = np.flipud(image)
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
-            scale = max(2, min(5, 960 // max(width, 1)))
+            target_long_side = 1600
+            scale = max(2, min(10, target_long_side // max(width, height, 1)))
             image = cv2.resize(image, (width * scale, height * scale), interpolation=cv2.INTER_NEAREST)
 
             origin_x = float(msg.info.origin.position.x)
@@ -422,14 +577,52 @@ class DashboardNode(Node):
         with self.frame_lock:
             return self.latest_frame
 
+    def send_motion_command(self, linear: float, lateral: float, angular: float, source: str = "manual") -> tuple[bool, str]:
+        request = Motion.Request()
+        request.linear = float(linear)
+        request.lateral = float(lateral)
+        request.angular = float(angular)
+
+        self.last_teleop = {
+            "linear": float(linear),
+            "lateral": float(lateral),
+            "angular": float(angular),
+            "source": source,
+        }
+
+        if not self.motion_client.wait_for_service(timeout_sec=0.25):
+            self.teleop_status = "motion service unavailable"
+            return False, self.teleop_status
+
+        future = self.motion_client.call_async(request)
+        start = time.time()
+        while not future.done() and (time.time() - start) < 0.5:
+            time.sleep(0.01)
+
+        if not future.done():
+            self.teleop_status = "motion command timeout"
+            return False, self.teleop_status
+
+        try:
+            response = future.result()
+        except Exception as exc:
+            self.teleop_status = f"motion call failed: {exc}"
+            return False, self.teleop_status
+
+        success = bool(response.success)
+        self.teleop_status = "active" if success and (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle"
+        if not success:
+            return False, str(response.message)
+        return True, str(response.message)
+
     def video_stream(self):
-        while True:
-            frame = self.latest_frame_copy()
-            if frame is None:
-                time.sleep(0.08)
-                continue
-            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            time.sleep(0.08)
+      while True:
+        frame = self.latest_frame_copy()
+        if frame is None:
+          time.sleep(0.04)
+          continue
+        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+        time.sleep(0.04)
 
     def status_payload(self) -> dict[str, Any]:
         map_payload = self.map_payload
@@ -452,6 +645,15 @@ class DashboardNode(Node):
             "mission": {"state": "IDLE", "command": self.mission_history[-1]["command"] if self.mission_history else "", "queue_length": len(self.mission_history)},
             "vlm": {"chat_count": len(self.chat_history), "log_count": len(self.logs)},
             "memory": {"location_count": len(self.memory.get_locations()), "mission_count": len(self.memory.get_recent_missions())},
+            "teleop": {
+                "status": self.teleop_status,
+                "last": self.last_teleop,
+                "speeds": {
+                    "linear": self.teleop_linear_speed,
+                    "lateral": self.teleop_lateral_speed,
+                    "angular": self.teleop_angular_speed,
+                },
+            },
             "logs": self.logs,
             "chat_history": self.chat_history,
         }
@@ -502,6 +704,20 @@ def create_app(node: DashboardNode) -> FastAPI:
         node.memory.record_mission(request.command)
         node.add_log("mission", request.command)
         return JSONResponse({"ok": True, "accepted": request.command})
+
+    @app.post("/api/teleop")
+    def api_teleop(request: TeleopRequest) -> JSONResponse:
+        linear = float(request.linear)
+        lateral = float(request.lateral)
+        angular = float(request.angular)
+        ok, message = node.send_motion_command(linear, lateral, angular, source=request.source)
+        if not ok:
+            if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6:
+                node.add_log("teleop", f"Rejected command ({request.source}): {message}")
+            return JSONResponse({"ok": False, "error": message})
+        if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6:
+            node.add_log("teleop", f"{request.source}: x={linear:.2f} y={lateral:.2f} z={angular:.2f}")
+        return JSONResponse({"ok": True, "message": message})
 
     @app.post("/api/chat")
     def api_chat(request: ChatRequest) -> JSONResponse:
