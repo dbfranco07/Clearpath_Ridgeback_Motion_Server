@@ -22,15 +22,18 @@ from pydantic import BaseModel
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, CompressedImage, Image, LaserScan
+from std_msgs.msg import String
 from cv_bridge import CvBridge
 import uvicorn
 
 from ridgeback_image_motion.srv import Motion
 
 try:
+    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads
     from ridgeback_image_motion.spatial_memory import SpatialMemory
     from ridgeback_image_motion.vlm_client import build_vlm_client, chat_completion_messages
 except ImportError:
+    from autonomy_common import json_dumps, json_loads
     from spatial_memory import SpatialMemory
     from vlm_client import build_vlm_client, chat_completion_messages
 
@@ -882,13 +885,18 @@ class DashboardNode(Node):
         self.declare_parameter("battery_topic", "/r100_0140/platform/bms/state")
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter("motion_service", "motion_service")
-        self.declare_parameter("cmd_vel_topic", "/r100_0140/cmd_vel")
+        self.declare_parameter("cmd_vel_topic", "/cmd_vel_teleop")
+        self.declare_parameter("mission_command_topic", "/ridgeback/mission/command")
+        self.declare_parameter("mission_status_topic", "/ridgeback/mission/status")
+        self.declare_parameter("safety_status_topic", "/ridgeback/safety/status")
+        self.declare_parameter("vlm_status_topic", "/ridgeback/vlm/status")
         self.declare_parameter("teleop_linear_speed", 0.28)
         self.declare_parameter("teleop_lateral_speed", 0.28)
         self.declare_parameter("teleop_angular_speed", 0.85)
 
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         latch_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
         self.create_subscription(CompressedImage, self.get_parameter("image_topic").value, self._image_cb, sensor_qos)
         self.create_subscription(Image, self.get_parameter("raw_image_topic").value, self._raw_image_cb, sensor_qos)
@@ -897,7 +905,11 @@ class DashboardNode(Node):
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
         self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
         self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self._map_cb, latch_qos)
+        self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
+        self.create_subscription(String, self.get_parameter("safety_status_topic").value, self._safety_status_cb, reliable_qos)
+        self.create_subscription(String, self.get_parameter("vlm_status_topic").value, self._vlm_status_cb, reliable_qos)
         self.cmd_vel_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, sensor_qos)
+        self.mission_command_pub = self.create_publisher(String, self.get_parameter("mission_command_topic").value, reliable_qos)
 
         self.motion_client = self.create_client(Motion, self.get_parameter("motion_service").value)
         self.teleop_linear_speed = float(self.get_parameter("teleop_linear_speed").value)
@@ -930,6 +942,9 @@ class DashboardNode(Node):
         self.max_chat_entries = 40
         self.max_vlm_events = 120
         self.memory = SpatialMemory()
+        self.mission_status: dict[str, Any] = {"state": "IDLE", "phase": "dashboard_only"}
+        self.safety_status: dict[str, Any] = {}
+        self.vlm_status: dict[str, Any] = {}
 
         self.image_latency_ms = 0.0
         self.odom_latency_ms = 0.0
@@ -1067,6 +1082,15 @@ class DashboardNode(Node):
         self.battery["voltage"] = msg.voltage
         self.battery["pct"] = msg.percentage * 100.0 if 0.0 <= msg.percentage <= 1.0 else msg.percentage
 
+    def _mission_status_cb(self, msg: String) -> None:
+        self.mission_status = json_loads(msg.data, self.mission_status)
+
+    def _safety_status_cb(self, msg: String) -> None:
+        self.safety_status = json_loads(msg.data, self.safety_status)
+
+    def _vlm_status_cb(self, msg: String) -> None:
+        self.vlm_status = json_loads(msg.data, self.vlm_status)
+
     def _map_cb(self, msg: OccupancyGrid) -> None:
         try:
             width = int(msg.info.width)
@@ -1119,46 +1143,15 @@ class DashboardNode(Node):
             return self.latest_frame
 
     def send_motion_command(self, linear: float, lateral: float, angular: float, source: str = "manual") -> tuple[bool, str]:
-        request = Motion.Request()
-        request.linear = float(linear)
-        request.lateral = float(lateral)
-        request.angular = float(angular)
-
         self.last_teleop = {
             "linear": float(linear),
             "lateral": float(lateral),
             "angular": float(angular),
             "source": source,
         }
-
-        if not self.motion_client.wait_for_service(timeout_sec=0.25):
-            self.teleop_status = "motion service unavailable"
-            self._publish_direct_motion(linear, lateral, angular)
-            self.teleop_status = "active/direct" if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle/direct"
-            return True, "OK direct cmd_vel fallback"
-
-        future = self.motion_client.call_async(request)
-        start = time.time()
-        while not future.done() and (time.time() - start) < 0.5:
-            time.sleep(0.01)
-
-        if not future.done():
-            self.teleop_status = "motion command timeout"
-            self._publish_direct_motion(linear, lateral, angular)
-            self.teleop_status = "active/direct" if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle/direct"
-            return True, "OK direct cmd_vel fallback after service timeout"
-
-        try:
-            response = future.result()
-        except Exception as exc:
-            self.teleop_status = f"motion call failed: {exc}"
-            return False, self.teleop_status
-
-        success = bool(response.success)
-        self.teleop_status = "active" if success and (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle"
-        if not success:
-            return False, str(response.message)
-        return True, str(response.message)
+        self._publish_direct_motion(linear, lateral, angular)
+        self.teleop_status = "active/mux" if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle/mux"
+        return True, "OK teleop command queued through cmd_vel_mux"
 
     def _publish_direct_motion(self, linear: float, lateral: float, angular: float) -> None:
         twist = Twist()
@@ -1207,8 +1200,9 @@ class DashboardNode(Node):
         now = time.time()
         map_payload = self.map_payload
         mission_last = self.mission_history[-1] if self.mission_history else {}
-        memory_locations = self.memory.get_locations()
-        memory_missions = self.memory.get_recent_missions(limit=20)
+        active_session = str(self.mission_status.get("session_id", "")) or self.memory.get_active_session()
+        memory_locations = self.memory.get_locations(active_session) if active_session else self.memory.get_locations()
+        memory_missions = self.memory.get_recent_missions(limit=20, session_id=active_session) if active_session else self.memory.get_recent_missions(limit=20)
 
         camera_alive = (now - self.last_frame_time) < 5.0 if self.last_frame_time > 0 else False
         depth_alive = (now - self.last_depth_time) < 5.0 if self.last_depth_time > 0 else False
@@ -1226,7 +1220,7 @@ class DashboardNode(Node):
                 "depth_alive": depth_alive,
                 "map_ready": map_ready,
             },
-            "safety": self._safety_payload(),
+            "safety": self.safety_status or self._safety_payload(),
             "map": {
                 "width": int(map_payload["width"]),
                 "height": int(map_payload["height"]),
@@ -1238,18 +1232,21 @@ class DashboardNode(Node):
             },
             "latency": {"image_ms": float(self.image_latency_ms), "odom_ms": float(self.odom_latency_ms)},
             "mission": {
-                "state": "QUEUED" if mission_last else "IDLE",
-                "command": str(mission_last.get("command", "")),
-                "last_intent": str(mission_last.get("intent", "")),
-                "last_room": str(mission_last.get("room", "")),
+                "state": str(self.mission_status.get("state") or ("QUEUED" if mission_last else "IDLE")),
+                "phase": str(self.mission_status.get("phase", "")),
+                "command": str(self.mission_status.get("command") or mission_last.get("command", "")),
+                "last_intent": str(self.mission_status.get("intent") or mission_last.get("intent", "")),
+                "last_room": str(self.mission_status.get("target_room") or mission_last.get("room", "")),
                 "queue_length": len(self.mission_history),
                 "recent": self.mission_history[-12:],
+                "live": self.mission_status,
             },
             "vlm": {
                 "chat_count": len(self.chat_history),
                 "log_count": len(self.logs),
                 "event_count": len(self.vlm_events),
                 "events": self.vlm_events[-60:],
+                "status": self.vlm_status,
             },
             "memory": {
                 "location_count": len(memory_locations),
@@ -1294,6 +1291,28 @@ def create_app(node: DashboardNode) -> FastAPI:
     def api_status() -> JSONResponse:
         return JSONResponse(node.status_payload())
 
+    @app.get("/health")
+    def health() -> JSONResponse:
+        return JSONResponse({"ok": True, "node": "ridgeback_dashboard", "mission": node.mission_status})
+
+    @app.get("/api/mission/status")
+    def api_mission_status() -> JSONResponse:
+        return JSONResponse(node.mission_status)
+
+    @app.get("/api/metrics")
+    def api_metrics() -> JSONResponse:
+        status = node.mission_status
+        return JSONResponse(
+            {
+                "result": status.get("state", "UNKNOWN"),
+                "state": status.get("state", "UNKNOWN"),
+                "phase": status.get("phase", ""),
+                "elapsed_s": float(status.get("elapsed_s", 0.0) or 0.0),
+                "target_room": status.get("target_room", ""),
+                "last_error": status.get("last_error", ""),
+            }
+        )
+
     @app.get("/api/map.png")
     def api_map_png() -> Response:
         payload = node.map_payload.get("image_bytes")
@@ -1324,6 +1343,14 @@ def create_app(node: DashboardNode) -> FastAPI:
     @app.post("/api/mission")
     def api_mission(request: MissionRequest) -> JSONResponse:
         parsed = parse_intent_and_room(request.command)
+        payload = {
+            "command": request.command,
+            "intent": parsed["intent"],
+            "room": parsed["room"],
+            "source": "dashboard",
+            "timestamp": time.time(),
+        }
+        node.mission_command_pub.publish(String(data=json_dumps(payload)))
         node.mission_history.append(
             {
                 "timestamp": time.strftime("%H:%M:%S"),
@@ -1335,7 +1362,12 @@ def create_app(node: DashboardNode) -> FastAPI:
         )
         if len(node.mission_history) > 40:
             node.mission_history.pop(0)
-        node.memory.record_mission(request.command, status="queued", metadata=parsed)
+        node.memory.record_mission(
+            request.command,
+            status="queued",
+            metadata=parsed,
+            session_id=str(node.mission_status.get("session_id", "")),
+        )
         node.add_log("mission", f"{parsed['intent']} {parsed['room']} :: {request.command}".strip())
         node.add_vlm_event(
             kind="mission",
@@ -1345,7 +1377,7 @@ def create_app(node: DashboardNode) -> FastAPI:
             room=parsed["room"],
             text="Mission command queued",
         )
-        return JSONResponse({"ok": True, "accepted": request.command, "parsed": parsed})
+        return JSONResponse({"ok": True, "accepted": request.command, "parsed": parsed, "mission_status": node.mission_status})
 
     @app.post("/api/teleop")
     def api_teleop(request: TeleopRequest) -> JSONResponse:
@@ -1409,6 +1441,20 @@ def create_app(node: DashboardNode) -> FastAPI:
             thinking = extract_reasoning_trace(response)
             latency_ms = (time.time() - started_at) * 1000.0
             event_kind = "mission" if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP"} else "prompt"
+            if event_kind == "mission":
+                node.mission_command_pub.publish(
+                    String(
+                        data=json_dumps(
+                            {
+                                "command": request.message,
+                                "intent": parsed["intent"],
+                                "room": parsed["room"],
+                                "source": "chat",
+                                "timestamp": time.time(),
+                            }
+                        )
+                    )
+                )
 
             node.add_chat("assistant", reply)
             node.add_log("vlm", f"Reply: {reply[:180]}")

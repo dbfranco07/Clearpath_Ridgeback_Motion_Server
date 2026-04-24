@@ -1,0 +1,63 @@
+# ridgeback_slam_params.yaml
+# SLAM Toolbox parameters for Clearpath Ridgeback R100
+# Only keys that are valid for slam_toolbox async_slam_toolbox_node.
+# Invalid keys are silently ignored but removed here for clarity.
+#
+# Note: scan_topic and odom_topic are set here as fallback.
+# The launch file remappings take precedence.
+
+slam_toolbox:
+  ros__parameters:
+
+    # ── Sensor topics ────────────────────────────────────────────────────
+    scan_topic: /r100_0140/sensors/lidar2d_0/scan
+    odom_topic: /r100_0140/platform/odom/filtered
+
+    # ── Map resolution ───────────────────────────────────────────────────
+    resolution: 0.05               # metres per cell
+    max_laser_range: 10.0          # Hokuyo UST-10LX max reliable range
+
+    # ── Timing ───────────────────────────────────────────────────────────
+    minimum_time_interval: 0.5     # min seconds between scan processing
+    transform_timeout: 0.5         # TF lookup timeout
+    tf_buffer_duration: 30.0
+
+    # ── Mode ─────────────────────────────────────────────────────────────
+    mode: mapping                  # 'mapping' for SLAM, 'localization' once map built
+    debug_logging: false
+    enable_interactive_mode: false  # disable Rviz plugin slam toolbox panel
+
+    # ── Map publishing ───────────────────────────────────────────────────
+    publish_map: true
+    publish_period: 1.0
+
+    # ── Scan matching ────────────────────────────────────────────────────
+    use_scan_matching: true
+    use_odometry: true
+    do_loop_closing: true
+
+    # ── Minimum travel before processing a new scan ───────────────────────
+    minimum_travel_distance: 0.2   # metres
+    minimum_travel_heading: 0.1    # radians (~5.7 degrees)
+
+    # ── Frames ───────────────────────────────────────────────────────────
+    # These must match the Ridgeback's TF tree.
+    # Verify with: ros2 run tf2_tools view_frames.py
+    map_frame: map
+    odom_frame: odom
+    base_frame: r100_0140/base_link
+
+    # ── ICP scan matcher parameters ──────────────────────────────────────
+    ceres_loss_function: None
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_dogleg_initial_radius: 1e4
+
+    # ── Loop closure ─────────────────────────────────────────────────────
+    loop_search_maximum_distance: 3.0
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_covariance: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45

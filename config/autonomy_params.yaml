@@ -1,0 +1,94 @@
+mission_orchestrator:
+  ros__parameters:
+    command_topic: /ridgeback/mission/command
+    status_topic: /ridgeback/mission/status
+    detections_topic: /ridgeback/semantic/room_detections
+    exploration_command_topic: /ridgeback/exploration/command
+    safety_status_topic: /ridgeback/safety/status
+    odom_topic: /r100_0140/platform/odom/filtered
+    stop_topic: /cmd_vel_nav
+    navigate_action: navigate_to_pose
+    map_frame: map
+    base_frame: r100_0140/base_link
+    room_min_confidence: 0.55
+    start_tolerance_m: 0.45
+
+room_detector:
+  ros__parameters:
+    image_topic: /r100_0140/image/compressed
+    odom_topic: /r100_0140/platform/odom/filtered
+    mission_status_topic: /ridgeback/mission/status
+    detections_topic: /ridgeback/semantic/room_detections
+    vlm_status_topic: /ridgeback/vlm/status
+    map_frame: map
+    base_frame: r100_0140/base_link
+    detect_period_s: 3.0
+    min_confidence: 0.55
+    max_tokens: 240
+
+frontier_explorer:
+  ros__parameters:
+    map_topic: /map
+    odom_topic: /r100_0140/platform/odom/filtered
+    command_topic: /ridgeback/exploration/command
+    status_topic: /ridgeback/exploration/status
+    navigate_action: navigate_to_pose
+    map_frame: map
+    base_frame: r100_0140/base_link
+    min_frontier_size_cells: 8
+    occupied_inflation_cells: 8
+    goal_check_period_s: 2.0
+    goal_reached_pause_s: 1.0
+
+safety_controller:
+  ros__parameters:
+    lidar_topic: /r100_0140/sensors/lidar2d_0/scan
+    odom_topic: /r100_0140/platform/odom/filtered
+    emergency_stop_topic: /r100_0140/platform/emergency_stop
+    mission_status_topic: /ridgeback/mission/status
+    vlm_status_topic: /ridgeback/vlm/status
+    safety_cmd_topic: /cmd_vel_safety
+    status_topic: /ridgeback/safety/status
+    warning_distance_m: 0.80
+    danger_distance_m: 0.45
+    lidar_timeout_s: 1.0
+    odom_timeout_s: 1.0
+    vlm_timeout_s: 8.0
+    check_vlm_network: true
+    vlm_check_period_s: 5.0
+    vlm_http_timeout_s: 1.5
+
+cmd_vel_mux:
+  ros__parameters:
+    safety_topic: /cmd_vel_safety
+    nav_topic: /cmd_vel_nav
+    teleop_topic: /cmd_vel_teleop
+    output_topic: /r100_0140/cmd_vel
+    safety_status_topic: /ridgeback/safety/status
+    nav_timeout_s: 0.75
+    teleop_timeout_s: 0.35
+    safety_timeout_s: 0.50
+    max_linear_mps: 0.45
+    max_lateral_mps: 0.35
+    max_angular_rps: 0.80
+    publish_hz: 20.0
+
+ridgeback_dashboard:
+  ros__parameters:
+    host: 0.0.0.0
+    port: 8081
+    image_topic: /r100_0140/image/compressed
+    raw_image_topic: /r100_0140/sensors/camera_0/color/image
+    depth_topic: /r100_0140/sensors/camera_0/depth/image
+    odom_topic: /r100_0140/platform/odom/filtered
+    lidar_topic: /r100_0140/sensors/lidar2d_0/scan
+    battery_topic: /r100_0140/platform/bms/state
+    map_topic: /map
+    cmd_vel_topic: /cmd_vel_teleop
+    mission_command_topic: /ridgeback/mission/command
+    mission_status_topic: /ridgeback/mission/status
+    safety_status_topic: /ridgeback/safety/status
+    vlm_status_topic: /ridgeback/vlm/status
+    teleop_linear_speed: 0.28
+    teleop_lateral_speed: 0.28
+    teleop_angular_speed: 0.85

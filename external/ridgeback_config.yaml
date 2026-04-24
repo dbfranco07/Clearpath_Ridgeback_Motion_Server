@@ -1,0 +1,40 @@
+# ridgeback_config.yaml
+# OnIt agent configuration for Clearpath Ridgeback R100
+# -------------------------------------------------------
+# Terminal 4:
+#   export ONIT_HOST="http://202.92.159.240:8000/v1"
+#   onit --config ~/ridgeback/ridgeback_config.yaml
+#
+# Port assignments — do not mix these up:
+#   202.92.159.240:8000  Qwen3.5-27B  ← ONIT_HOST (agent brain)
+#   202.92.159.240:8001  Qwen3.5-9B   ← VLM A2A (room reading)
+#   202.92.159.240:8002  Qwen3.5-4B   ← spare
+#   127.0.0.1:8010       THIS MCP server (local PC)  ← NOT 8000
+
+serving:
+  model: Qwen/Qwen3.5-27B
+  think: true
+  max_tokens: 8192
+
+persona: "ridgeback_operator"
+verbose: false
+show_logs: true
+theme: dark
+timeout: 300
+
+session_path: "~/.onit/ridgeback_sessions"
+template_path: "~/ridgeback/ridgeback_prompt_template.yaml"
+
+mcp:
+  servers:
+    - name: RidgebackMCPServer
+      description: >
+        Holonomic motion control for Clearpath Ridgeback R100.
+        Tools: move, move_forward, move_backward, strafe_left, strafe_right,
+        rotate, move_diagonal, stop, get_pose, record_landmark, list_landmarks,
+        navigate_to_landmark, return_home, start_exploration, get_status.
+      url: http://127.0.0.1:8010/mcp
+      enabled: true
+
+web: false
+web_port: 9000

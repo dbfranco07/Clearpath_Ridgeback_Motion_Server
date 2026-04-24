@@ -19,7 +19,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 # Install Python executables
 install(PROGRAMS
+  ridgeback_image_motion/autonomy_common.py
+  ridgeback_image_motion/cmd_vel_mux.py
+  ridgeback_image_motion/frontier_explorer.py
   ridgeback_image_motion/image_publisher.py
+  ridgeback_image_motion/mission_orchestrator.py
+  ridgeback_image_motion/room_detector.py
+  ridgeback_image_motion/safety_controller.py
   ridgeback_image_motion/web_controller.py
   ridgeback_image_motion/web_dashboard.py
   ridgeback_image_motion/motion_server.py
@@ -32,6 +38,11 @@ install(PROGRAMS
 install(DIRECTORY ridgeback_image_motion/launch/
   DESTINATION share/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.launch.py"
+)
+
+install(DIRECTORY config/
+  DESTINATION share/${PROJECT_NAME}/config
+  FILES_MATCHING PATTERN "*.yaml"
 )
 
 ament_package()
