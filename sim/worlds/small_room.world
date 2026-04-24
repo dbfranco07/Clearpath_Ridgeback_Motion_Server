@@ -1,0 +1,158 @@
+<?xml version="1.0"?>
+<!-- small_room.world — mirrors Phase 2 hardware test environment:
+     a single room (~5 m × 5 m) with one "Room 301" sign on the far wall.
+     Robot starts at origin facing +X.  -->
+<sdf version="1.9">
+  <world name="small_room">
+
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+
+    <scene>
+      <sky/>
+      <grid>false</grid>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+    </scene>
+
+    <physics name="1ms" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <!-- Required Ignition plugins -->
+    <plugin filename="gz-sim-physics-system"         name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system"          name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"   name="gz::sim::systems::UserCommands"/>
+
+    <!-- Sun -->
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.3 0.3 0.3 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Overhead fill light (indoor feel) -->
+    <light type="point" name="room_light">
+      <pose>0 0 2.8 0 0 0</pose>
+      <diffuse>0.7 0.7 0.7 1</diffuse>
+      <specular>0.1 0.1 0.1 1</specular>
+      <attenuation>
+        <range>10</range>
+        <constant>0.5</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+    </light>
+
+    <!-- Ground plane -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>20 20</size></plane></geometry>
+          <material>
+            <ambient>0.85 0.85 0.85 1</ambient>
+            <diffuse>0.85 0.85 0.85 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ── Walls ───────────────────────────────────────────────────── -->
+    <!-- Wall thickness: 0.2 m. Room interior: 5 m × 5 m (−2.5..2.5) -->
+
+    <!-- South wall (y = −2.5) — robot side, with gap for entry -->
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -2.6 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>5.2 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>5.2 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- North wall (y = +2.5) — far wall with room sign -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 2.6 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>5.2 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>5.2 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- West wall (x = −2.5) -->
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-2.6 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 5.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 5.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- East wall (x = +2.5) -->
+    <model name="wall_east">
+      <static>true</static>
+      <pose>2.6 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 5.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 5.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- ── Room 301 sign on north wall ───────────────────────────── -->
+    <!-- A white rectangular placard with "301" in large black text.
+         The DGX VLM should be able to read this in the rendered image.
+         For the mock VLM it is keyed by pose only.
+
+         The sign is a thin box (0.01 m deep) with a custom material.
+         If you have a room_sign_301 model in sim/models/, include it
+         with <include> instead. See sim/models/room_sign_301/model.sdf  -->
+    <model name="room_sign_301">
+      <static>true</static>
+      <!-- On the north wall, at 1.5 m height, facing south (−Y direction) -->
+      <pose>0 2.45 1.5 0 0 3.14159</pose>
+      <link name="sign">
+        <visual name="placard">
+          <geometry><box><size>0.5 0.01 0.25</size></box></geometry>
+          <material>
+            <!-- White background -->
+            <ambient>1.0 1.0 1.0 1</ambient>
+            <diffuse>1.0 1.0 1.0 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+          </material>
+        </visual>
+        <!-- Number text as a dark overlay box (approximation) -->
+        <visual name="text_301">
+          <pose>0 -0.006 0 0 0 0</pose>
+          <geometry><box><size>0.35 0.01 0.15</size></box></geometry>
+          <material>
+            <ambient>0.1 0.1 0.1 1</ambient>
+            <diffuse>0.1 0.1 0.1 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ── Robot spawn ─────────────────────────────────────────────── -->
+    <!-- The Ridgeback is spawned here by sim.launch.py via SpawnEntity.
+         Start pose: 1 m inside the south entry, facing north (+Y). -->
+    <!-- spawn_pose: 0 -1.5 0.1   rpy: 0 0 1.5708 -->
+
+  </world>
+</sdf>

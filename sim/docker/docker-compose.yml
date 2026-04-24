@@ -1,0 +1,156 @@
+version: "3.8"
+
+# Sim stack for the Ridgeback autonomous room-finder.
+#
+# Services:
+#   gazebo    — Ignition Fortress + Ridgeback model + sensor topics
+#   bridge    — ros-ign-bridge: Gazebo topics ↔ ROS2
+#   autonomy  — our ROS2 nodes (slam, nav2, dashboard, etc.)
+#   mock_vlm  — local mock of DGX vLLM (only when --profile mock)
+#
+# Quick start:
+#   cp ../.env.example ../.env  && edit ../.env
+#   docker compose up           # real DGX (default)
+#   docker compose --profile mock up   # offline mock VLM
+#
+# Shared network: ros_net (Docker bridge). DDS auto-discovers peers via
+# multicast within this bridge. ROS_DOMAIN_ID=0 on all containers.
+
+networks:
+  ros_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+volumes:
+  ros2_build:   # persist colcon build cache between restarts
+
+services:
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Gazebo Sim: spawns the world and Ridgeback model, publishes sensors
+  # ─────────────────────────────────────────────────────────────────────
+  gazebo:
+    build:
+      context: ..
+      dockerfile: sim/docker/Dockerfile.gazebo
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - SIM_WORLD=${SIM_WORLD:-small_room}
+      - DISPLAY=${DISPLAY:-:99}    # ignored in headless mode
+    volumes:
+      - ../sim/worlds:/sim/worlds:ro
+      - ../sim/models:/sim/models:ro
+      - ../sim/urdf:/sim/urdf:ro   # fallback Ridgeback URDF if needed
+    networks:
+      ros_net:
+        ipv4_address: 172.30.0.10
+    command: >
+      bash -c "
+        source /opt/ros/humble/setup.bash &&
+        echo 'Starting Gazebo with world: $${SIM_WORLD}' &&
+        ign gazebo /sim/worlds/$${SIM_WORLD}.world -r --headless-rendering -s
+      "
+    healthcheck:
+      test: ["CMD-SHELL", "ign service -l 2>/dev/null | grep -q world || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  # ─────────────────────────────────────────────────────────────────────
+  # ROS-Ignition bridge: converts Gazebo topics ↔ ROS2 messages
+  # ─────────────────────────────────────────────────────────────────────
+  bridge:
+    build:
+      context: ..
+      dockerfile: sim/docker/Dockerfile.gazebo
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+    volumes:
+      - ../sim/config:/sim/config:ro
+    networks:
+      ros_net:
+        ipv4_address: 172.30.0.11
+    depends_on:
+      gazebo:
+        condition: service_healthy
+    # Bridge maps Ignition topics to ROS2 topics matching CLAUDE.md spec.
+    # Format: ign_topic@ros_type[ign_type]
+    command: >
+      bash -c "
+        source /opt/ros/humble/setup.bash &&
+        ros2 run ros_ign_bridge parameter_bridge \
+          /world/ridgeback/model/ridgeback/joint_state@sensor_msgs/msg/JointState[ignition.msgs.Model] \
+          /lidar@sensor_msgs/msg/LaserScan[ignition.msgs.LaserScan] \
+          /imu@sensor_msgs/msg/Imu[ignition.msgs.IMU] \
+          /camera/image@sensor_msgs/msg/Image[ignition.msgs.Image] \
+          /camera/depth@sensor_msgs/msg/Image[ignition.msgs.Image] \
+          /odom@nav_msgs/msg/Odometry[ignition.msgs.Odometry] \
+          /r100_0140/cmd_vel@geometry_msgs/msg/Twist]ignition.msgs.Twist \
+          --ros-args \
+          --remap /lidar:=/r100_0140/sensors/lidar2d_0/scan \
+          --remap /imu:=/r100_0140/sensors/imu_0/data \
+          --remap /camera/image:=/r100_0140/sensors/camera_0/color/image \
+          --remap /camera/depth:=/r100_0140/sensors/camera_0/depth/image \
+          --remap /odom:=/r100_0140/platform/odom/filtered
+      "
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Autonomy: our ROS2 nodes — mounted from repo, rebuilt on each up
+  # ─────────────────────────────────────────────────────────────────────
+  autonomy:
+    build:
+      context: ..
+      dockerfile: sim/docker/Dockerfile.autonomy
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - VLM_BACKEND=${VLM_BACKEND:-dgx}
+      - VLM_ENDPOINT=${VLM_ENDPOINT:-http://10.158.36.90:8000/v1/chat/completions}
+      - STRATEGY=${STRATEGY:-frontier_nearest}
+      - SIM_MODE=true   # signals autonomy nodes we're in sim
+    volumes:
+      - ../ridgeback_autonomy:/ros2_ws/src/ridgeback_autonomy:rw
+      - ../config:/ros2_ws/src/ridgeback_autonomy/config:ro
+      - ros2_build:/ros2_ws/build
+    ports:
+      - "8081:8081"   # mission dashboard
+      - "8765:8765"   # foxglove WebSocket bridge
+    networks:
+      ros_net:
+        ipv4_address: 172.30.0.12
+    depends_on:
+      - bridge
+    # Build workspace then launch. Uses a sim-specific launch file.
+    command: >
+      bash -c "
+        source /opt/ros/humble/setup.bash &&
+        cd /ros2_ws &&
+        colcon build --packages-select ridgeback_autonomy --symlink-install 2>&1 | tail -5 &&
+        source install/setup.bash &&
+        ros2 launch ridgeback_autonomy sim.launch.py \
+          strategy:=$${STRATEGY} \
+          vlm_endpoint:=$${VLM_ENDPOINT}
+      "
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Mock VLM (offline/CI only) — only starts with --profile mock
+  # Normal dev sessions use the real DGX endpoint (VLM_BACKEND=dgx)
+  # ─────────────────────────────────────────────────────────────────────
+  mock_vlm:
+    profiles:
+      - mock
+    build:
+      context: ..
+      dockerfile: sim/docker/Dockerfile.mock_vlm
+    environment:
+      - SIM_VLM_LATENCY_MS=${SIM_VLM_LATENCY_MS:-1500}
+      - SIM_VLM_FAIL_RATE=${SIM_VLM_FAIL_RATE:-0.05}
+    volumes:
+      - ../sim/config:/app/config:ro
+    ports:
+      - "9000:8000"   # accessible as http://localhost:9000 on host
+    networks:
+      ros_net:
+        ipv4_address: 172.30.0.20

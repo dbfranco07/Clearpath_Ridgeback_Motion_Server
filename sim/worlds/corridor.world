@@ -1,0 +1,249 @@
+<?xml version="1.0"?>
+<!-- corridor.world — mirrors Phase 3 hardware test: a straight corridor
+     (~3 m wide, 14 m long) with 4 rooms branching off the right side.
+     Rooms labeled 301, 303, 305, 307 at intervals of 3 m.
+     Robot starts at the west end, facing east (+X).  -->
+<sdf version="1.9">
+  <world name="corridor">
+
+    <gravity>0 0 -9.8</gravity>
+    <atmosphere type="adiabatic"/>
+
+    <scene>
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+    </scene>
+
+    <physics name="1ms" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system"          name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-sensors-system"           name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-user-commands-system"    name="gz::sim::systems::UserCommands"/>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Ceiling lights spaced along corridor -->
+    <light type="point" name="light_0"><pose>2 0 2.8 0 0 0</pose>
+      <diffuse>0.7 0.7 0.7 1</diffuse><specular>0.05 0.05 0.05 1</specular>
+      <attenuation><range>8</range><constant>0.5</constant><linear>0.02</linear></attenuation></light>
+    <light type="point" name="light_1"><pose>5 0 2.8 0 0 0</pose>
+      <diffuse>0.7 0.7 0.7 1</diffuse><specular>0.05 0.05 0.05 1</specular>
+      <attenuation><range>8</range><constant>0.5</constant><linear>0.02</linear></attenuation></light>
+    <light type="point" name="light_2"><pose>9 0 2.8 0 0 0</pose>
+      <diffuse>0.7 0.7 0.7 1</diffuse><specular>0.05 0.05 0.05 1</specular>
+      <attenuation><range>8</range><constant>0.5</constant><linear>0.02</linear></attenuation></light>
+    <light type="point" name="light_3"><pose>13 0 2.8 0 0 0</pose>
+      <diffuse>0.7 0.7 0.7 1</diffuse><specular>0.05 0.05 0.05 1</specular>
+      <attenuation><range>8</range><constant>0.5</constant><linear>0.02</linear></attenuation></light>
+
+    <!-- Ground -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="c"><geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry></collision>
+        <visual name="v"><geometry><plane><normal>0 0 1</normal><size>40 40</size></plane></geometry>
+          <material><ambient>0.85 0.85 0.85 1</ambient><diffuse>0.85 0.85 0.85 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- ── Corridor walls (x: 0..14,  y: −1.5..+1.5) ──────────── -->
+    <!-- South corridor wall -->
+    <model name="corr_wall_south">
+      <static>true</static><pose>7 -1.6 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>14.2 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>14.2 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- North corridor wall (has door openings at each room) -->
+    <!-- Segment 0: x=0..2.5 -->
+    <model name="corr_wall_north_0">
+      <static>true</static><pose>1.25 1.6 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>2.5 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>2.5 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+    <!-- Room 301 door opening: x=2.5..4.0  (room at x=3.0, y=1.5..5.5) -->
+    <!-- Segment 1: x=4.0..5.5 -->
+    <model name="corr_wall_north_1">
+      <static>true</static><pose>4.75 1.6 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.5 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.5 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+    <!-- Room 303 door: x=5.5..7.0 -->
+    <!-- Segment 2: x=7.0..8.5 -->
+    <model name="corr_wall_north_2">
+      <static>true</static><pose>7.75 1.6 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.5 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.5 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+    <!-- Room 305 door: x=8.5..10.0 -->
+    <!-- Segment 3: x=10.0..11.5 -->
+    <model name="corr_wall_north_3">
+      <static>true</static><pose>10.75 1.6 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.5 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.5 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+    <!-- Room 307 door: x=11.5..13.0 -->
+    <!-- Segment 4: x=13.0..14.2 -->
+    <model name="corr_wall_north_4">
+      <static>true</static><pose>13.6 1.6 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>1.2 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.2 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- West cap -->
+    <model name="corr_wall_west">
+      <static>true</static><pose>-0.1 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 3.4 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 3.4 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+    <!-- East cap -->
+    <model name="corr_wall_east">
+      <static>true</static><pose>14.1 0 1.5 0 0 0</pose>
+      <link name="link">
+        <collision name="c"><geometry><box><size>0.2 3.4 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 3.4 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual>
+      </link>
+    </model>
+
+    <!-- ── Rooms (simplified: back wall + side walls) ──────────── -->
+    <!-- Room 301: x=2.5..4.0, y=1.6..5.6 -->
+    <model name="room_301_back"><static>true</static><pose>3.25 5.7 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>1.7 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.7 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+    <model name="room_301_west"><static>true</static><pose>2.4 3.65 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 4.1 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 4.1 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+    <model name="room_301_east"><static>true</static><pose>4.1 3.65 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 4.1 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 4.1 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+
+    <!-- Room 303: x=5.5..7.0 -->
+    <model name="room_303_back"><static>true</static><pose>6.25 5.7 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>1.7 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.7 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+    <model name="room_303_west"><static>true</static><pose>5.4 3.65 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 4.1 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 4.1 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+    <model name="room_303_east"><static>true</static><pose>7.1 3.65 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 4.1 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 4.1 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+
+    <!-- Room 305: x=8.5..10.0 -->
+    <model name="room_305_back"><static>true</static><pose>9.25 5.7 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>1.7 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.7 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+    <model name="room_305_west"><static>true</static><pose>8.4 3.65 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 4.1 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 4.1 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+    <model name="room_305_east"><static>true</static><pose>10.1 3.65 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 4.1 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 4.1 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+
+    <!-- Room 307: x=11.5..13.0 -->
+    <model name="room_307_back"><static>true</static><pose>12.25 5.7 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>1.7 0.2 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>1.7 0.2 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+    <model name="room_307_west"><static>true</static><pose>11.4 3.65 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 4.1 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 4.1 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+    <model name="room_307_east"><static>true</static><pose>13.1 3.65 1.5 0 0 0</pose>
+      <link name="l"><collision name="c"><geometry><box><size>0.2 4.1 3.0</size></box></geometry></collision>
+        <visual name="v"><geometry><box><size>0.2 4.1 3.0</size></box></geometry>
+          <material><ambient>0.8 0.8 0.8 1</ambient></material></visual></link></model>
+
+    <!-- ── Room signs (on corridor wall beside each door) ─────── -->
+    <!-- Sign for 301 — on east side of door frame, at 1.5 m height -->
+    <model name="sign_301">
+      <static>true</static><pose>4.05 1.5 1.5 0 0 -1.5708</pose>
+      <link name="s">
+        <visual name="p"><geometry><box><size>0.4 0.01 0.2</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="t"><pose>0 -0.006 0 0 0 0</pose>
+          <geometry><box><size>0.28 0.01 0.12</size></box></geometry>
+          <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="sign_303">
+      <static>true</static><pose>7.05 1.5 1.5 0 0 -1.5708</pose>
+      <link name="s">
+        <visual name="p"><geometry><box><size>0.4 0.01 0.2</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="t"><pose>0 -0.006 0 0 0 0</pose>
+          <geometry><box><size>0.28 0.01 0.12</size></box></geometry>
+          <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="sign_305">
+      <static>true</static><pose>10.05 1.5 1.5 0 0 -1.5708</pose>
+      <link name="s">
+        <visual name="p"><geometry><box><size>0.4 0.01 0.2</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="t"><pose>0 -0.006 0 0 0 0</pose>
+          <geometry><box><size>0.28 0.01 0.12</size></box></geometry>
+          <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <model name="sign_307">
+      <static>true</static><pose>13.05 1.5 1.5 0 0 -1.5708</pose>
+      <link name="s">
+        <visual name="p"><geometry><box><size>0.4 0.01 0.2</size></box></geometry>
+          <material><ambient>1 1 1 1</ambient><diffuse>1 1 1 1</diffuse></material></visual>
+        <visual name="t"><pose>0 -0.006 0 0 0 0</pose>
+          <geometry><box><size>0.28 0.01 0.12</size></box></geometry>
+          <material><ambient>0.1 0.1 0.1 1</ambient><diffuse>0.1 0.1 0.1 1</diffuse></material></visual>
+      </link>
+    </model>
+
+    <!-- Robot spawn: west end of corridor, facing east -->
+    <!-- spawn_pose: 0.5 0 0.1   rpy: 0 0 0 -->
+
+  </world>
+</sdf>

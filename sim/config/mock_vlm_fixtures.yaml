@@ -1,0 +1,76 @@
+# Mock VLM fixture file — pose regions mapped to canned responses.
+# Each entry: if the robot is within (cx, cy) ± radius, and the prompt
+# matches the pattern, return this JSON response.
+#
+# Used by sim/mock_vlm/server.py when VLM_BACKEND=mock.
+# The real DGX endpoint is used by default; this is for CI / offline dev.
+
+fixtures:
+  # small_room.world — "Room 301" sign at approx (3.0, 0.0)
+  - room: "301"
+    cx: 3.0
+    cy: 0.0
+    radius: 2.5
+    prompt_pattern: "room number"
+    response:
+      detections:
+        - room_id: "301"
+          confidence: 0.95
+          bbox: [320, 200, 640, 400]
+
+  # corridor.world — rooms along a hallway
+  - room: "301"
+    cx: 5.0
+    cy: -2.0
+    radius: 2.0
+    prompt_pattern: "room number"
+    response:
+      detections:
+        - room_id: "301"
+          confidence: 0.92
+          bbox: [100, 180, 420, 380]
+
+  - room: "303"
+    cx: 5.0
+    cy: 1.5
+    radius: 2.0
+    prompt_pattern: "room number"
+    response:
+      detections:
+        - room_id: "303"
+          confidence: 0.88
+          bbox: [200, 200, 500, 390]
+
+  - room: "305"
+    cx: 5.0
+    cy: 5.5
+    radius: 2.0
+    prompt_pattern: "room number"
+    response:
+      detections:
+        - room_id: "305"
+          confidence: 0.90
+          bbox: [150, 210, 480, 395]
+
+  - room: "307"
+    cx: 5.0
+    cy: 9.5
+    radius: 2.0
+    prompt_pattern: "room number"
+    response:
+      detections:
+        - room_id: "307"
+          confidence: 0.93
+          bbox: [250, 200, 560, 390]
+
+# Direction-hint responses — when vlm_guided_frontier asks for corridor bias
+direction_hints:
+  # "Go right to see rooms 301-309"
+  - cx: 0.0
+    cy: 0.0
+    radius: 3.0
+    prompt_pattern: "which corridor"
+    response:
+      direction: "right"
+      reasoning: "Room 305 is likely in the corridor to the right based on numbering."
+      suggested_bearing_deg: 0.0

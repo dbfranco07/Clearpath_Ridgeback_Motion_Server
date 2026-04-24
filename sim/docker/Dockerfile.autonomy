@@ -1,0 +1,60 @@
+# Dockerfile.autonomy — ROS2 Humble + full autonomy stack dependencies
+#
+# Platform: linux/arm64 (matches Jetson Orin Nano) + linux/amd64 (MacBook)
+# The osrf/ros:humble-desktop image is multi-arch; no emulation needed on
+# Apple Silicon.
+#
+# The ridgeback_autonomy source is bind-mounted at runtime so you can edit
+# locally and rebuild inside the container without rebuilding the image.
+
+FROM osrf/ros:humble-desktop
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Navigation + SLAM + perception + visualization
+RUN apt-get update && apt-get install -y \
+    ros-humble-navigation2 \
+    ros-humble-nav2-bringup \
+    ros-humble-slam-toolbox \
+    ros-humble-foxglove-bridge \
+    ros-humble-cv-bridge \
+    ros-humble-image-transport \
+    ros-humble-image-transport-plugins \
+    ros-humble-compressed-image-transport \
+    ros-humble-tf2-tools \
+    ros-humble-tf2-geometry-msgs \
+    ros-humble-tf2-sensor-msgs \
+    ros-humble-diagnostic-msgs \
+    ros-humble-diagnostic-updater \
+    python3-colcon-common-extensions \
+    python3-rosdep \
+    python3-pip \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps for autonomy nodes and dashboard
+RUN pip3 install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    sqlalchemy \
+    aiohttp \
+    "opencv-python-headless>=4.8" \
+    numpy \
+    pyyaml \
+    pytest \
+    pytest-asyncio \
+    httpx
+
+# ROS2 workspace — source bind-mounted at runtime
+RUN mkdir -p /ros2_ws/src
+WORKDIR /ros2_ws
+
+COPY docker/ros_entrypoint.sh /ros_entrypoint.sh
+RUN chmod +x /ros_entrypoint.sh
+
+# Expose dashboard and foxglove bridge ports
+EXPOSE 8081 8765
+
+ENTRYPOINT ["/ros_entrypoint.sh"]
+CMD ["bash"]

@@ -1,0 +1,25 @@
+# Dockerfile.mock_vlm — lightweight mock of DGX vLLM endpoint
+#
+# Mimics the OpenAI-compatible /v1/chat/completions route that DGX exposes.
+# Only starts when VLM_BACKEND=mock (via docker compose --profile mock).
+# Used for CI runs and offline development when DGX is unreachable.
+#
+# In normal sim dev, this container is NOT started; the real DGX is used.
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" pyyaml
+
+COPY mock_vlm/server.py .
+
+# Config file is bind-mounted from sim/config/mock_vlm_fixtures.yaml
+ENV SIM_VLM_LATENCY_MS=1500
+ENV SIM_VLM_FAIL_RATE=0.05
+ENV SIM_VLM_TIMEOUT_MS=10000
+ENV SIM_VLM_FIXTURES_FILE=/app/config/mock_vlm_fixtures.yaml
+
+EXPOSE 8000
+
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000", "--log-level", "info"]

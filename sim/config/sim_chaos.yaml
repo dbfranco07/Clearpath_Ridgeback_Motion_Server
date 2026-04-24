@@ -1,0 +1,49 @@
+# Chaos / realism injection config for the sim stack.
+# Applied by sim_up.sh when CHAOS=true is set in .env.
+# This lets us test degraded-network behavior before hardware testing.
+
+vlm:
+  # Extra latency added to every mock VLM call (ms)
+  extra_latency_ms: 1500
+  # Probability of returning an HTTP 503 (simulates DGX overload)
+  fail_rate: 0.05
+  # Probability of response timeout (simulates partial network failure)
+  timeout_rate: 0.02
+
+scan:
+  # Periodically drop LaserScan messages for N seconds
+  # Tests safety_controller watchdog behavior
+  dropout_interval_s: 45
+  dropout_duration_s: 2.0
+  dropout_enabled: false  # set true for safety stress-test
+
+network:
+  # Simulated latency between gazebo and autonomy containers (ms)
+  # Applied via tc qdisc if available; skipped gracefully if not
+  bridge_latency_ms: 0
+  bridge_jitter_ms: 0
+  bridge_loss_pct: 0
+
+# Profiles (override above):
+profiles:
+  minimal: {}   # no chaos, clean sim
+
+  realistic:    # mirrors expected real-world conditions
+    vlm:
+      extra_latency_ms: 1500
+      fail_rate: 0.05
+    network:
+      bridge_latency_ms: 20
+      bridge_jitter_ms: 10
+
+  stress:       # maximum degradation, should still be safe
+    vlm:
+      extra_latency_ms: 3000
+      fail_rate: 0.20
+      timeout_rate: 0.10
+    scan:
+      dropout_enabled: true
+    network:
+      bridge_latency_ms: 100
+      bridge_jitter_ms: 50
+      bridge_loss_pct: 5
