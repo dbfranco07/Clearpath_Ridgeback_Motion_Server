@@ -18,6 +18,7 @@ class JetsonWatchdog(Node):
         self.declare_parameter("init_grace_period", 5.0)
         self.declare_parameter("cmd_vel_topic", "/r100_0140/cmd_vel")
         self.declare_parameter("heartbeat_topic", "/pc_heartbeat")
+        self.declare_parameter("require_initial_heartbeat", False)
 
         min_timeout = 0.5
         max_timeout = 5.0
@@ -31,6 +32,7 @@ class JetsonWatchdog(Node):
         self.init_grace_period = float(self.get_parameter("init_grace_period").value)
         cmd_vel_topic = str(self.get_parameter("cmd_vel_topic").value)
         heartbeat_topic = str(self.get_parameter("heartbeat_topic").value)
+        self.require_initial_heartbeat = bool(self.get_parameter("require_initial_heartbeat").value)
 
         heartbeat_qos = QoSProfile(
             depth=10,
@@ -49,6 +51,8 @@ class JetsonWatchdog(Node):
         self.last_heartbeat = self.get_clock().now()
         self.estop_active = False
         self.is_initialized = False
+        self.has_seen_heartbeat = False
+        self.waiting_logged = False
         self.start_time = self.get_clock().now()
 
         self.create_timer(0.1, self._check_cb)
@@ -59,6 +63,7 @@ class JetsonWatchdog(Node):
 
     def _heartbeat_cb(self, msg: Bool) -> None:
         if msg.data:
+            self.has_seen_heartbeat = True
             self.last_heartbeat = self.get_clock().now()
             if self.estop_active:
                 self.get_logger().info("Heartbeat restored. Watchdog stop cleared.")
@@ -72,6 +77,14 @@ class JetsonWatchdog(Node):
                 return
             self.is_initialized = True
             self.get_logger().info("Grace period complete. Watchdog active.")
+
+        if not self.require_initial_heartbeat and not self.has_seen_heartbeat:
+            if not self.waiting_logged:
+                self.get_logger().warn(
+                    "No /pc_heartbeat received yet. Watchdog is unarmed until first heartbeat."
+                )
+                self.waiting_logged = True
+            return
 
         elapsed = (now - self.last_heartbeat).nanoseconds / 1e9
         if elapsed > self.heartbeat_timeout:

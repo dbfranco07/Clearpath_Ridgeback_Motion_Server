@@ -69,6 +69,7 @@ cmd_vel_mux:
     teleop_topic: /cmd_vel_teleop
     output_topic: /r100_0140/cmd_vel
     safety_status_topic: /ridgeback/safety/status
+    status_topic: /ridgeback/cmd_vel_mux/status
     nav_timeout_s: 0.75
     teleop_timeout_s: 0.35
     safety_timeout_s: 0.50
@@ -98,6 +99,7 @@ ridgeback_dashboard:
     mission_status_topic: /ridgeback/mission/status
     safety_status_topic: /ridgeback/safety/status
     vlm_status_topic: /ridgeback/vlm/status
+    mux_status_topic: /ridgeback/cmd_vel_mux/status
     teleop_linear_speed: 0.28
     teleop_lateral_speed: 0.28
     teleop_angular_speed: 0.85

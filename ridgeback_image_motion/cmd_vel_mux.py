@@ -12,9 +12,9 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 
 try:
-    from ridgeback_image_motion.autonomy_common import json_loads, twist_is_nonzero
+    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads, twist_is_nonzero
 except ImportError:
-    from autonomy_common import json_loads, twist_is_nonzero
+    from autonomy_common import json_dumps, json_loads, twist_is_nonzero
 
 
 def clamp(value: float, limit: float) -> float:
@@ -30,6 +30,7 @@ class CmdVelMux(Node):
         self.declare_parameter("teleop_topic", "/cmd_vel_teleop")
         self.declare_parameter("output_topic", "/r100_0140/cmd_vel")
         self.declare_parameter("safety_status_topic", "/ridgeback/safety/status")
+        self.declare_parameter("status_topic", "/ridgeback/cmd_vel_mux/status")
         self.declare_parameter("nav_timeout_s", 0.75)
         self.declare_parameter("teleop_timeout_s", 0.35)
         self.declare_parameter("safety_timeout_s", 0.50)
@@ -42,6 +43,7 @@ class CmdVelMux(Node):
         status_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
         self.output = self.create_publisher(Twist, self.get_parameter("output_topic").value, qos)
+        self.status_pub = self.create_publisher(String, self.get_parameter("status_topic").value, status_qos)
         self.create_subscription(Twist, self.get_parameter("safety_topic").value, self._safety_cb, qos)
         self.create_subscription(Twist, self.get_parameter("nav_topic").value, self._nav_cb, qos)
         self.create_subscription(Twist, self.get_parameter("teleop_topic").value, self._teleop_cb, qos)
@@ -55,6 +57,7 @@ class CmdVelMux(Node):
         self.last_teleop_time = 0.0
         self.safety_forced_stop = False
         self.last_source = "none"
+        self.last_status_publish = 0.0
 
         hz = max(1.0, float(self.get_parameter("publish_hz").value))
         self.create_timer(1.0 / hz, self._tick)
@@ -100,6 +103,23 @@ class CmdVelMux(Node):
         safe.angular.z = clamp(selected.angular.z, float(self.get_parameter("max_angular_rps").value))
         self.output.publish(safe)
 
+        if now - self.last_status_publish >= 0.5:
+            status = {
+                "stamp": now,
+                "source": source,
+                "safety_forced_stop": self.safety_forced_stop,
+                "safety_age_s": safety_age,
+                "nav_age_s": nav_age,
+                "teleop_age_s": teleop_age,
+                "cmd": {
+                    "linear": safe.linear.x,
+                    "lateral": safe.linear.y,
+                    "angular": safe.angular.z,
+                },
+            }
+            self.status_pub.publish(String(data=json_dumps(status)))
+            self.last_status_publish = now
+
         if source != self.last_source:
             self.get_logger().info(f"cmd_vel source: {source}")
             self.last_source = source
@@ -120,4 +140,3 @@ def main(args: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

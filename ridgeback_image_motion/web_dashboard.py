@@ -736,7 +736,7 @@ async function refreshStatus() {
     }
     if (e('st-stop-rec')) e('st-stop-rec').textContent = data.safety?.stop_recommended ? 'YES' : 'NO';
     if (e('st-teleop')) e('st-teleop').textContent = data.teleop?.status || 'idle';
-    if (e('st-source')) e('st-source').textContent = data.teleop?.last?.source || 'none';
+    if (e('st-source')) e('st-source').textContent = data.teleop?.mux?.source || data.teleop?.last?.source || 'none';
 
     if (e('st-log') && data.logs?.length) {
       const last = data.logs[data.logs.length-1];
@@ -931,12 +931,13 @@ class DashboardNode(Node):
         self.declare_parameter("mission_status_topic", "/ridgeback/mission/status")
         self.declare_parameter("safety_status_topic", "/ridgeback/safety/status")
         self.declare_parameter("vlm_status_topic", "/ridgeback/vlm/status")
+        self.declare_parameter("mux_status_topic", "/ridgeback/cmd_vel_mux/status")
         self.declare_parameter("teleop_linear_speed", 0.28)
         self.declare_parameter("teleop_lateral_speed", 0.28)
         self.declare_parameter("teleop_angular_speed", 0.85)
 
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
-        latch_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
         image_topic = str(self.get_parameter("image_topic").value).strip()
@@ -959,10 +960,11 @@ class DashboardNode(Node):
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
         self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
-        self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self._map_cb, latch_qos)
+        self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self._map_cb, map_qos)
         self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
         self.create_subscription(String, self.get_parameter("safety_status_topic").value, self._safety_status_cb, reliable_qos)
         self.create_subscription(String, self.get_parameter("vlm_status_topic").value, self._vlm_status_cb, reliable_qos)
+        self.create_subscription(String, self.get_parameter("mux_status_topic").value, self._mux_status_cb, reliable_qos)
         self.cmd_vel_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, sensor_qos)
         self.mission_command_pub = self.create_publisher(String, self.get_parameter("mission_command_topic").value, reliable_qos)
 
@@ -1003,6 +1005,7 @@ class DashboardNode(Node):
         self.mission_status: dict[str, Any] = {"state": "IDLE", "phase": "dashboard_only"}
         self.safety_status: dict[str, Any] = {}
         self.vlm_status: dict[str, Any] = {}
+        self.mux_status: dict[str, Any] = {}
 
         self.image_latency_ms = 0.0
         self.odom_latency_ms = 0.0
@@ -1162,6 +1165,9 @@ class DashboardNode(Node):
 
     def _vlm_status_cb(self, msg: String) -> None:
         self.vlm_status = json_loads(msg.data, self.vlm_status)
+
+    def _mux_status_cb(self, msg: String) -> None:
+        self.mux_status = json_loads(msg.data, self.mux_status)
 
     def _map_cb(self, msg: OccupancyGrid) -> None:
         try:
@@ -1355,6 +1361,7 @@ class DashboardNode(Node):
             "teleop": {
                 "status": self.teleop_status,
                 "last": self.last_teleop,
+                "mux": self.mux_status,
                 "speeds": {
                     "linear": self.teleop_linear_speed,
                     "lateral": self.teleop_lateral_speed,
