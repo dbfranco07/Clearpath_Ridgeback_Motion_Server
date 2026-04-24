@@ -51,6 +51,8 @@ class RoomDetector(Node):
         self.declare_parameter("detect_period_s", 3.0)
         self.declare_parameter("min_confidence", 0.55)
         self.declare_parameter("max_tokens", 240)
+        self.declare_parameter("max_image_long_side", 960)
+        self.declare_parameter("vlm_jpeg_quality", 70)
 
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
@@ -152,7 +154,7 @@ class RoomDetector(Node):
             self.busy = False
 
     def _call_vlm(self, jpeg: bytes) -> list[dict[str, Any]]:
-        image_b64 = base64.b64encode(jpeg).decode("ascii")
+        image_b64 = base64.b64encode(self._prepare_vlm_jpeg(jpeg)).decode("ascii")
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": "You are a precise OCR assistant for robot navigation. Reply with JSON only."},
             {
@@ -178,6 +180,29 @@ class RoomDetector(Node):
         parsed = self._extract_json(text)
         detections = parsed.get("room_detections", [])
         return detections if isinstance(detections, list) else []
+
+    def _prepare_vlm_jpeg(self, jpeg: bytes) -> bytes:
+        max_long_side = int(self.get_parameter("max_image_long_side").value)
+        jpeg_quality = int(self.get_parameter("vlm_jpeg_quality").value)
+        if max_long_side <= 0:
+            return jpeg
+
+        try:
+            import cv2
+            import numpy as np
+
+            image = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if image is None:
+                return jpeg
+            height, width = image.shape[:2]
+            long_side = max(height, width)
+            if long_side > max_long_side:
+                scale = max_long_side / float(long_side)
+                image = cv2.resize(image, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+            ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, max(30, min(95, jpeg_quality))])
+            return encoded.tobytes() if ok else jpeg
+        except Exception:
+            return jpeg
 
     def _extract_json(self, text: str) -> dict[str, Any]:
         try:

@@ -878,8 +878,9 @@ class DashboardNode(Node):
         self.declare_parameter("port", 8081)
         self.declare_parameter("host", "0.0.0.0")
         self.declare_parameter("image_topic", "/r100_0140/image/compressed")
-        self.declare_parameter("raw_image_topic", "/r100_0140/sensors/camera_0/color/image")
-        self.declare_parameter("depth_topic", "/r100_0140/sensors/camera_0/depth/image")
+        self.declare_parameter("raw_image_topic", "")
+        self.declare_parameter("depth_compressed_topic", "/r100_0140/image/depth_compressed")
+        self.declare_parameter("depth_topic", "")
         self.declare_parameter("odom_topic", "/r100_0140/platform/odom/filtered")
         self.declare_parameter("lidar_topic", "/r100_0140/sensors/lidar2d_0/scan")
         self.declare_parameter("battery_topic", "/r100_0140/platform/bms/state")
@@ -898,9 +899,19 @@ class DashboardNode(Node):
         latch_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
-        self.create_subscription(CompressedImage, self.get_parameter("image_topic").value, self._image_cb, sensor_qos)
-        self.create_subscription(Image, self.get_parameter("raw_image_topic").value, self._raw_image_cb, sensor_qos)
-        self.create_subscription(Image, self.get_parameter("depth_topic").value, self._depth_cb, sensor_qos)
+        image_topic = str(self.get_parameter("image_topic").value).strip()
+        raw_image_topic = str(self.get_parameter("raw_image_topic").value).strip()
+        depth_compressed_topic = str(self.get_parameter("depth_compressed_topic").value).strip()
+        depth_topic = str(self.get_parameter("depth_topic").value).strip()
+
+        if image_topic:
+            self.create_subscription(CompressedImage, image_topic, self._image_cb, sensor_qos)
+        if raw_image_topic:
+            self.create_subscription(Image, raw_image_topic, self._raw_image_cb, sensor_qos)
+        if depth_compressed_topic:
+            self.create_subscription(CompressedImage, depth_compressed_topic, self._depth_compressed_cb, sensor_qos)
+        if depth_topic:
+            self.create_subscription(Image, depth_topic, self._depth_cb, sensor_qos)
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
         self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
@@ -956,11 +967,12 @@ class DashboardNode(Node):
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
         self.get_logger().info(
-            "Dashboard topics: compressed=%s raw=%s depth=%s cmd_vel=%s"
+            "Dashboard topics: compressed=%s raw=%s depth_compressed=%s depth_raw=%s cmd_vel=%s"
             % (
-                self.get_parameter("image_topic").value,
-                self.get_parameter("raw_image_topic").value,
-                self.get_parameter("depth_topic").value,
+                image_topic or "disabled",
+                raw_image_topic or "disabled",
+                depth_compressed_topic or "disabled",
+                depth_topic or "disabled",
                 self.get_parameter("cmd_vel_topic").value,
             )
         )
@@ -1050,11 +1062,10 @@ class DashboardNode(Node):
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self.odom["yaw"] = math.degrees(math.atan2(siny_cosp, cosy_cosp))
 
-    def _depth_cb(self, msg: Image) -> None:
+    def _store_depth_visualization(self, depth: np.ndarray, encoding: str) -> None:
         try:
-            depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
             depth_mm = np.asarray(depth, dtype=np.float32)
-            if np.issubdtype(np.asarray(depth).dtype, np.floating) or "32F" in msg.encoding:
+            if np.issubdtype(np.asarray(depth).dtype, np.floating) or "32F" in encoding:
                 depth_mm *= 1000.0
             depth_clipped = np.clip(depth_mm, 0, 5000).astype(np.float32)
             depth_norm = (depth_clipped / 5000.0 * 255).astype(np.uint8)
@@ -1067,7 +1078,24 @@ class DashboardNode(Node):
                 self.last_depth_time = time.time()
                 self.depth_event.set()
         except Exception as exc:
-            self.get_logger().error(f'Depth cb error: {exc}')
+            self.get_logger().error(f"Depth visualization error: {exc}")
+
+    def _depth_compressed_cb(self, msg: CompressedImage) -> None:
+        try:
+            encoded = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+            depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
+            if depth is None:
+                return
+            self._store_depth_visualization(depth, msg.format)
+        except Exception as exc:
+            self.get_logger().error(f"Compressed depth cb error: {exc}")
+
+    def _depth_cb(self, msg: Image) -> None:
+        try:
+            depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+            self._store_depth_visualization(depth, msg.encoding)
+        except Exception as exc:
+            self.get_logger().error(f"Raw depth cb error: {exc}")
 
     def _lidar_cb(self, msg: LaserScan) -> None:
         finite_ranges = [value for value in msg.ranges if 0.05 < value < float("inf")]

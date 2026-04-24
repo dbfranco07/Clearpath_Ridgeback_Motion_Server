@@ -22,9 +22,11 @@ room_detector:
     vlm_status_topic: /ridgeback/vlm/status
     map_frame: map
     base_frame: r100_0140/base_link
-    detect_period_s: 3.0
+    detect_period_s: 7.0
     min_confidence: 0.55
     max_tokens: 240
+    max_image_long_side: 960
+    vlm_jpeg_quality: 70
 
 frontier_explorer:
   ros__parameters:
@@ -78,8 +80,9 @@ ridgeback_dashboard:
     host: 0.0.0.0
     port: 8081
     image_topic: /r100_0140/image/compressed
-    raw_image_topic: /r100_0140/sensors/camera_0/color/image
-    depth_topic: /r100_0140/sensors/camera_0/depth/image
+    raw_image_topic: ""
+    depth_compressed_topic: /r100_0140/image/depth_compressed
+    depth_topic: ""
     odom_topic: /r100_0140/platform/odom/filtered
     lidar_topic: /r100_0140/sensors/lidar2d_0/scan
     battery_topic: /r100_0140/platform/bms/state

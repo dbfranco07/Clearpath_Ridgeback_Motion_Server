@@ -369,3 +369,17 @@ A user must be able to instruct the Clearpath Robot to go to a certain place, a 
 5) The robot may use a VLM to recognize places and read room numbers. 
 6) You must use an onboard Jetson Orin as a safety controller in case the robot loses its network connection
 7) At all times you must consider safety of the operator and people around the robot workspace
+
+
+## Rules
+My laptop performs ssh to both jetson orin nano and clearpath ridgeback
+
+Ridgeback just runs image publisher and motion server using the script ridgeback_start.sh. nothing else
+
+However in orin we will run ridgeback_web.sh which starts the web app. Orin must also run the nav2, frontier exploration, map building in memory, slam, and calling the VLM
+
+Can you help suggest also how to perform this?
+
+Also, any code under the folder ridgeback_autonomy is to be disregared and we should be independent from it.
+
+Constraint is to make sure to do no touch the image_publisher.py and motion_server.py and the ridgeback_start.sh script.
