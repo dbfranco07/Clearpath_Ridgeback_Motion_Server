@@ -5,10 +5,10 @@ from __future__ import annotations
 
 import base64
 import math
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
 from typing import Any
 
 import cv2
@@ -20,7 +20,8 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from pydantic import BaseModel
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import BatteryState, CompressedImage, LaserScan
+from sensor_msgs.msg import BatteryState, CompressedImage, Image, LaserScan
+from cv_bridge import CvBridge
 import uvicorn
 
 from ridgeback_image_motion.srv import Motion
@@ -48,6 +49,51 @@ class TeleopRequest(BaseModel):
     source: str = "keyboard"
 
 
+def parse_intent_and_room(text: str) -> dict[str, str]:
+    lowered = text.lower().strip()
+    room = ""
+    room_match = re.search(r"(?:room|rm|r)\s*#?\s*(\d{2,4}[a-z]?)", lowered)
+    if room_match:
+        room = room_match.group(1).upper()
+
+    intent = "QUERY"
+    if re.search(r"\b(stop|halt|cancel|abort)\b", lowered):
+        intent = "STOP"
+    elif re.search(r"\b(return|go back|come back|home|start)\b", lowered):
+        intent = "RETURN_TO_START"
+    elif room and re.search(r"\b(go|navigate|head|move|find|reach|visit)\b", lowered):
+        intent = "GO_TO_ROOM"
+    elif room:
+        intent = "ROOM_QUERY"
+
+    return {"intent": intent, "room": room}
+
+
+def extract_reasoning_trace(response: Any) -> str:
+    """Best-effort extraction of model reasoning from OpenAI-compatible responses."""
+    try:
+        choice = response.choices[0]
+        message = choice.message
+    except Exception:
+        return ""
+
+    candidates: list[Any] = []
+    for attr in ("reasoning_content", "thinking", "reasoning"):
+        candidates.append(getattr(message, attr, None))
+
+    # Some OpenAI-compatible servers place additional content in model_extra.
+    model_extra = getattr(message, "model_extra", None)
+    if isinstance(model_extra, dict):
+        for key in ("reasoning_content", "thinking", "reasoning"):
+            candidates.append(model_extra.get(key))
+
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return ""
+
+
 PAGE_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -56,372 +102,766 @@ PAGE_HTML = """<!DOCTYPE html>
   <title>Ridgeback Autonomy Dashboard</title>
   <style>
     :root {
-      --bg: #0b1020;
-      --panel: #121a31;
-      --panel-2: #17213d;
-      --border: rgba(167, 189, 255, 0.16);
-      --text: #e8eeff;
-      --muted: #a2b0d4;
-      --accent: #7ee787;
-      --accent-2: #7ab7ff;
-      --warn: #ffcc66;
-      --danger: #ff7f87;
+      --bg: #0b1020; --panel: #121a31; --panel2: #17213d;
+      --border: rgba(167,189,255,0.16); --text: #e8eeff; --muted: #a2b0d4;
+      --accent: #7ee787; --accent2: #7ab7ff; --warn: #ffcc66; --danger: #ff7f87;
+      --orange: #f7941d;
     }
-    * { box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background:
-      radial-gradient(circle at top left, rgba(122, 183, 255, 0.16), transparent 30%),
-      radial-gradient(circle at bottom right, rgba(126, 231, 135, 0.08), transparent 24%),
-      var(--bg); color: var(--text); font-family: Inter, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
-    .shell { height: 100vh; display: grid; grid-template-rows: auto 1fr; gap: 12px; padding: 12px; }
-    .topbar { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 12px; align-items: stretch; }
-    .title, .mission, .stats, .camera, .map, .chat, .logs { background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent 100%), var(--panel); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 12px 40px rgba(0,0,0,.25); }
-    .title { padding: 14px 16px; display: flex; flex-direction: column; justify-content: space-between; }
-    .title h1 { margin: 0; font-size: 22px; letter-spacing: 0.02em; }
-    .title p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
-    .mission { padding: 12px 14px; display: grid; gap: 10px; }
-    .mission label, .section-label { font-size: 12px; text-transform: uppercase; letter-spacing: .12em; color: var(--muted); }
-    .mission-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; }
-    .mission-row input, .chat-input input { width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 11px 12px; outline: none; }
-    .btn { background: linear-gradient(135deg, var(--accent-2), #5f8cff); border: 0; border-radius: 12px; color: #08101f; padding: 11px 14px; font-weight: 700; cursor: pointer; }
-    .btn.secondary { background: var(--panel-2); color: var(--text); border: 1px solid var(--border); }
-    .stats { padding: 12px 14px; display: grid; gap: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .metric { background: rgba(255,255,255,0.03); border-radius: 12px; padding: 10px; min-height: 72px; }
-    .metric .k { color: var(--muted); font-size: 11px; margin-bottom: 8px; text-transform: uppercase; letter-spacing: .08em; }
-    .metric .v { font-size: 18px; font-weight: 700; }
-    .metric .s { margin-top: 4px; font-size: 12px; color: var(--muted); }
-    .main { min-height: 0; display: grid; grid-template-columns: 1.25fr 0.95fr; gap: 12px; }
-    .left, .right { min-height: 0; display: grid; gap: 12px; }
-    .left { grid-template-rows: 1fr 1fr; }
-    .right { grid-template-rows: 0.50fr 0.42fr 0.68fr 0.62fr; }
-    .camera, .map, .chat, .logs { min-height: 0; padding: 12px; display: grid; grid-template-rows: auto 1fr; }
-    .panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 10px; }
-    .panel-head h2 { margin: 0; font-size: 15px; }
-    .panel-head span { color: var(--muted); font-size: 12px; }
-    .media-frame { width: 100%; height: 100%; min-height: 0; border-radius: 12px; background: #0a0f1d; overflow: hidden; display: grid; place-items: center; }
-    .media-frame.portrait { aspect-ratio: 3 / 4; max-width: min(100%, 420px); justify-self: center; }
-    .media-frame img { width: 100%; height: 100%; object-fit: cover; }
-    #mapImage { object-fit: contain; image-rendering: pixelated; background: #0a0f1d; }
-    .teleop { min-height: 0; padding: 12px; display: grid; grid-template-rows: auto auto auto 1fr; gap: 10px; }
-    .teleop-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-    .key { border-radius: 10px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); min-height: 38px; font-weight: 700; letter-spacing: .04em; }
-    .key.active { background: linear-gradient(180deg, #7ab7ff, #5f8cff); color: #08101f; border-color: transparent; }
-    .teleop-meta { display: grid; gap: 6px; }
-    .teleop-line { color: var(--muted); font-size: 12px; }
-    .scroll { min-height: 0; overflow: auto; padding-right: 4px; }
-    .chat-feed, .log-feed { display: grid; gap: 8px; align-content: start; }
-    .bubble { background: rgba(255,255,255,0.04); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
-    .bubble .role { color: var(--accent-2); font-size: 11px; text-transform: uppercase; letter-spacing: .12em; margin-bottom: 4px; }
-    .bubble.assistant .role { color: var(--accent); }
-    .bubble .body { white-space: pre-wrap; line-height: 1.35; }
-    .chat { grid-template-rows: auto 1fr auto; }
-    .chat-input { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-top: 10px; }
-    .tiny { font-size: 11px; color: var(--muted); }
-    @media (max-width: 1200px) {
-      body, html { overflow: auto; }
-      .shell { height: auto; min-height: 100vh; }
-      .main, .topbar { grid-template-columns: 1fr; }
-      .left, .right { grid-template-rows: auto; }
-      .camera, .map, .chat, .logs, .teleop, .title, .mission, .stats { min-height: 240px; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; overflow: hidden;
+      background: radial-gradient(circle at top left, rgba(122,183,255,0.14), transparent 30%),
+                  radial-gradient(circle at bottom right, rgba(126,231,135,0.07), transparent 24%),
+                  var(--bg);
+      color: var(--text); font-family: 'Courier New', monospace; }
+    .shell { height: 100vh; display: flex; flex-direction: column; gap: 0; }
+    .header { background: rgba(0,0,0,0.5); border-bottom: 2px solid var(--orange);
+      padding: 7px 16px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    .header h1 { color: var(--orange); font-size: 1.05rem; letter-spacing: 2px; }
+    .header .sub { color: var(--muted); font-size: 0.70rem; }
+    .hdr-right { display: flex; align-items: center; gap: 12px; }
+    .conn-badge { font-size: 0.70rem; }
+
+    .grid { flex: 1; min-height: 0; display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 8px; padding: 8px; overflow: hidden; }
+    .panel { background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent),
+                          var(--panel);
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 10px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+    .panel h2 { color: var(--orange); font-size: 0.80rem; letter-spacing: 1px;
+      margin-bottom: 8px; border-bottom: 1px solid rgba(247,148,29,0.3);
+      padding-bottom: 5px; flex-shrink: 0; }
+
+    #p-rgb   { grid-column:1; grid-row:1; position:relative; }
+    #p-depth { grid-column:2; grid-row:1; position:relative; }
+    #p-lidar { grid-column:3; grid-row:1; }
+    #p-status  { grid-column:1; grid-row:2; }
+    #p-vlmlog  { grid-column:2; grid-row:2; }
+    #p-control { grid-column:3; grid-row:2; }
+
+    .feed-img { width:100%; flex:1; min-height:0; object-fit:contain;
+      border-radius:8px; display:block; max-height:calc(100% - 60px); }
+    .no-signal { display:none; position:absolute; top:36px; left:10px; right:10px;
+      background:rgba(237,28,36,0.85); color:#fff; font-size:0.72rem;
+      padding:5px 8px; border-radius:6px; text-align:center; z-index:2; }
+    .depth-legend { display:flex; align-items:center; gap:6px; font-size:0.64rem; margin-top:4px; flex-shrink:0; }
+    .depth-grad { flex:1; height:5px; border-radius:3px;
+      background:linear-gradient(to right,#4fc3f7,#00ff7f,#ffff00,#ff5252); }
+    #depth-age { color:var(--muted); }
+
+    #lidar-canvas { display:block; width:100%; aspect-ratio:1/1; border-radius:8px;
+      background:#080d18; max-height:calc(100% - 56px); }
+    .lidar-info { display:flex; gap:10px; margin-top:5px; font-size:0.70rem; color:var(--muted); flex-shrink:0; }
+    .lidar-info span { color:var(--accent2); }
+
+    .btn { padding:6px 12px; border:none; border-radius:8px; cursor:pointer;
+      font-family:'Courier New',monospace; font-size:0.75rem; transition:all 0.18s; }
+    .btn-go  { background:linear-gradient(135deg,var(--accent2),#5f8cff); color:#08101f; font-weight:700; }
+    .btn-go:hover { background:linear-gradient(135deg,#8fc8ff,#7ab7ff); }
+    .btn-stop { background:var(--danger); color:#08101f; font-weight:700; }
+    .btn-stop:hover { background:#ff9ea4; }
+    .btn-sec { background:var(--panel2); color:var(--text); border:1px solid var(--border); }
+    .btn-sec:hover { background:rgba(255,255,255,0.12); }
+    .btn-xs { padding:2px 6px; font-size:0.62rem; }
+
+    #p-status, #p-control { display:flex; flex-direction:column; }
+    .tab-bar { display:flex; align-items:center; gap:6px; margin-bottom:8px;
+      border-bottom:1px solid rgba(247,148,29,0.3); padding-bottom:5px; flex-shrink:0; }
+    .tab-bar h2 { flex:1; border:none; margin:0; padding:0; }
+    .tab-btn { padding:3px 9px; font-family:'Courier New',monospace; font-size:0.66rem;
+      background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.18);
+      border-radius:6px; color:var(--muted); cursor:pointer; transition:all 0.15s; }
+    .tab-btn:hover { background:rgba(247,148,29,0.2); color:var(--orange); }
+    .tab-btn.on { background:rgba(247,148,29,0.22); border-color:var(--orange); color:var(--orange); }
+    .pane { flex:1; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+
+    .ss { border-bottom:1px solid rgba(255,255,255,0.07); padding:5px 0; }
+    .sr { display:flex; align-items:center; gap:5px; font-size:0.68rem; flex-wrap:wrap; margin-bottom:2px; }
+    .sl { color:var(--muted); font-size:0.61rem; text-transform:uppercase; }
+    .sv { color:var(--accent2); font-size:0.73rem; }
+    .lv { color:var(--orange); font-size:0.70rem; }
+    .batt-wrap { flex:1; height:7px; background:rgba(255,255,255,0.1); border-radius:4px; overflow:hidden; }
+    .batt-bar  { height:100%; border-radius:4px; transition:width 1s,background 1s; }
+    .mlog { overflow-x:auto; white-space:nowrap; font-size:0.63rem; color:#9ad2ff;
+      border:1px solid rgba(79,195,247,0.25); border-radius:4px; padding:3px 5px; margin-top:3px; }
+
+    .list-wrap { flex:1; min-height:0; overflow-y:auto; border:1px solid var(--border); border-radius:8px; padding:6px; background:rgba(0,0,0,0.18); }
+    .mono-line { font-size:0.65rem; color:#d8e7ff; border-bottom:1px dashed rgba(255,255,255,0.08); padding:4px 0; }
+    .mono-line:last-child { border-bottom:none; }
+    .small-note { color:var(--muted); font-size:0.62rem; margin-top:6px; }
+
+    #vlm-log { flex:1; min-height:0; overflow-y:auto; font-size:0.68rem; }
+    .vlm-filter { display:flex; gap:5px; }
+    .bubble { background:rgba(255,255,255,0.04); border:1px solid var(--border);
+      border-radius:10px; padding:8px 10px; margin-bottom:6px; }
+    .bubble .role { color:var(--accent2); font-size:0.60rem; text-transform:uppercase;
+      letter-spacing:.10em; margin-bottom:3px; }
+    .bubble .body { white-space:pre-wrap; line-height:1.3; font-size:0.68rem; }
+
+    .kbd-hint { font-size:0.63rem; color:var(--muted); margin-bottom:5px; flex-shrink:0; }
+    .dpad { display:grid; grid-template-columns:repeat(3,clamp(38px,5vh,54px));
+      grid-template-rows:repeat(3,clamp(38px,5vh,54px)); gap:4px; margin:4px auto;
+      width:fit-content; flex-shrink:0; }
+    .dk { width:clamp(38px,5vh,54px); height:clamp(38px,5vh,54px);
+      background:linear-gradient(160deg,rgba(122,183,255,0.15),rgba(255,255,255,0.06));
+      border:1px solid rgba(255,255,255,0.22); border-radius:9px; color:var(--text);
+      cursor:pointer; font-size:1.05rem; display:flex; align-items:center;
+      justify-content:center; transition:all 0.1s; user-select:none; }
+    .dk:hover { background:rgba(122,183,255,0.28); border-color:var(--accent2); }
+    .dk.active { background:var(--accent2); color:#08101f; border-color:#8fc8ff; }
+    .dk-stop { background:rgba(237,28,36,0.25); border-color:var(--danger); }
+    .spd { display:flex; gap:10px; margin-top:5px; font-size:0.70rem; flex-shrink:0; }
+    .spd label { display:flex; flex-direction:column; gap:2px; }
+    .spd input[type=range] { width:85px; }
+    .toggles { margin-top:8px; display:flex; flex-direction:column; gap:4px; }
+    .toggles label { font-size:0.64rem; color:var(--muted); display:flex; align-items:center; gap:6px; }
+
+    .chat-hist { flex:1; min-height:0; overflow-y:auto; font-size:0.68rem;
+      border:1px solid var(--border); border-radius:8px; padding:6px; margin-bottom:7px;
+      background:rgba(0,0,0,0.18); }
+    .chat-row { display:flex; gap:6px; flex-shrink:0; }
+    .chat-row input { flex:1; background:var(--panel2); border:1px solid rgba(247,148,29,0.45);
+      color:var(--text); padding:6px 9px; border-radius:8px; font-family:'Courier New',monospace;
+      font-size:0.74rem; outline:none; }
+    .chat-row input::placeholder { color:rgba(162,176,212,0.5); }
+    .cu { color:var(--orange); margin-bottom:2px; }
+    .ca { color:var(--accent2); margin-bottom:7px; }
+    .ct { color:rgba(162,176,212,0.5); font-size:0.61rem; }
+
+    .mission-pane { display:flex; flex-direction:column; gap:7px; }
+    .mission-row { display:flex; gap:6px; }
+    .mission-row input { flex:1; background:var(--panel2); border:1px solid rgba(247,148,29,0.45);
+      color:var(--text); padding:6px 9px; border-radius:8px; font-family:'Courier New',monospace;
+      font-size:0.72rem; outline:none; }
+    .chip-row { display:flex; gap:6px; flex-wrap:wrap; }
+    .chip { padding:5px 8px; border-radius:999px; border:1px solid rgba(255,255,255,0.2); background:rgba(255,255,255,0.06); color:var(--text); font-size:0.63rem; cursor:pointer; }
+    .chip:hover { border-color:var(--orange); color:var(--orange); }
+
+    @media (max-width:900px) {
+      html,body { overflow:auto; }
+      .grid { grid-template-columns:1fr; grid-template-rows:auto; overflow:visible; }
+      #p-rgb,#p-depth,#p-lidar,#p-status,#p-vlmlog,#p-control { grid-column:1; grid-row:auto; min-height:280px; }
+      .feed-img { max-height:200px; }
+      #lidar-canvas { max-height:200px; }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <div class="topbar">
-      <div class="title">
-        <div>
-          <h1>Ridgeback Autonomy Dashboard</h1>
-          <p>One-screen control plane for SLAM, Nav2, spatial memory, and external VLM chat.</p>
-        </div>
-        <div class="tiny" id="connectionText">Waiting for robot state...</div>
-      </div>
-      <div class="mission">
-        <label for="missionInput">Mission command</label>
-        <div class="mission-row">
-          <input id="missionInput" type="text" placeholder="Go to room 305, find the landmark, and return home" />
-          <button class="btn" onclick="sendMission()">Send</button>
-          <button class="btn secondary" onclick="resetMission()">Clear</button>
-        </div>
-        <div class="tiny">Natural language is routed to the mission layer; the goal is tabula rasa SLAM and return-to-start.</div>
-      </div>
-      <div class="stats" id="statsGrid"></div>
+<div class="shell">
+  <div class="header">
+    <div>
+      <h1>RIDGEBACK R100 — AUTONOMY DASHBOARD</h1>
+      <div class="sub">r100-0140 · ROS2 Humble · SLAM + VLM</div>
     </div>
-
-    <div class="main">
-      <div class="left">
-        <section class="camera">
-          <div class="panel-head"><h2>Camera</h2><span id="cameraMeta">portrait stream</span></div>
-          <div class="media-frame portrait">
-            <img id="cameraImage" src="/video_feed" alt="Camera feed" />
-          </div>
-        </section>
-        <section class="map">
-          <div class="panel-head"><h2>SLAM Map</h2><span id="mapMeta">OccupancyGrid portrait</span></div>
-          <div class="media-frame portrait">
-            <img id="mapImage" src="/api/map.png" alt="Map" />
-          </div>
-        </section>
-      </div>
-
-      <div class="right">
-        <section class="teleop title">
-          <div class="panel-head"><h2>Manual Teleop</h2><span id="teleopState">idle</span></div>
-          <div class="teleop-meta">
-            <div class="teleop-line">Keyboard: W A S D for translation, Q/E for rotation.</div>
-            <div class="teleop-line">Focus is ignored while typing in input boxes.</div>
-            <div class="teleop-line" id="teleopVelocity">vx 0.00 • vy 0.00 • wz 0.00</div>
-          </div>
-          <div class="teleop-grid">
-            <button class="key" id="key-q" disabled>Q</button>
-            <button class="key" id="key-w" disabled>W</button>
-            <button class="key" id="key-e" disabled>E</button>
-            <button class="key" id="key-a" disabled>A</button>
-            <button class="key" id="key-s" disabled>S</button>
-            <button class="key" id="key-d" disabled>D</button>
-          </div>
-          <button class="btn secondary" onclick="sendTeleopStop()">Stop Robot</button>
-        </section>
-        <section class="logs">
-          <div class="panel-head"><h2>VLM Logs</h2><span>External vLLM chat + perception notes</span></div>
-          <div class="scroll">
-            <div id="logFeed" class="log-feed"></div>
-          </div>
-        </section>
-        <section class="chat">
-          <div class="panel-head"><h2>VLM Chat</h2><span>Qwen served from the external endpoint</span></div>
-          <div class="scroll"><div id="chatFeed" class="chat-feed"></div></div>
-          <div class="chat-input">
-            <input id="chatInput" type="text" placeholder="Ask about the room number, route, or what the robot sees" />
-            <button class="btn" onclick="sendChat()">Ask</button>
-          </div>
-        </section>
-        <section class="logs">
-          <div class="panel-head"><h2>Robot Status</h2><span id="statusMeta">live</span></div>
-          <div class="scroll"><div id="statusFeed" class="log-feed"></div></div>
-        </section>
-      </div>
+    <div class="hdr-right">
+      <span id="conn-badge" class="conn-badge" style="color:var(--accent)">● CONNECTED</span>
     </div>
   </div>
 
-  <script>
-    let lastMapStamp = "";
-    let lastLogCount = 0;
-    let lastChatCount = 0;
-    const pressedKeys = new Set();
-    let teleopTimer = null;
-    let teleopSpeeds = { linear: 0.28, lateral: 0.28, angular: 0.85 };
+  <div class="grid">
 
-    function kvLine(label, value) {
-      return `<div class="bubble"><div class="role">${label}</div><div class="body">${value}</div></div>`;
+    <!-- Box 1: RGB Camera -->
+    <div class="panel" id="p-rgb">
+      <h2>RGB CAMERA</h2>
+      <img class="feed-img" id="rgb-img" src="/video_feed" alt="Camera">
+      <div class="no-signal" id="rgb-nosig">NO CAMERA SIGNAL</div>
+    </div>
+
+    <!-- Box 2: Depth Camera -->
+    <div class="panel" id="p-depth">
+      <h2>DEPTH CAMERA</h2>
+      <img class="feed-img" id="depth-img" src="/depth_feed" alt="Depth">
+      <div class="no-signal" id="depth-nosig">NO DEPTH SIGNAL</div>
+      <div class="depth-legend">
+        <span style="color:var(--accent2)">NEAR</span>
+        <div class="depth-grad"></div>
+        <span style="color:#ff5252">FAR 5m</span>
+        <span id="depth-age"></span>
+      </div>
+    </div>
+
+    <!-- Box 3: LiDAR Scan -->
+    <div class="panel" id="p-lidar">
+      <h2>LIDAR SCAN</h2>
+      <canvas id="lidar-canvas" width="600" height="600"></canvas>
+      <div class="lidar-info">
+        Closest: <span id="lid-closest">--</span>m &nbsp; Pts: <span id="lid-pts">--</span>
+      </div>
+    </div>
+
+    <!-- Box 4: System Status -->
+    <div class="panel" id="p-status">
+      <div class="tab-bar">
+        <h2>SYSTEM STATUS</h2>
+        <button id="st-tab-ops" class="tab-btn on" onclick="switchStatusTab('ops')">OPS+SAFETY</button>
+        <button id="st-tab-mm" class="tab-btn" onclick="switchStatusTab('mm')">MISSION+MEM</button>
+      </div>
+
+      <div class="pane" id="status-pane-ops">
+        <div class="ss">
+          <div class="sr">
+            <span class="sl">BATTERY</span>
+            <div class="batt-wrap"><div id="batt-bar" class="batt-bar" style="width:0%;background:var(--accent)"></div></div>
+            <span id="batt-pct" class="sv">--%</span>
+            <span id="batt-v" class="sv">--V</span>
+          </div>
+        </div>
+        <div class="ss">
+          <div class="sr">
+            X:<span id="p-x" class="sv">--</span>m
+            Y:<span id="p-y" class="sv">--</span>m
+            YAW:<span id="p-yaw" class="sv">--</span>°
+          </div>
+          <div class="sr">
+            <span class="sl">LATENCY</span>
+            IMG<span id="lat-img" class="lv">--</span>
+            ODO<span id="lat-odo" class="lv">--</span>
+          </div>
+        </div>
+        <div class="ss">
+          <div class="sr">
+            <span class="sl">LIDAR</span>
+            Closest <span id="st-lid" class="sv">--</span>m
+            &nbsp; Pts <span id="st-pts" class="sv">--</span>
+          </div>
+          <div class="sr">
+            <span class="sl">CAM</span><span id="st-cam" class="sv">--</span>
+            &nbsp;<span class="sl">MAP</span><span id="st-map" class="sv">--</span>
+          </div>
+        </div>
+        <div class="ss">
+          <div class="sr">
+            <span class="sl">SAFETY</span>
+            Risk <span id="st-risk" class="sv">UNKNOWN</span>
+            &nbsp; Stop Rec <span id="st-stop-rec" class="sv">NO</span>
+          </div>
+          <div class="sr">
+            <span class="sl">MODE</span><span id="st-teleop" class="sv">idle</span>
+            &nbsp;<span class="sl">SOURCE</span><span id="st-source" class="sv">none</span>
+          </div>
+        </div>
+        <div id="st-log" class="mlog">--</div>
+      </div>
+
+      <div class="pane" id="status-pane-mm" style="display:none">
+        <div class="ss">
+          <div class="sr">
+            <span class="sl">MISSION</span>
+            <span id="mm-intent" class="sv">--</span>
+            <span id="mm-room" class="sv">--</span>
+          </div>
+          <div class="sr">
+            <span class="sl">LAST CMD</span>
+            <span id="mm-command" class="sv">--</span>
+          </div>
+        </div>
+
+        <div class="ss" style="padding-bottom:8px">
+          <div class="sr">
+            <span class="sl">RECENT MISSIONS</span>
+            <span id="mm-mission-count" class="sv">0</span>
+          </div>
+          <div id="mm-missions" class="list-wrap"></div>
+        </div>
+
+        <div class="ss" style="padding-bottom:8px">
+          <div class="sr">
+            <span class="sl">MEMORY LOCATIONS</span>
+            <span id="mm-loc-count" class="sv">0</span>
+          </div>
+          <div id="mm-locs" class="list-wrap"></div>
+        </div>
+
+        <div class="small-note">Mission status here reflects dashboard-level mission queue and memory, not Nav2 mission ground truth.</div>
+      </div>
+    </div>
+
+    <!-- Box 5: VLM Logs -->
+    <div class="panel" id="p-vlmlog">
+      <div class="tab-bar">
+        <h2>VLM LOGS</h2>
+        <div class="vlm-filter">
+          <button id="vlm-f-all" class="tab-btn on" onclick="setVlmFilter('all')">ALL</button>
+          <button id="vlm-f-prompt" class="tab-btn" onclick="setVlmFilter('prompt')">PROMPT</button>
+          <button id="vlm-f-mission" class="tab-btn" onclick="setVlmFilter('mission')">MISSION</button>
+          <button id="vlm-f-system" class="tab-btn" onclick="setVlmFilter('system')">SYSTEM</button>
+        </div>
+      </div>
+      <div id="vlm-log"></div>
+    </div>
+
+    <!-- Box 6: Switchable Control -->
+    <div class="panel" id="p-control">
+      <div class="tab-bar">
+        <h2>CONTROL</h2>
+        <button id="tab-teleop"  class="tab-btn on"  onclick="switchControlTab('teleop')">TELEOP</button>
+        <button id="tab-prompt"  class="tab-btn"     onclick="switchControlTab('prompt')">VLM PROMPT</button>
+        <button id="tab-mission" class="tab-btn"     onclick="switchControlTab('mission')">MISSION</button>
+      </div>
+
+      <!-- Teleop pane -->
+      <div class="pane" id="pane-teleop">
+        <div class="kbd-hint">W/A/S/D = move &nbsp; Q/E = rotate &nbsp; Space = stop</div>
+        <div class="dpad">
+          <button class="dk" id="dk-fl" data-lin="1"  data-lat="1"  data-ang="0">↖</button>
+          <button class="dk" id="dk-f"  data-lin="1"  data-lat="0"  data-ang="0">↑</button>
+          <button class="dk" id="dk-fr" data-lin="1"  data-lat="-1" data-ang="0">↗</button>
+          <button class="dk" id="dk-sl" data-lin="0"  data-lat="1"  data-ang="0">←</button>
+          <button class="dk dk-stop"    onclick="stopRobot()">■</button>
+          <button class="dk" id="dk-sr" data-lin="0"  data-lat="-1" data-ang="0">→</button>
+          <button class="dk" id="dk-bl" data-lin="-1" data-lat="1"  data-ang="0">↙</button>
+          <button class="dk" id="dk-b"  data-lin="-1" data-lat="0"  data-ang="0">↓</button>
+          <button class="dk" id="dk-br" data-lin="-1" data-lat="-1" data-ang="0">↘</button>
+        </div>
+        <div style="display:flex;gap:8px;justify-content:center;margin-top:4px">
+          <button class="dk" id="dk-ccw" data-lin="0" data-lat="0" data-ang="1">↺</button>
+          <button class="dk" id="dk-cw"  data-lin="0" data-lat="0" data-ang="-1">↻</button>
+        </div>
+        <div class="spd">
+          <label>Lin <span id="lbl-lin">0.28</span>m/s
+            <input type="range" id="spd-lin" min="0.05" max="0.5" step="0.05" value="0.28"
+                   oninput="document.getElementById('lbl-lin').textContent=parseFloat(this.value).toFixed(2)">
+          </label>
+          <label>Ang <span id="lbl-ang">0.85</span>r/s
+            <input type="range" id="spd-ang" min="0.1" max="1.5" step="0.1" value="0.85"
+                   oninput="document.getElementById('lbl-ang').textContent=parseFloat(this.value).toFixed(2)">
+          </label>
+        </div>
+        <div class="toggles">
+          <label><input id="tg-kbd" type="checkbox" checked> Enable keyboard teleop</label>
+          <label><input id="tg-stop" type="checkbox" checked> Auto-stop on blur/tab hidden</label>
+        </div>
+        <button class="btn btn-stop" style="width:100%;margin-top:6px" onclick="stopRobot()">■ STOP</button>
+      </div>
+
+      <!-- VLM Prompt pane -->
+      <div class="pane" id="pane-prompt" style="display:none">
+        <div id="chat-hist" class="chat-hist"></div>
+        <div class="chat-row">
+          <input id="chat-input" type="text" placeholder='"what do you see" or "go to room 202 and return"'>
+          <button class="btn btn-go" onclick="sendChat()">SEND</button>
+        </div>
+      </div>
+
+      <!-- Mission pane -->
+      <div class="pane" id="pane-mission" style="display:none">
+        <div class="mission-pane">
+          <div class="mission-row">
+            <input id="mission-room" type="text" placeholder="Room number, e.g. 202">
+            <button class="btn btn-go" onclick="sendGoRoom()">GO</button>
+          </div>
+          <div class="chip-row">
+            <button class="chip" onclick="sendMissionCommand('go to room '+roomField()+' and return to start')">Go + Return</button>
+            <button class="chip" onclick="sendMissionCommand('return to start')">Return to Start</button>
+            <button class="chip" onclick="sendMissionCommand('stop mission')">Stop Mission</button>
+            <button class="chip" onclick="sendMissionCommand('what do you see')">What do you see</button>
+          </div>
+          <div class="small-note">Natural language mission commands are queued and tracked in Box 4 Mission+Mem.</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const pressedKeys = new Set();
+let teleopTimer = null;
+let btnTeleopTimer = null;
+let activeDk = null;
+let teleopSpeeds = {linear: 0.28, lateral: 0.28, angular: 0.85};
+let allowKeyboardTeleop = true;
+let stopOnBlur = true;
+let statusTab = 'ops';
+let controlTab = 'teleop';
+let vlmFilter = 'all';
+let lastLogCount = 0;
+let lastChatCount = 0;
+let latestVlmEvents = [];
+
+function switchStatusTab(tab) {
+  statusTab = tab;
+  ['ops', 'mm'].forEach(t => {
+    document.getElementById('status-pane-'+t).style.display = t===tab ? 'flex' : 'none';
+    document.getElementById('st-tab-'+t).classList.toggle('on', t===tab);
+  });
+}
+
+function switchControlTab(tab) {
+  controlTab = tab;
+  ['teleop','prompt', 'mission'].forEach(t => {
+    document.getElementById('pane-'+t).style.display = t===tab ? 'flex' : 'none';
+    document.getElementById('tab-'+t).classList.toggle('on', t===tab);
+  });
+}
+
+document.querySelectorAll('.dk[data-lin]').forEach(btn => {
+  btn.addEventListener('click', () => toggleDk(btn));
+});
+
+function setVlmFilter(kind) {
+  vlmFilter = kind;
+  ['all', 'prompt', 'mission', 'system'].forEach(t => {
+    document.getElementById('vlm-f-'+t).classList.toggle('on', t === kind);
+  });
+  renderVlmTimeline();
+}
+
+function toggleDk(btn) {
+  if (teleopTimer) return;
+  if (activeDk === btn) { stopRobot(); return; }
+  if (activeDk) activeDk.classList.remove('active');
+  activeDk = btn; btn.classList.add('active');
+  clearInterval(btnTeleopTimer);
+  sendDk(btn);
+  btnTeleopTimer = setInterval(() => sendDk(btn), 100);
+}
+
+function sendDk(btn) {
+  const lin = parseFloat(btn.dataset.lin);
+  const lat = parseFloat(btn.dataset.lat);
+  const ang = parseFloat(btn.dataset.ang);
+  const ls = parseFloat(document.getElementById('spd-lin').value);
+  const as = parseFloat(document.getElementById('spd-ang').value);
+  sendTeleop(lin*ls, lat*ls, ang*as, 'button');
+}
+
+function stopRobot() {
+  clearInterval(btnTeleopTimer); btnTeleopTimer = null;
+  pressedKeys.clear();
+  if (teleopTimer) { clearInterval(teleopTimer); teleopTimer = null; }
+  if (activeDk) { activeDk.classList.remove('active'); activeDk = null; }
+  sendTeleop(0, 0, 0, 'stop');
+}
+
+const TKEYS = ['w','a','s','d','q','e'];
+
+function kbdTick() {
+  const ls = parseFloat(document.getElementById('spd-lin').value);
+  const as = parseFloat(document.getElementById('spd-ang').value);
+  let lin=0, lat=0, ang=0;
+  if (pressedKeys.has('w')) lin =  ls;
+  if (pressedKeys.has('s')) lin = -ls;
+  if (pressedKeys.has('a')) lat =  ls;
+  if (pressedKeys.has('d')) lat = -ls;
+  if (pressedKeys.has('q')) ang =  as;
+  if (pressedKeys.has('e')) ang = -as;
+  sendTeleop(lin, lat, ang, 'keyboard');
+}
+
+function shouldIgnore(e) { const t=(e.target?.tagName||'').toLowerCase(); return t==='input'||t==='textarea'; }
+
+window.addEventListener('keydown', e => {
+  if (!allowKeyboardTeleop) return;
+  if (e.repeat || shouldIgnore(e)) return;
+  const k = e.key.toLowerCase();
+  if (k === ' ') { e.preventDefault(); stopRobot(); return; }
+  if (!TKEYS.includes(k)) return;
+  e.preventDefault();
+  pressedKeys.add(k);
+  if (btnTeleopTimer) { clearInterval(btnTeleopTimer); btnTeleopTimer = null; }
+  if (activeDk) { activeDk.classList.remove('active'); activeDk = null; }
+  if (!teleopTimer) { kbdTick(); teleopTimer = setInterval(kbdTick, 100); }
+});
+
+window.addEventListener('keyup', e => {
+  if (!allowKeyboardTeleop) return;
+  if (shouldIgnore(e)) return;
+  pressedKeys.delete(e.key.toLowerCase());
+  if (pressedKeys.size === 0 && teleopTimer) {
+    clearInterval(teleopTimer); teleopTimer = null;
+    sendTeleop(0, 0, 0, 'keyboard_release');
+  }
+});
+
+window.addEventListener('blur', () => {
+  if (!stopOnBlur) return;
+  pressedKeys.clear();
+  if (teleopTimer) { clearInterval(teleopTimer); teleopTimer = null; sendTeleop(0,0,0,'blur'); }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (!stopOnBlur) return;
+  if (document.visibilityState === 'hidden') {
+    pressedKeys.clear();
+    if (teleopTimer) { clearInterval(teleopTimer); teleopTimer = null; sendTeleop(0,0,0,'blur'); }
+  }
+});
+
+async function sendTeleop(linear, lateral, angular, source='keyboard') {
+  fetch('/api/teleop', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({linear, lateral, angular, source})}).catch(()=>{});
+}
+
+function escHtml(v) {
+  return String(v).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;');
+}
+
+function roomField() {
+  const value = document.getElementById('mission-room').value.trim();
+  return value || '202';
+}
+
+async function sendMissionCommand(command) {
+  await fetch('/api/mission', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({command})}).catch(()=>{});
+  await refreshStatus();
+}
+
+async function sendGoRoom() {
+  await sendMissionCommand('go to room ' + roomField());
+}
+
+function renderMissionList(items) {
+  if (!items || !items.length) return '<div class="mono-line">No mission records yet.</div>';
+  return items.slice(0, 12).map(item => {
+    const intent = item.intent || 'UNKNOWN';
+    const room = item.room ? ' room ' + item.room : '';
+    const cmd = escHtml(item.command || '');
+    return `<div class="mono-line">[${escHtml(item.timestamp || '--:--:--')}] ${escHtml(intent)}${escHtml(room)} :: ${cmd}</div>`;
+  }).join('');
+}
+
+function renderLocationList(items) {
+  if (!items || !items.length) return '<div class="mono-line">No stored locations yet.</div>';
+  return items.slice(0, 12).map(item => {
+    const label = item.label || item.room_number || 'location';
+    const conf = Number(item.confidence ?? 0).toFixed(2);
+    return `<div class="mono-line">${escHtml(label)} @ (${Number(item.x||0).toFixed(2)}, ${Number(item.y||0).toFixed(2)}) conf ${conf}</div>`;
+  }).join('');
+}
+
+function renderVlmTimeline() {
+  const list = document.getElementById('vlm-log');
+  if (!list) return;
+  const source = latestVlmEvents || [];
+  const filtered = source.filter(item => {
+    if (vlmFilter === 'all') return true;
+    return (item.kind || '').toLowerCase() === vlmFilter;
+  });
+  if (!filtered.length) {
+    list.innerHTML = '<div class="bubble"><div class="role">NO EVENTS</div><div class="body">No VLM timeline entries for this filter yet.</div></div>';
+    return;
+  }
+
+  list.innerHTML = [...filtered].reverse().slice(0, 30).map(item => {
+    const role = `${escHtml(item.timestamp || '--:--:--')} · ${escHtml(item.kind || 'event')} · ${escHtml(item.status || 'ok')}`;
+    const prompt = item.prompt ? `PROMPT: ${item.prompt}\n` : '';
+    const answer = item.answer ? `ANSWER: ${item.answer}\n` : '';
+    const parse = item.intent ? `PARSED: ${item.intent}${item.room ? ' room ' + item.room : ''}\n` : '';
+    const latency = Number(item.latency_ms || 0) > 0 ? `LATENCY: ${Number(item.latency_ms).toFixed(0)} ms\n` : '';
+    const thought = item.thinking ? `THINKING:\n${item.thinking}` : '';
+    const body = (prompt + answer + parse + latency + thought).trim() || item.text || '(empty)';
+    return `<div class="bubble"><div class="role">${role}</div><div class="body">${escHtml(body)}</div></div>`;
+  }).join('');
+}
+
+async function refreshStatus() {
+  try {
+    const [data, depthSt] = await Promise.all([
+      fetch('/api/status').then(r => r.json()),
+      fetch('/depth_status').then(r => r.json())
+    ]);
+    teleopSpeeds = data.teleop?.speeds || teleopSpeeds;
+
+    // Header connection
+    const badge = document.getElementById('conn-badge');
+    if (badge) { badge.textContent = data.connected ? '● CONNECTED' : '○ WAITING';
+                 badge.style.color = data.connected ? 'var(--accent)' : 'var(--warn)'; }
+
+    // Battery
+    const pct = parseFloat(data.battery_pct ?? 0);
+    const bar = document.getElementById('batt-bar');
+    if (bar) { bar.style.width = pct.toFixed(0)+'%';
+               bar.style.background = pct<20?'var(--danger)':pct<40?'var(--warn)':'var(--accent)'; }
+    const e = id => document.getElementById(id);
+    if (e('batt-pct')) e('batt-pct').textContent = pct.toFixed(1)+'%';
+    if (e('batt-v'))   e('batt-v').textContent   = (data.battery_voltage??0).toFixed(1)+'V';
+
+    // Pose / latency
+    const pose = data.pose || {};
+    if (e('p-x'))   e('p-x').textContent   = (pose.x??0).toFixed(2);
+    if (e('p-y'))   e('p-y').textContent   = (pose.y??0).toFixed(2);
+    if (e('p-yaw')) e('p-yaw').textContent = (pose.yaw_deg??0).toFixed(1);
+    if (e('lat-img')) e('lat-img').textContent = (data.latency?.image_ms??0).toFixed(0)+'ms';
+    if (e('lat-odo')) e('lat-odo').textContent = (data.latency?.odom_ms??0).toFixed(0)+'ms';
+
+    // LiDAR
+    if (e('st-lid')) e('st-lid').textContent = (data.lidar?.closest_m??0).toFixed(2);
+    if (e('st-pts')) e('st-pts').textContent = (data.lidar?.range_count??0);
+
+    // Camera / map connection
+    const camOk = data.latency?.image_ms > 0 && data.latency?.image_ms < 5000;
+    if (e('st-cam')) { e('st-cam').textContent = camOk ? 'OK' : 'LOST';
+                       e('st-cam').style.color = camOk ? 'var(--accent)' : 'var(--danger)'; }
+    const mapOk = data.map?.width > 0;
+    if (e('st-map')) { e('st-map').textContent = mapOk ? data.map.meta : 'WAITING';
+                       e('st-map').style.color = mapOk ? 'var(--accent2)' : 'var(--muted)'; }
+
+    if (e('st-risk')) {
+      e('st-risk').textContent = data.safety?.risk_level || 'UNKNOWN';
+      const risk = (data.safety?.risk_level || '').toUpperCase();
+      e('st-risk').style.color = risk === 'DANGER' ? 'var(--danger)' : (risk === 'WARNING' ? 'var(--warn)' : 'var(--accent)');
+    }
+    if (e('st-stop-rec')) e('st-stop-rec').textContent = data.safety?.stop_recommended ? 'YES' : 'NO';
+    if (e('st-teleop')) e('st-teleop').textContent = data.teleop?.status || 'idle';
+    if (e('st-source')) e('st-source').textContent = data.teleop?.last?.source || 'none';
+
+    if (e('st-log') && data.logs?.length) {
+      const last = data.logs[data.logs.length-1];
+      e('st-log').textContent = `[${last.timestamp}] ${last.kind}: ${last.text}`;
     }
 
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
+    if (e('mm-intent')) e('mm-intent').textContent = data.mission?.last_intent || 'NONE';
+    if (e('mm-room')) e('mm-room').textContent = data.mission?.last_room ? `ROOM ${data.mission.last_room}` : 'NO ROOM';
+    if (e('mm-command')) e('mm-command').textContent = data.mission?.command || '--';
+    if (e('mm-mission-count')) e('mm-mission-count').textContent = String(data.memory?.mission_count || 0);
+    if (e('mm-loc-count')) e('mm-loc-count').textContent = String(data.memory?.location_count || 0);
+    if (e('mm-missions')) e('mm-missions').innerHTML = renderMissionList(data.mission?.recent || []);
+    if (e('mm-locs')) e('mm-locs').innerHTML = renderLocationList(data.memory?.recent_locations || []);
+
+    const dno = document.getElementById('depth-nosig');
+    if (dno) dno.style.display = (!depthSt.has_frame || depthSt.age_s > 3) ? 'block' : 'none';
+    if (e('depth-age') && depthSt.age_s >= 0) e('depth-age').textContent = depthSt.age_s.toFixed(1)+'s';
+
+    const cno = document.getElementById('rgb-nosig');
+    if (cno) cno.style.display = !camOk ? 'block' : 'none';
+
+    const logs = data.logs || [];
+    if (logs.length !== lastLogCount) {
+      lastLogCount = logs.length;
     }
 
-    async function refreshStatus() {
-      const response = await fetch('/api/status');
-      const data = await response.json();
-      teleopSpeeds = data.teleop?.speeds || teleopSpeeds;
-      const stats = [
-        ['Battery', `${data.battery_pct.toFixed(0)}%`, data.battery_voltage.toFixed(1) + ' V'],
-        ['Pose', `${data.pose.x.toFixed(2)}, ${data.pose.y.toFixed(2)}`, `yaw ${data.pose.yaw_deg.toFixed(1)}°`],
-        ['Map', `${data.map.width} x ${data.map.height}`, `${data.map.resolution.toFixed(3)} m/cell`],
-        ['Camera', `${data.latency.image_ms.toFixed(0)} ms`, `odom ${data.latency.odom_ms.toFixed(0)} ms`],
-        ['Mission', data.mission.state, data.mission.command || 'idle'],
-        ['VLM', `${data.vlm.chat_count} chat`, `${data.vlm.log_count} log entries`],
-        ['Memory', `${data.memory.location_count} locations`, `${data.memory.mission_count} missions`],
-      ];
-      document.getElementById('statsGrid').innerHTML = stats.map(([k, v, s]) => `
-        <div class="metric"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join('');
-      document.getElementById('connectionText').textContent = data.connected ? 'Connected to ROS topics' : 'Waiting for ROS topics';
-      document.getElementById('statusMeta').textContent = `${data.mission.state} • ${data.vlm.chat_count} chats`;
-      document.getElementById('cameraMeta').textContent = `portrait stream • ${data.latency.image_ms.toFixed(0)} ms`;
-      document.getElementById('teleopState').textContent = data.teleop?.status || 'idle';
-      const t = data.teleop?.last || {linear: 0, lateral: 0, angular: 0};
-      document.getElementById('teleopVelocity').textContent = `vx ${Number(t.linear).toFixed(2)} • vy ${Number(t.lateral).toFixed(2)} • wz ${Number(t.angular).toFixed(2)}`;
+    latestVlmEvents = data.vlm?.events || [];
+    if (!latestVlmEvents.length && logs.length) {
+      latestVlmEvents = logs.map(item => ({
+        timestamp: item.timestamp,
+        kind: item.kind,
+        status: 'ok',
+        text: item.text,
+      }));
+    }
+    renderVlmTimeline();
 
-      const statusItems = [
-        ['Connection', data.connected ? 'ROS topics active' : 'No active topics'],
-        ['Closest obstacle', `${data.lidar.closest_m.toFixed(2)} m`],
-        ['Mission queue', String(data.mission.queue_length)],
-        ['Last map update', data.map.updated_at || 'none'],
-      ];
-      document.getElementById('statusFeed').innerHTML = statusItems.map(([k, v]) => kvLine(k, escapeHtml(v))).join('');
-
-      if (data.map.image_stamp !== lastMapStamp && data.map.image_url) {
-        lastMapStamp = data.map.image_stamp;
-        const mapImage = document.getElementById('mapImage');
-        mapImage.src = data.map.image_url + `?t=${Date.now()}`;
-        document.getElementById('mapMeta').textContent = data.map.meta;
+    const chat = data.chat_history || [];
+    if (chat.length !== lastChatCount) {
+      lastChatCount = chat.length;
+      const hist = document.getElementById('chat-hist');
+      if (hist) {
+        hist.innerHTML = chat.slice(-20).map(m =>
+          `<div class="${m.role==='user'?'cu':'ca'}"><span class="ct">${m.role==='user'?'YOU':'ROBOT'}:</span> ${escHtml(m.message)}</div>`
+        ).join('');
+        hist.scrollTop = hist.scrollHeight;
       }
-
-      const logs = data.logs.slice(-12);
-      if (logs.length !== lastLogCount) {
-        lastLogCount = logs.length;
-        document.getElementById('logFeed').innerHTML = logs.map((item) => `
-          <div class="bubble">
-            <div class="role">${escapeHtml(item.timestamp)} · ${escapeHtml(item.kind)}</div>
-            <div class="body">${escapeHtml(item.text)}</div>
-          </div>`).join('');
-      }
-
-      const chat = data.chat_history.slice(-12);
-      if (chat.length !== lastChatCount) {
-        lastChatCount = chat.length;
-        document.getElementById('chatFeed').innerHTML = chat.map((item) => `
-          <div class="bubble ${escapeHtml(item.role)}">
-            <div class="role">${escapeHtml(item.role)}</div>
-            <div class="body">${escapeHtml(item.message)}</div>
-          </div>`).join('');
-      }
     }
 
-    async function sendMission() {
-      const input = document.getElementById('missionInput');
-      const command = input.value.trim();
-      if (!command) return;
-      await fetch('/api/mission', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({command})
-      });
-      input.value = '';
-      await refreshStatus();
-    }
+  } catch(_) {}
+}
 
-    async function resetMission() {
-      document.getElementById('missionInput').value = '';
-    }
+const LIDAR_MAX = 4.0;
 
-    async function sendChat() {
-      const input = document.getElementById('chatInput');
-      const message = input.value.trim();
-      if (!message) return;
-      input.value = '';
-      await fetch('/api/chat', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message})
-      });
-      await refreshStatus();
-    }
+function syncCanvas(c) {
+  const r = c.getBoundingClientRect();
+  const s = Math.max(180, Math.floor(Math.min(r.width, r.height||r.width)));
+  if (c.width!==s||c.height!==s) { c.width=s; c.height=s; }
+}
 
-    function shouldIgnoreKeyEvents(event) {
-      const tag = (event.target?.tagName || '').toLowerCase();
-      return tag === 'input' || tag === 'textarea';
-    }
+async function updateLidar() {
+  try {
+    const d = await fetch('/lidar_scan').then(r => r.json());
+    if (!d.ranges || !d.ranges.length) return;
+    const c = document.getElementById('lidar-canvas');
+    if (!c) return;
+    syncCanvas(c);
+    const ctx = c.getContext('2d');
+    const w=c.width, h=c.height, cx=w/2, cy=h/2;
+    const rMax = Math.min(d.range_max||10, LIDAR_MAX);
+    const sc = Math.min(w,h)/(2*(rMax+0.25));
 
-    function updateKeyHighlights() {
-      ['w', 'a', 's', 'd', 'q', 'e'].forEach((key) => {
-        const el = document.getElementById(`key-${key}`);
-        if (!el) return;
-        el.classList.toggle('active', pressedKeys.has(key));
-      });
-    }
+    ctx.fillStyle='#080d18'; ctx.fillRect(0,0,w,h);
 
-    function computeTeleopVector() {
-      let linear = 0.0;
-      let lateral = 0.0;
-      let angular = 0.0;
-      if (pressedKeys.has('w')) linear += teleopSpeeds.linear;
-      if (pressedKeys.has('s')) linear -= teleopSpeeds.linear;
-      if (pressedKeys.has('a')) lateral += teleopSpeeds.lateral;
-      if (pressedKeys.has('d')) lateral -= teleopSpeeds.lateral;
-      if (pressedKeys.has('q')) angular += teleopSpeeds.angular;
-      if (pressedKeys.has('e')) angular -= teleopSpeeds.angular;
-      return { linear, lateral, angular };
+    ctx.strokeStyle='#132213'; ctx.lineWidth=1; ctx.font='10px monospace'; ctx.fillStyle='#1a3a1a';
+    for (let r=1;r<=rMax;r++) {
+      const pr=r*sc; ctx.beginPath(); ctx.arc(cx,cy,pr,0,Math.PI*2); ctx.stroke();
+      ctx.fillText(r+'m',cx+pr+2,cy-2);
     }
+    ctx.strokeStyle='#0d2a0d'; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(cx,cy-rMax*sc-8); ctx.lineTo(cx,cy+rMax*sc+8); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx-rMax*sc-8,cy); ctx.lineTo(cx+rMax*sc+8,cy); ctx.stroke();
+    ctx.fillStyle='#1a5a1a'; ctx.font='9px monospace';
+    ctx.fillText('FWD',cx+3,cy-rMax*sc-2);
 
-    async function sendTeleop(linear, lateral, angular, source = 'keyboard') {
-      await fetch('/api/teleop', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ linear, lateral, angular, source })
-      });
+    let valid=0, closest=Infinity;
+    const aMin=d.angle_min, aInc=d.angle_increment;
+    for (let i=0;i<d.ranges.length;i++) {
+      const range=d.ranges[i];
+      if (!isFinite(range)||range<0.05||range>rMax) continue;
+      valid++; if (range<closest) closest=range;
+      const a=aMin+i*aInc;
+      const px=cx-range*Math.sin(a)*sc;
+      const py=cy-range*Math.cos(a)*sc;
+      const t=Math.min(range/rMax,1);
+      let r,g,b;
+      if (t<0.33){r=255;g=Math.floor(t*3*255);b=0;}
+      else if(t<0.66){r=Math.floor((1-(t-0.33)*3)*255);g=255;b=0;}
+      else{r=0;g=255;b=Math.floor((t-0.66)*3*255);}
+      ctx.fillStyle=`rgb(${r},${g},${b})`;
+      ctx.beginPath(); ctx.arc(px,py,2,0,Math.PI*2); ctx.fill();
     }
+    ctx.beginPath(); ctx.arc(cx,cy,6,0,Math.PI*2);
+    ctx.fillStyle='var(--orange)'; ctx.fill();
+    ctx.strokeStyle='#ffc107'; ctx.lineWidth=2; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx,cy-24); ctx.lineTo(cx-6,cy-13); ctx.lineTo(cx+6,cy-13);
+    ctx.closePath(); ctx.fillStyle='#ffc107'; ctx.fill();
 
-    async function sendTeleopStop() {
+    const el=document.getElementById('lid-closest');
+    const ep=document.getElementById('lid-pts');
+    if (el) el.textContent=isFinite(closest)?closest.toFixed(2):'--';
+    if (ep) ep.textContent=valid;
+  } catch(_) {}
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const message = input.value.trim();
+  if (!message) return;
+  input.value = '';
+  await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({message})}).catch(()=>{});
+  await refreshStatus();
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const ci = document.getElementById('chat-input');
+  if (ci) ci.addEventListener('keydown', e => { if(e.key==='Enter') sendChat(); });
+
+  const mk = document.getElementById('mission-room');
+  if (mk) mk.addEventListener('keydown', e => {
+    if (e.key === 'Enter') sendGoRoom();
+  });
+
+  const tgKbd = document.getElementById('tg-kbd');
+  const tgStop = document.getElementById('tg-stop');
+  if (tgKbd) tgKbd.addEventListener('change', () => {
+    allowKeyboardTeleop = !!tgKbd.checked;
+    if (!allowKeyboardTeleop) {
       pressedKeys.clear();
-      updateKeyHighlights();
-      await sendTeleop(0.0, 0.0, 0.0, 'stop_button');
-      await refreshStatus();
+      if (teleopTimer) { clearInterval(teleopTimer); teleopTimer = null; }
+      sendTeleop(0, 0, 0, 'keyboard_disabled');
     }
+  });
+  if (tgStop) tgStop.addEventListener('change', () => {
+    stopOnBlur = !!tgStop.checked;
+  });
+});
 
-    async function teleopTick() {
-      const cmd = computeTeleopVector();
-      await sendTeleop(cmd.linear, cmd.lateral, cmd.angular, 'keyboard');
-    }
+setInterval(refreshStatus, 1200);
+setInterval(updateLidar, 200);
 
-    function ensureTeleopLoop() {
-      if (teleopTimer !== null) return;
-      teleopTimer = setInterval(teleopTick, 120);
-    }
-
-    function maybeStopTeleopLoop() {
-      if (pressedKeys.size > 0) return;
-      if (teleopTimer !== null) {
-        clearInterval(teleopTimer);
-        teleopTimer = null;
-      }
-      sendTeleop(0.0, 0.0, 0.0, 'keyboard_release');
-    }
-
-    window.addEventListener('keydown', (event) => {
-      if (event.repeat || shouldIgnoreKeyEvents(event)) return;
-      const key = event.key.toLowerCase();
-      if (!['w', 'a', 's', 'd', 'q', 'e'].includes(key)) return;
-      event.preventDefault();
-      pressedKeys.add(key);
-      updateKeyHighlights();
-      ensureTeleopLoop();
-      teleopTick();
-    });
-
-    window.addEventListener('keyup', (event) => {
-      if (shouldIgnoreKeyEvents(event)) return;
-      const key = event.key.toLowerCase();
-      if (!['w', 'a', 's', 'd', 'q', 'e'].includes(key)) return;
-      event.preventDefault();
-      pressedKeys.delete(key);
-      updateKeyHighlights();
-      maybeStopTeleopLoop();
-    });
-
-    window.addEventListener('blur', () => {
-      if (pressedKeys.size === 0) return;
-      pressedKeys.clear();
-      updateKeyHighlights();
-      maybeStopTeleopLoop();
-    });
-
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') {
-        pressedKeys.clear();
-        updateKeyHighlights();
-        maybeStopTeleopLoop();
-      }
-    });
-
-    document.getElementById('chatInput').addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        sendChat();
-      }
-    });
-    document.getElementById('missionInput').addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        sendMission();
-      }
-    });
-
-    refreshStatus();
-    setInterval(refreshStatus, 1200);
-  </script>
+refreshStatus();
+updateLidar();
+</script>
 </body>
 </html>
 """
@@ -447,6 +887,7 @@ class DashboardNode(Node):
         latch_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
         self.create_subscription(CompressedImage, self.get_parameter("image_topic").value, self._image_cb, sensor_qos)
+        self.create_subscription(Image, "/r100_0140/sensors/camera_0/depth/image", self._depth_cb, sensor_qos)
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
         self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
@@ -460,25 +901,37 @@ class DashboardNode(Node):
         self.latest_frame: bytes | None = None
         self.latest_frame_stamp = ""
         self.frame_lock = threading.Lock()
+        self.last_frame_time = 0.0
+
+        # Depth camera
+        self._bridge = CvBridge()
+        self.depth_frame: bytes | None = None
+        self.depth_lock = threading.Lock()
+        self.depth_event = threading.Event()
+        self.last_depth_time = 0.0
 
         self.odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-        self.lidar = {"closest_m": 99.0, "range_count": 0}
+        self.lidar = {"closest_m": 99.0, "range_count": 0,
+                      "ranges": [], "angle_min": 0.0, "angle_increment": 0.0, "range_max": 10.0}
         self.battery = {"voltage": 0.0, "pct": 0.0}
         self.map_payload = {"image_bytes": None, "width": 0, "height": 0, "resolution": 0.0, "meta": "Waiting for map", "stamp": ""}
 
         self.logs: list[dict[str, str]] = []
         self.chat_history: list[dict[str, str]] = []
-        self.mission_history: list[dict[str, str]] = []
+        self.mission_history: list[dict[str, Any]] = []
+        self.vlm_events: list[dict[str, Any]] = []
         self.max_log_entries = 80
         self.max_chat_entries = 40
+        self.max_vlm_events = 120
         self.memory = SpatialMemory()
 
         self.image_latency_ms = 0.0
         self.odom_latency_ms = 0.0
         self.vlm_client, self.vlm_config = build_vlm_client()
-        self.connected = True
         self.teleop_status = "idle"
         self.last_teleop = {"linear": 0.0, "lateral": 0.0, "angular": 0.0, "source": "none"}
+        self.safety_warning_m = 0.80
+        self.safety_danger_m = 0.45
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
 
@@ -492,6 +945,35 @@ class DashboardNode(Node):
         if len(self.chat_history) > self.max_chat_entries:
             self.chat_history.pop(0)
 
+    def add_vlm_event(
+        self,
+        kind: str,
+        status: str = "ok",
+        prompt: str = "",
+        answer: str = "",
+        thinking: str = "",
+        intent: str = "",
+        room: str = "",
+        latency_ms: float = 0.0,
+        text: str = "",
+    ) -> None:
+        self.vlm_events.append(
+            {
+                "timestamp": time.strftime("%H:%M:%S"),
+                "kind": kind,
+                "status": status,
+                "prompt": prompt,
+                "answer": answer,
+                "thinking": thinking,
+                "intent": intent,
+                "room": room,
+                "latency_ms": float(latency_ms),
+                "text": text,
+            }
+        )
+        if len(self.vlm_events) > self.max_vlm_events:
+            self.vlm_events.pop(0)
+
     def _image_cb(self, msg: CompressedImage) -> None:
         try:
             now = self.get_clock().now()
@@ -502,6 +984,7 @@ class DashboardNode(Node):
         with self.frame_lock:
             self.latest_frame = bytes(msg.data)
             self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
+        self.last_frame_time = time.time()
 
     def _odom_cb(self, msg: Odometry) -> None:
         try:
@@ -517,10 +1000,30 @@ class DashboardNode(Node):
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self.odom["yaw"] = math.degrees(math.atan2(siny_cosp, cosy_cosp))
 
+    def _depth_cb(self, msg: Image) -> None:
+        try:
+            depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+            depth_clipped = np.clip(depth, 0, 5000).astype(np.float32)
+            depth_norm = (depth_clipped / 5000.0 * 255).astype(np.uint8)
+            colored = cv2.applyColorMap(depth_norm, cv2.COLORMAP_TURBO)
+            colored[depth == 0] = [30, 30, 30]
+            ok, buf = cv2.imencode('.jpg', colored, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if ok:
+                with self.depth_lock:
+                    self.depth_frame = buf.tobytes()
+                self.last_depth_time = time.time()
+                self.depth_event.set()
+        except Exception as exc:
+            self.get_logger().error(f'Depth cb error: {exc}')
+
     def _lidar_cb(self, msg: LaserScan) -> None:
         finite_ranges = [value for value in msg.ranges if 0.05 < value < float("inf")]
         self.lidar["closest_m"] = min(finite_ranges) if finite_ranges else 99.0
         self.lidar["range_count"] = len(finite_ranges)
+        self.lidar["ranges"] = list(msg.ranges[::3])  # downsample 3x
+        self.lidar["angle_min"] = msg.angle_min
+        self.lidar["angle_increment"] = msg.angle_increment * 3
+        self.lidar["range_max"] = msg.range_max
 
     def _battery_cb(self, msg: BatteryState) -> None:
         self.battery["voltage"] = msg.voltage
@@ -616,22 +1119,65 @@ class DashboardNode(Node):
         return True, str(response.message)
 
     def video_stream(self):
-      while True:
-        frame = self.latest_frame_copy()
-        if frame is None:
-          time.sleep(0.04)
-          continue
-        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-        time.sleep(0.04)
+        while True:
+            frame = self.latest_frame_copy()
+            if frame is None:
+                time.sleep(0.04)
+                continue
+            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+            time.sleep(0.04)
+
+    def depth_stream(self):
+        while True:
+            self.depth_event.wait(timeout=2.0)
+            self.depth_event.clear()
+            with self.depth_lock:
+                frame = self.depth_frame
+            if frame:
+                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+
+    def _safety_payload(self) -> dict[str, Any]:
+        closest = float(self.lidar.get("closest_m", 99.0))
+        risk_level = "OK"
+        stop_recommended = False
+        if closest < self.safety_danger_m:
+            risk_level = "DANGER"
+            stop_recommended = True
+        elif closest < self.safety_warning_m:
+            risk_level = "WARNING"
+
+        return {
+            "closest_m": closest,
+            "warning_threshold_m": self.safety_warning_m,
+            "danger_threshold_m": self.safety_danger_m,
+            "risk_level": risk_level,
+            "stop_recommended": stop_recommended,
+        }
 
     def status_payload(self) -> dict[str, Any]:
+        now = time.time()
         map_payload = self.map_payload
+        mission_last = self.mission_history[-1] if self.mission_history else {}
+        memory_locations = self.memory.get_locations()
+        memory_missions = self.memory.get_recent_missions(limit=20)
+
+        camera_alive = (now - self.last_frame_time) < 5.0 if self.last_frame_time > 0 else False
+        depth_alive = (now - self.last_depth_time) < 5.0 if self.last_depth_time > 0 else False
+        map_ready = int(map_payload["width"]) > 0
+        connected = camera_alive or depth_alive or map_ready or int(self.lidar["range_count"]) > 0
+
         return {
-            "connected": self.connected,
+            "connected": connected,
             "battery_pct": float(self.battery["pct"]),
             "battery_voltage": float(self.battery["voltage"]),
             "pose": {"x": float(self.odom["x"]), "y": float(self.odom["y"]), "yaw_deg": float(self.odom["yaw"])},
             "lidar": {"closest_m": float(self.lidar["closest_m"]), "range_count": int(self.lidar["range_count"])},
+            "feeds": {
+                "camera_alive": camera_alive,
+                "depth_alive": depth_alive,
+                "map_ready": map_ready,
+            },
+            "safety": self._safety_payload(),
             "map": {
                 "width": int(map_payload["width"]),
                 "height": int(map_payload["height"]),
@@ -642,9 +1188,26 @@ class DashboardNode(Node):
                 "image_url": "/api/map.png",
             },
             "latency": {"image_ms": float(self.image_latency_ms), "odom_ms": float(self.odom_latency_ms)},
-            "mission": {"state": "IDLE", "command": self.mission_history[-1]["command"] if self.mission_history else "", "queue_length": len(self.mission_history)},
-            "vlm": {"chat_count": len(self.chat_history), "log_count": len(self.logs)},
-            "memory": {"location_count": len(self.memory.get_locations()), "mission_count": len(self.memory.get_recent_missions())},
+            "mission": {
+                "state": "QUEUED" if mission_last else "IDLE",
+                "command": str(mission_last.get("command", "")),
+                "last_intent": str(mission_last.get("intent", "")),
+                "last_room": str(mission_last.get("room", "")),
+                "queue_length": len(self.mission_history),
+                "recent": self.mission_history[-12:],
+            },
+            "vlm": {
+                "chat_count": len(self.chat_history),
+                "log_count": len(self.logs),
+                "event_count": len(self.vlm_events),
+                "events": self.vlm_events[-60:],
+            },
+            "memory": {
+                "location_count": len(memory_locations),
+                "mission_count": len(memory_missions),
+                "recent_locations": memory_locations[:12],
+                "recent_missions": memory_missions[:12],
+            },
             "teleop": {
                 "status": self.teleop_status,
                 "last": self.last_teleop,
@@ -696,14 +1259,44 @@ def create_app(node: DashboardNode) -> FastAPI:
     def video_feed() -> StreamingResponse:
         return StreamingResponse(node.video_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
 
+    @app.get("/depth_feed")
+    def depth_feed() -> StreamingResponse:
+        return StreamingResponse(node.depth_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    @app.get("/depth_status")
+    def depth_status() -> JSONResponse:
+        age = time.time() - node.last_depth_time if node.last_depth_time > 0 else -1.0
+        return JSONResponse({"has_frame": node.last_depth_time > 0, "age_s": round(age, 1) if age >= 0 else -1.0})
+
+    @app.get("/lidar_scan")
+    def lidar_scan() -> JSONResponse:
+        return JSONResponse(node.lidar)
+
     @app.post("/api/mission")
     def api_mission(request: MissionRequest) -> JSONResponse:
-        node.mission_history.append({"timestamp": time.strftime("%H:%M:%S"), "command": request.command})
+        parsed = parse_intent_and_room(request.command)
+        node.mission_history.append(
+            {
+                "timestamp": time.strftime("%H:%M:%S"),
+                "command": request.command,
+                "intent": parsed["intent"],
+                "room": parsed["room"],
+                "source": "mission",
+            }
+        )
         if len(node.mission_history) > 40:
             node.mission_history.pop(0)
-        node.memory.record_mission(request.command)
-        node.add_log("mission", request.command)
-        return JSONResponse({"ok": True, "accepted": request.command})
+        node.memory.record_mission(request.command, status="queued", metadata=parsed)
+        node.add_log("mission", f"{parsed['intent']} {parsed['room']} :: {request.command}".strip())
+        node.add_vlm_event(
+            kind="mission",
+            status="queued",
+            prompt=request.command,
+            intent=parsed["intent"],
+            room=parsed["room"],
+            text="Mission command queued",
+        )
+        return JSONResponse({"ok": True, "accepted": request.command, "parsed": parsed})
 
     @app.post("/api/teleop")
     def api_teleop(request: TeleopRequest) -> JSONResponse:
@@ -721,8 +1314,10 @@ def create_app(node: DashboardNode) -> FastAPI:
 
     @app.post("/api/chat")
     def api_chat(request: ChatRequest) -> JSONResponse:
+        parsed = parse_intent_and_room(request.message)
         node.add_chat("user", request.message)
         node.add_log("vlm", f"Chat query: {request.message}")
+        started_at = time.time()
         try:
             latest_frame = node.latest_frame_copy()
             if latest_frame:
@@ -757,14 +1352,44 @@ def create_app(node: DashboardNode) -> FastAPI:
                 max_tokens=200,
                 extra_body={"chat_template_kwargs": {"enable_thinking": node.vlm_config.enable_thinking}},
             )
-            reply = response.choices[0].message.content or ""
+            raw_reply = response.choices[0].message.content
+            if isinstance(raw_reply, list):
+                reply = " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in raw_reply).strip()
+            else:
+                reply = str(raw_reply or "")
+            thinking = extract_reasoning_trace(response)
+            latency_ms = (time.time() - started_at) * 1000.0
+            event_kind = "mission" if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP"} else "prompt"
+
             node.add_chat("assistant", reply)
             node.add_log("vlm", f"Reply: {reply[:180]}")
-            return JSONResponse({"ok": True, "reply": reply})
+            node.add_vlm_event(
+                kind=event_kind,
+                status="ok",
+                prompt=request.message,
+                answer=reply,
+                thinking=thinking,
+                intent=parsed["intent"],
+                room=parsed["room"],
+                latency_ms=latency_ms,
+                text=reply[:220],
+            )
+            return JSONResponse({"ok": True, "reply": reply, "parsed": parsed, "latency_ms": latency_ms})
         except Exception as exc:
             error = str(exc)
             node.add_chat("assistant", f"Error: {error}")
             node.add_log("vlm", f"Chat error: {error}")
+            node.add_vlm_event(
+                kind="prompt",
+                status="error",
+                prompt=request.message,
+                answer="",
+                thinking="",
+                intent=parsed["intent"],
+                room=parsed["room"],
+                latency_ms=(time.time() - started_at) * 1000.0,
+                text=error,
+            )
             return JSONResponse({"ok": False, "error": error})
 
     return app
