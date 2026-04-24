@@ -155,7 +155,9 @@ PAGE_HTML = """<!DOCTYPE html>
     #depth-age { color:var(--muted); }
 
     #lidar-canvas { display:block; width:100%; aspect-ratio:1/1; border-radius:8px;
-      background:#080d18; max-height:calc(100% - 56px); }
+      background:#080d18; max-height:calc(100% - 74px); }
+    .map-img { display:block; width:100%; flex:1; min-height:0; object-fit:contain;
+      border-radius:8px; background:#080d18; max-height:calc(100% - 74px); }
     .lidar-info { display:flex; gap:10px; margin-top:5px; font-size:0.70rem; color:var(--muted); flex-shrink:0; }
     .lidar-info span { color:var(--accent2); }
 
@@ -247,7 +249,7 @@ PAGE_HTML = """<!DOCTYPE html>
       .grid { grid-template-columns:1fr; grid-template-rows:auto; overflow:visible; }
       #p-rgb,#p-depth,#p-lidar,#p-status,#p-vlmlog,#p-control { grid-column:1; grid-row:auto; min-height:280px; }
       .feed-img { max-height:200px; }
-      #lidar-canvas { max-height:200px; }
+      #lidar-canvas, .map-img { max-height:200px; }
     }
   </style>
 </head>
@@ -285,12 +287,18 @@ PAGE_HTML = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Box 3: LiDAR Scan -->
+    <!-- Box 3: Switchable LiDAR / SLAM Map -->
     <div class="panel" id="p-lidar">
-      <h2>LIDAR SCAN</h2>
+      <div class="tab-bar">
+        <h2>WORLD VIEW</h2>
+        <button id="view-tab-lidar" class="tab-btn on" onclick="switchWorldView('lidar')">LIDAR</button>
+        <button id="view-tab-map" class="tab-btn" onclick="switchWorldView('map')">SLAM MAP</button>
+      </div>
       <canvas id="lidar-canvas" width="600" height="600"></canvas>
+      <img id="slam-map-img" class="map-img" src="/api/map.png" alt="SLAM Map" style="display:none">
       <div class="lidar-info">
         Closest: <span id="lid-closest">--</span>m &nbsp; Pts: <span id="lid-pts">--</span>
+        &nbsp; Map: <span id="map-meta">WAITING</span>
       </div>
     </div>
 
@@ -483,6 +491,8 @@ let vlmFilter = 'all';
 let lastLogCount = 0;
 let lastChatCount = 0;
 let latestVlmEvents = [];
+let worldView = 'lidar';
+let latestMapUrl = '/api/map.png';
 
 function switchStatusTab(tab) {
   statusTab = tab;
@@ -498,6 +508,20 @@ function switchControlTab(tab) {
     document.getElementById('pane-'+t).style.display = t===tab ? 'flex' : 'none';
     document.getElementById('tab-'+t).classList.toggle('on', t===tab);
   });
+}
+
+function switchWorldView(view) {
+  worldView = view;
+  const lidar = document.getElementById('lidar-canvas');
+  const map = document.getElementById('slam-map-img');
+  if (lidar) lidar.style.display = view === 'lidar' ? 'block' : 'none';
+  if (map) map.style.display = view === 'map' ? 'block' : 'none';
+  ['lidar', 'map'].forEach(t => {
+    const btn = document.getElementById('view-tab-' + t);
+    if (btn) btn.classList.toggle('on', t === view);
+  });
+  if (view === 'map') updateMapView(true);
+  if (view === 'lidar') updateLidar();
 }
 
 document.querySelectorAll('.dk[data-lin]').forEach(btn => {
@@ -702,6 +726,8 @@ async function refreshStatus() {
     const mapOk = data.map?.width > 0;
     if (e('st-map')) { e('st-map').textContent = mapOk ? data.map.meta : 'WAITING';
                        e('st-map').style.color = mapOk ? 'var(--accent2)' : 'var(--muted)'; }
+    latestMapUrl = data.map?.image_url || '/api/map.png';
+    if (e('map-meta')) e('map-meta').textContent = mapOk ? data.map.meta : 'WAITING';
 
     if (e('st-risk')) {
       e('st-risk').textContent = data.safety?.risk_level || 'UNKNOWN';
@@ -772,6 +798,7 @@ function syncCanvas(c) {
 }
 
 async function updateLidar() {
+  if (worldView !== 'lidar') return;
   try {
     const d = await fetch('/lidar_scan').then(r => r.json());
     if (!d.ranges || !d.ranges.length) return;
@@ -826,6 +853,14 @@ async function updateLidar() {
   } catch(_) {}
 }
 
+function updateMapView(force=false) {
+  if (worldView !== 'map' && !force) return;
+  const img = document.getElementById('slam-map-img');
+  if (!img) return;
+  const base = latestMapUrl || '/api/map.png';
+  img.src = `${base}${base.includes('?') ? '&' : '?'}ts=${Date.now()}`;
+}
+
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const message = input.value.trim();
@@ -862,6 +897,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 setInterval(refreshStatus, 1200);
 setInterval(updateLidar, 200);
+setInterval(updateMapView, 1000);
 
 refreshStatus();
 updateLidar();
@@ -881,6 +917,10 @@ class DashboardNode(Node):
         self.declare_parameter("raw_image_topic", "")
         self.declare_parameter("depth_compressed_topic", "/r100_0140/image/depth_compressed")
         self.declare_parameter("depth_topic", "")
+        self.declare_parameter("enable_depth_feed", True)
+        self.declare_parameter("depth_render_hz", 4.0)
+        self.declare_parameter("map_render_hz", 1.0)
+        self.declare_parameter("map_target_long_side", 1000)
         self.declare_parameter("odom_topic", "/r100_0140/platform/odom/filtered")
         self.declare_parameter("lidar_topic", "/r100_0140/sensors/lidar2d_0/scan")
         self.declare_parameter("battery_topic", "/r100_0140/platform/bms/state")
@@ -903,14 +943,18 @@ class DashboardNode(Node):
         raw_image_topic = str(self.get_parameter("raw_image_topic").value).strip()
         depth_compressed_topic = str(self.get_parameter("depth_compressed_topic").value).strip()
         depth_topic = str(self.get_parameter("depth_topic").value).strip()
+        self.enable_depth_feed = bool(self.get_parameter("enable_depth_feed").value)
+        self.depth_render_hz = max(0.5, float(self.get_parameter("depth_render_hz").value))
+        self.map_render_hz = max(0.1, float(self.get_parameter("map_render_hz").value))
+        self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
 
         if image_topic:
             self.create_subscription(CompressedImage, image_topic, self._image_cb, sensor_qos)
         if raw_image_topic:
             self.create_subscription(Image, raw_image_topic, self._raw_image_cb, sensor_qos)
-        if depth_compressed_topic:
+        if self.enable_depth_feed and depth_compressed_topic:
             self.create_subscription(CompressedImage, depth_compressed_topic, self._depth_compressed_cb, sensor_qos)
-        if depth_topic:
+        if self.enable_depth_feed and depth_topic:
             self.create_subscription(Image, depth_topic, self._depth_cb, sensor_qos)
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
@@ -938,12 +982,15 @@ class DashboardNode(Node):
         self.depth_lock = threading.Lock()
         self.depth_event = threading.Event()
         self.last_depth_time = 0.0
+        self.depth_compressed_frame: bytes | None = None
+        self.depth_compressed_format = ""
 
         self.odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self.lidar = {"closest_m": 99.0, "range_count": 0,
                       "ranges": [], "angle_min": 0.0, "angle_increment": 0.0, "range_max": 10.0}
         self.battery = {"voltage": 0.0, "pct": 0.0}
         self.map_payload = {"image_bytes": None, "width": 0, "height": 0, "resolution": 0.0, "meta": "Waiting for map", "stamp": ""}
+        self.last_map_render_time = 0.0
 
         self.logs: list[dict[str, str]] = []
         self.chat_history: list[dict[str, str]] = []
@@ -971,8 +1018,8 @@ class DashboardNode(Node):
             % (
                 image_topic or "disabled",
                 raw_image_topic or "disabled",
-                depth_compressed_topic or "disabled",
-                depth_topic or "disabled",
+                depth_compressed_topic if self.enable_depth_feed else "disabled",
+                depth_topic if self.enable_depth_feed else "disabled",
                 self.get_parameter("cmd_vel_topic").value,
             )
         )
@@ -1081,14 +1128,11 @@ class DashboardNode(Node):
             self.get_logger().error(f"Depth visualization error: {exc}")
 
     def _depth_compressed_cb(self, msg: CompressedImage) -> None:
-        try:
-            encoded = np.frombuffer(bytes(msg.data), dtype=np.uint8)
-            depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
-            if depth is None:
-                return
-            self._store_depth_visualization(depth, msg.format)
-        except Exception as exc:
-            self.get_logger().error(f"Compressed depth cb error: {exc}")
+        with self.depth_lock:
+            self.depth_compressed_frame = bytes(msg.data)
+            self.depth_compressed_format = msg.format
+        self.last_depth_time = time.time()
+        self.depth_event.set()
 
     def _depth_cb(self, msg: Image) -> None:
         try:
@@ -1121,6 +1165,11 @@ class DashboardNode(Node):
 
     def _map_cb(self, msg: OccupancyGrid) -> None:
         try:
+            now = time.time()
+            if now - self.last_map_render_time < 1.0 / self.map_render_hz:
+                return
+            self.last_map_render_time = now
+
             width = int(msg.info.width)
             height = int(msg.info.height)
             resolution = float(msg.info.resolution)
@@ -1132,8 +1181,8 @@ class DashboardNode(Node):
             image = np.flipud(image)
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
-            target_long_side = 1600
-            scale = max(2, min(10, target_long_side // max(width, height, 1)))
+            target_long_side = self.map_target_long_side
+            scale = max(1, min(10, target_long_side // max(width, height, 1)))
             image = cv2.resize(image, (width * scale, height * scale), interpolation=cv2.INTER_NEAREST)
 
             origin_x = float(msg.info.origin.position.x)
@@ -1198,11 +1247,32 @@ class DashboardNode(Node):
             time.sleep(0.04)
 
     def depth_stream(self):
+        last_render = 0.0
         while True:
+            if not self.enable_depth_feed:
+                time.sleep(1.0)
+                continue
+            min_interval = 1.0 / self.depth_render_hz
+            elapsed = time.time() - last_render
+            if elapsed < min_interval:
+                time.sleep(min_interval - elapsed)
             self.depth_event.wait(timeout=2.0)
             self.depth_event.clear()
             with self.depth_lock:
+                compressed_frame = self.depth_compressed_frame
+                compressed_format = self.depth_compressed_format
                 frame = self.depth_frame
+            if compressed_frame:
+                try:
+                    encoded = np.frombuffer(compressed_frame, dtype=np.uint8)
+                    depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
+                    if depth is not None:
+                        self._store_depth_visualization(depth, compressed_format)
+                        with self.depth_lock:
+                            frame = self.depth_frame
+                except Exception as exc:
+                    self.get_logger().error(f"Compressed depth render error: {exc}")
+            last_render = time.time()
             if frame:
                 yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
 

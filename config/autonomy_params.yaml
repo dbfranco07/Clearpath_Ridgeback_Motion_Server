@@ -27,6 +27,8 @@ room_detector:
     max_tokens: 240
     max_image_long_side: 960
     vlm_jpeg_quality: 70
+    min_vlm_travel_m: 0.75
+    min_vlm_rotation_deg: 25.0
 
 frontier_explorer:
   ros__parameters:
@@ -83,6 +85,10 @@ ridgeback_dashboard:
     raw_image_topic: ""
     depth_compressed_topic: /r100_0140/image/depth_compressed
     depth_topic: ""
+    enable_depth_feed: true
+    depth_render_hz: 4.0
+    map_render_hz: 1.0
+    map_target_long_side: 1000
     odom_topic: /r100_0140/platform/odom/filtered
     lidar_topic: /r100_0140/sensors/lidar2d_0/scan
     battery_topic: /r100_0140/platform/bms/state

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 import time
 from typing import Any
@@ -53,6 +54,8 @@ class RoomDetector(Node):
         self.declare_parameter("max_tokens", 240)
         self.declare_parameter("max_image_long_side", 960)
         self.declare_parameter("vlm_jpeg_quality", 70)
+        self.declare_parameter("min_vlm_travel_m", 0.75)
+        self.declare_parameter("min_vlm_rotation_deg", 25.0)
 
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
@@ -73,6 +76,7 @@ class RoomDetector(Node):
         self.target_room = ""
         self.busy = False
         self.last_detection_time = 0.0
+        self.last_vlm_pose: dict[str, float] | None = None
 
         self.create_timer(0.5, self._tick)
         self.get_logger().info(f"room_detector ready: {self.vlm_config.base_url} model={self.vlm_config.model_name}")
@@ -117,8 +121,13 @@ class RoomDetector(Node):
         if now - self.last_detection_time < float(self.get_parameter("detect_period_s").value):
             return
 
-        self.last_detection_time = now
         self._refresh_map_pose()
+        if not self._movement_gate_passed():
+            self._publish_status(True, "waiting_for_motion")
+            return
+
+        self.last_detection_time = now
+        self.last_vlm_pose = dict(self.pose)
         self.busy = True
         try:
             detections = self._call_vlm(self.latest_frame)
@@ -152,6 +161,26 @@ class RoomDetector(Node):
             self._publish_status(False, str(exc)[:180])
         finally:
             self.busy = False
+
+    def _movement_gate_passed(self) -> bool:
+        if self.last_vlm_pose is None:
+            return True
+
+        min_travel = float(self.get_parameter("min_vlm_travel_m").value)
+        min_rotation = math.radians(float(self.get_parameter("min_vlm_rotation_deg").value))
+        dx = self.pose["x"] - float(self.last_vlm_pose.get("x", 0.0))
+        dy = self.pose["y"] - float(self.last_vlm_pose.get("y", 0.0))
+        travel = math.hypot(dx, dy)
+        rotation = abs(self._angle_delta(self.pose["yaw"], float(self.last_vlm_pose.get("yaw", 0.0))))
+        return travel >= min_travel or rotation >= min_rotation
+
+    def _angle_delta(self, a: float, b: float) -> float:
+        delta = a - b
+        while delta > math.pi:
+            delta -= 2.0 * math.pi
+        while delta < -math.pi:
+            delta += 2.0 * math.pi
+        return delta
 
     def _call_vlm(self, jpeg: bytes) -> list[dict[str, Any]]:
         image_b64 = base64.b64encode(self._prepare_vlm_jpeg(jpeg)).decode("ascii")

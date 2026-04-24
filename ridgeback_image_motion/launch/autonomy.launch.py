@@ -2,19 +2,35 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, LogInfo, TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node, SetRemap
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
 
+def profile_condition(profile, override, enabled_profiles):
+    profiles = repr(list(enabled_profiles))
+    return IfCondition(
+        PythonExpression([
+            "'", override, "' == 'true' or ('", override, "' == 'auto' and '", profile, "' in ", profiles, ")"
+        ])
+    )
+
+
 def generate_launch_description():
     host = LaunchConfiguration("host")
     port = LaunchConfiguration("port")
+    profile = LaunchConfiguration("profile")
     launch_slam = LaunchConfiguration("launch_slam")
     launch_nav2 = LaunchConfiguration("launch_nav2")
     launch_vlm = LaunchConfiguration("launch_vlm")
     launch_dashboard = LaunchConfiguration("launch_dashboard")
+
+    slam_condition = profile_condition(profile, launch_slam, ["mapping", "mission", "debug"])
+    nav2_condition = profile_condition(profile, launch_nav2, ["mission", "debug"])
+    vlm_condition = profile_condition(profile, launch_vlm, ["mission", "debug"])
+    dashboard_condition = profile_condition(profile, launch_dashboard, ["teleop", "mapping", "mission", "debug"])
+    mission_condition = IfCondition(PythonExpression(["'", profile, "' in ['mission', 'debug']"]))
 
     pkg_share = FindPackageShare("ridgeback_image_motion")
     autonomy_params = PathJoinSubstitution([pkg_share, "config", "autonomy_params.yaml"])
@@ -31,11 +47,11 @@ def generate_launch_description():
         name="slam_toolbox",
         output="screen",
         parameters=[slam_params],
-        condition=IfCondition(launch_slam),
+        condition=slam_condition,
     )
 
     nav2 = GroupAction(
-        condition=IfCondition(launch_nav2),
+        condition=nav2_condition,
         actions=[
             SetRemap(src="/cmd_vel", dst="/cmd_vel_nav_raw"),
             SetRemap(src="cmd_vel", dst="/cmd_vel_nav_raw"),
@@ -60,6 +76,18 @@ def generate_launch_description():
         parameters=[autonomy_params],
     )
 
+    watchdog = Node(
+        package="ridgeback_image_motion",
+        executable="jetson_watchdog.py",
+        name="jetson_watchdog",
+        output="screen",
+        parameters=[{
+            "heartbeat_timeout": 2.0,
+            "init_grace_period": 5.0,
+            "cmd_vel_topic": "/r100_0140/cmd_vel",
+        }],
+    )
+
     mux = Node(
         package="ridgeback_image_motion",
         executable="cmd_vel_mux.py",
@@ -74,6 +102,7 @@ def generate_launch_description():
         name="mission_orchestrator",
         output="screen",
         parameters=[autonomy_params],
+        condition=mission_condition,
     )
 
     frontier = Node(
@@ -82,6 +111,7 @@ def generate_launch_description():
         name="frontier_explorer",
         output="screen",
         parameters=[autonomy_params],
+        condition=mission_condition,
     )
 
     room_detector = Node(
@@ -90,7 +120,7 @@ def generate_launch_description():
         name="room_detector",
         output="screen",
         parameters=[autonomy_params],
-        condition=IfCondition(launch_vlm),
+        condition=vlm_condition,
     )
 
     dashboard = Node(
@@ -98,20 +128,41 @@ def generate_launch_description():
         executable="web_dashboard.py",
         name="ridgeback_dashboard",
         output="screen",
-        parameters=[autonomy_params, {"host": host, "port": port}],
-        condition=IfCondition(launch_dashboard),
+        parameters=[
+            autonomy_params,
+            {
+                "host": host,
+                "port": port,
+                "raw_image_topic": PythonExpression([
+                    "'/r100_0140/sensors/camera_0/color/image' if '", profile, "' == 'debug' else ''"
+                ]),
+                "depth_topic": PythonExpression([
+                    "'/r100_0140/sensors/camera_0/depth/image' if '", profile, "' == 'debug' else ''"
+                ]),
+            },
+        ],
+        condition=dashboard_condition,
     )
 
     return LaunchDescription(
         [
             DeclareLaunchArgument("host", default_value="0.0.0.0"),
             DeclareLaunchArgument("port", default_value="8081"),
-            DeclareLaunchArgument("launch_slam", default_value="true"),
-            DeclareLaunchArgument("launch_nav2", default_value="true"),
-            DeclareLaunchArgument("launch_vlm", default_value="true"),
-            DeclareLaunchArgument("launch_dashboard", default_value="true"),
-            LogInfo(msg="Starting Ridgeback Jetson autonomy stack: safety, mux, SLAM, Nav2, exploration, VLM, dashboard"),
+            DeclareLaunchArgument(
+                "profile",
+                default_value="mission",
+                description="Runtime profile: teleop, mapping, mission, or debug",
+            ),
+            DeclareLaunchArgument("launch_slam", default_value="auto"),
+            DeclareLaunchArgument("launch_nav2", default_value="auto"),
+            DeclareLaunchArgument("launch_vlm", default_value="auto"),
+            DeclareLaunchArgument("launch_dashboard", default_value="auto"),
+            LogInfo(msg=["Starting Ridgeback Jetson autonomy stack profile=", profile]),
+            LogInfo(
+                msg="Profiles: teleop=safety/mux/dashboard, mapping=+SLAM, mission=+Nav2/exploration/VLM, debug=full stack with raw fallbacks"
+            ),
             safety,
+            watchdog,
             mux,
             TimerAction(period=1.0, actions=[slam]),
             TimerAction(period=3.0, actions=[nav2]),

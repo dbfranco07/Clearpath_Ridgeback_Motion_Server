@@ -46,5 +46,6 @@ echo ""
 echo "[5/5] Starting Jetson autonomy stack..."
 echo "=========================================="
 echo "Open in browser: http://$(hostname -I | awk '{print $1}'):8081"
+echo "Profile: ${RIDGEBACK_PROFILE:-mission}"
 echo "=========================================="
-ros2 launch ridgeback_image_motion autonomy.launch.py host:=0.0.0.0 port:=8081
+ros2 launch ridgeback_image_motion autonomy.launch.py host:=0.0.0.0 port:=8081 profile:=${RIDGEBACK_PROFILE:-mission}
