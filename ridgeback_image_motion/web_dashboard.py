@@ -16,6 +16,7 @@ import numpy as np
 import rclpy
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from geometry_msgs.msg import Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from pydantic import BaseModel
 from rclpy.node import Node
@@ -874,11 +875,14 @@ class DashboardNode(Node):
         self.declare_parameter("port", 8081)
         self.declare_parameter("host", "0.0.0.0")
         self.declare_parameter("image_topic", "/r100_0140/image/compressed")
+        self.declare_parameter("raw_image_topic", "/r100_0140/sensors/camera_0/color/image")
+        self.declare_parameter("depth_topic", "/r100_0140/sensors/camera_0/depth/image")
         self.declare_parameter("odom_topic", "/r100_0140/platform/odom/filtered")
         self.declare_parameter("lidar_topic", "/r100_0140/sensors/lidar2d_0/scan")
         self.declare_parameter("battery_topic", "/r100_0140/platform/bms/state")
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter("motion_service", "motion_service")
+        self.declare_parameter("cmd_vel_topic", "/r100_0140/cmd_vel")
         self.declare_parameter("teleop_linear_speed", 0.28)
         self.declare_parameter("teleop_lateral_speed", 0.28)
         self.declare_parameter("teleop_angular_speed", 0.85)
@@ -887,11 +891,13 @@ class DashboardNode(Node):
         latch_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
         self.create_subscription(CompressedImage, self.get_parameter("image_topic").value, self._image_cb, sensor_qos)
-        self.create_subscription(Image, "/r100_0140/sensors/camera_0/depth/image", self._depth_cb, sensor_qos)
+        self.create_subscription(Image, self.get_parameter("raw_image_topic").value, self._raw_image_cb, sensor_qos)
+        self.create_subscription(Image, self.get_parameter("depth_topic").value, self._depth_cb, sensor_qos)
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
         self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
         self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self._map_cb, latch_qos)
+        self.cmd_vel_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, sensor_qos)
 
         self.motion_client = self.create_client(Motion, self.get_parameter("motion_service").value)
         self.teleop_linear_speed = float(self.get_parameter("teleop_linear_speed").value)
@@ -934,6 +940,15 @@ class DashboardNode(Node):
         self.safety_danger_m = 0.45
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
+        self.get_logger().info(
+            "Dashboard topics: compressed=%s raw=%s depth=%s cmd_vel=%s"
+            % (
+                self.get_parameter("image_topic").value,
+                self.get_parameter("raw_image_topic").value,
+                self.get_parameter("depth_topic").value,
+                self.get_parameter("cmd_vel_topic").value,
+            )
+        )
 
     def add_log(self, kind: str, text: str) -> None:
         self.logs.append({"timestamp": time.strftime("%H:%M:%S"), "kind": kind, "text": text})
@@ -986,6 +1001,26 @@ class DashboardNode(Node):
             self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
         self.last_frame_time = time.time()
 
+    def _raw_image_cb(self, msg: Image) -> None:
+        try:
+            now = self.get_clock().now()
+            stamp = rclpy.time.Time.from_msg(msg.header.stamp)
+            self.image_latency_ms = (now - stamp).nanoseconds / 1e6
+        except Exception:
+            pass
+
+        try:
+            cv_image = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+            ok, buf = cv2.imencode(".jpg", cv_image, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if not ok:
+                return
+            with self.frame_lock:
+                self.latest_frame = buf.tobytes()
+                self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
+            self.last_frame_time = time.time()
+        except Exception as exc:
+            self.get_logger().error(f"Raw image cb error: {exc}")
+
     def _odom_cb(self, msg: Odometry) -> None:
         try:
             now = self.get_clock().now()
@@ -1003,10 +1038,13 @@ class DashboardNode(Node):
     def _depth_cb(self, msg: Image) -> None:
         try:
             depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
-            depth_clipped = np.clip(depth, 0, 5000).astype(np.float32)
+            depth_mm = np.asarray(depth, dtype=np.float32)
+            if np.issubdtype(np.asarray(depth).dtype, np.floating) or "32F" in msg.encoding:
+                depth_mm *= 1000.0
+            depth_clipped = np.clip(depth_mm, 0, 5000).astype(np.float32)
             depth_norm = (depth_clipped / 5000.0 * 255).astype(np.uint8)
             colored = cv2.applyColorMap(depth_norm, cv2.COLORMAP_TURBO)
-            colored[depth == 0] = [30, 30, 30]
+            colored[(depth_mm <= 0) | ~np.isfinite(depth_mm)] = [30, 30, 30]
             ok, buf = cv2.imencode('.jpg', colored, [cv2.IMWRITE_JPEG_QUALITY, 75])
             if ok:
                 with self.depth_lock:
@@ -1095,7 +1133,9 @@ class DashboardNode(Node):
 
         if not self.motion_client.wait_for_service(timeout_sec=0.25):
             self.teleop_status = "motion service unavailable"
-            return False, self.teleop_status
+            self._publish_direct_motion(linear, lateral, angular)
+            self.teleop_status = "active/direct" if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle/direct"
+            return True, "OK direct cmd_vel fallback"
 
         future = self.motion_client.call_async(request)
         start = time.time()
@@ -1104,7 +1144,9 @@ class DashboardNode(Node):
 
         if not future.done():
             self.teleop_status = "motion command timeout"
-            return False, self.teleop_status
+            self._publish_direct_motion(linear, lateral, angular)
+            self.teleop_status = "active/direct" if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle/direct"
+            return True, "OK direct cmd_vel fallback after service timeout"
 
         try:
             response = future.result()
@@ -1117,6 +1159,13 @@ class DashboardNode(Node):
         if not success:
             return False, str(response.message)
         return True, str(response.message)
+
+    def _publish_direct_motion(self, linear: float, lateral: float, angular: float) -> None:
+        twist = Twist()
+        twist.linear.x = float(linear)
+        twist.linear.y = float(lateral)
+        twist.angular.z = float(angular)
+        self.cmd_vel_pub.publish(twist)
 
     def video_stream(self):
         while True:
