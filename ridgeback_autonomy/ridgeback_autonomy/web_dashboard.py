@@ -28,7 +28,8 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 from geometry_msgs.msg import Twist
-from sensor_msgs.msg import CompressedImage, LaserScan, BatteryState
+from sensor_msgs.msg import CompressedImage, Image, LaserScan, BatteryState
+from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry, OccupancyGrid
 from std_msgs.msg import Bool
 from ridgeback_autonomy.msg import SafetyStatus, MissionStatus, Perception
@@ -75,6 +76,10 @@ class SafetyEnabledCmd(BaseModel):
     enabled: bool
 
 
+class VlmPromptCmd(BaseModel):
+    prompt: str
+
+
 class MoveRequest(BaseModel):
     distance: float = 0.5
     speed: float = 0.2
@@ -114,6 +119,10 @@ class AutonomousDashboard(Node):
         self.image_sub = self.create_subscription(
             CompressedImage, '/r100_0140/image/compressed',
             self._image_cb, sensor_qos
+        )
+        self.depth_sub = self.create_subscription(
+            Image, '/r100_0140/sensors/camera_0/depth/image',
+            self._depth_image_cb, sensor_qos
         )
         self.odom_sub = self.create_subscription(
             Odometry, '/r100_0140/platform/odom/filtered',
@@ -171,7 +180,15 @@ class AutonomousDashboard(Node):
         self.frame_event = threading.Event()
         self.last_frame_time = 0.0
 
+        # Depth camera
+        self.bridge = CvBridge()
+        self.latest_depth_frame = None
+        self.depth_frame_lock = threading.Lock()
+        self.depth_frame_event = threading.Event()
+        self.last_depth_frame_time = 0.0
+
         # Odometry
+        self.last_odom_time = 0.0
         self.odom_x = 0.0
         self.odom_y = 0.0
         self.odom_yaw = 0.0
@@ -257,7 +274,24 @@ class AutonomousDashboard(Node):
         self.last_frame_time = time.time()
         self.frame_event.set()
 
+    def _depth_image_cb(self, msg: Image):
+        try:
+            depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')  # uint16 mm
+            depth_clipped = np.clip(depth, 0, 5000).astype(np.float32)
+            depth_norm = (depth_clipped / 5000.0 * 255).astype(np.uint8)
+            colored = cv2.applyColorMap(depth_norm, cv2.COLORMAP_TURBO)
+            colored[depth == 0] = [30, 30, 30]  # invalid pixels → dark grey
+            ok, buf = cv2.imencode('.jpg', colored, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            if ok:
+                with self.depth_frame_lock:
+                    self.latest_depth_frame = buf.tobytes()
+                self.last_depth_frame_time = time.time()
+                self.depth_frame_event.set()
+        except Exception as e:
+            self.get_logger().error(f'Depth image error: {e}')
+
     def _odom_cb(self, msg: Odometry):
+        self.last_odom_time = time.time()
         try:
             now = self.get_clock().now()
             stamp = rclpy.time.Time.from_msg(msg.header.stamp)
@@ -578,6 +612,22 @@ class AutonomousDashboard(Node):
                     b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
                 )
 
+    def depth_mjpeg_generator(self):
+        while True:
+            self.depth_frame_event.wait(timeout=2.0)
+            self.depth_frame_event.clear()
+            with self.depth_frame_lock:
+                frame = self.latest_depth_frame
+            if frame:
+                yield b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + frame + b'\r\n'
+
+    def get_depth_camera_status(self) -> dict:
+        age = time.time() - self.last_depth_frame_time if self.last_depth_frame_time > 0 else -1.0
+        return {
+            'has_frame': self.last_depth_frame_time > 0,
+            'last_frame_age_s': round(age, 1) if age >= 0 else -1.0
+        }
+
     # ── Data Accessors ─────────────────────────────────────────────────────
 
     def get_status(self) -> dict:
@@ -599,6 +649,13 @@ class AutonomousDashboard(Node):
                 'odom_ms': round(self.odom_latency_ms, 1),
             },
             'motion_status': self.motion_status,
+            'is_moving': self.is_moving,
+            'safety': self.safety_status,
+            'rear_override_active': self.rear_override_active,
+            'soft_bumper_enabled': self.soft_bumper_enabled,
+            'safety_enabled': self.safety_enabled,
+            'camera_connected': (time.time() - self.last_frame_time < 5.0) if self.last_frame_time > 0 else False,
+            'odom_connected': (time.time() - self.last_odom_time < 2.0) if self.last_odom_time > 0 else False,
         }
 
     def get_lidar_data(self) -> dict | None:
@@ -716,6 +773,27 @@ def camera_status():
     return JSONResponse(ros_node.get_camera_status())
 
 
+@app.get('/depth_feed')
+def depth_feed():
+    return StreamingResponse(
+        ros_node.depth_mjpeg_generator(),
+        media_type='multipart/x-mixed-replace; boundary=frame'
+    )
+
+
+@app.get('/depth_status')
+def depth_status():
+    return JSONResponse(ros_node.get_depth_camera_status())
+
+
+@app.post('/vlm_prompt')
+async def vlm_prompt(cmd: VlmPromptCmd):
+    result = await ros_node.send_mission_command(cmd.prompt)
+    result['prompt'] = cmd.prompt
+    result['timestamp'] = datetime.now().strftime('%H:%M:%S')
+    return JSONResponse(result)
+
+
 @app.get('/status')
 def status():
     return JSONResponse(ros_node.get_status())
@@ -823,100 +901,103 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0e0e0; font-family: 'Courier New', monospace; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
-.header { background: rgba(0,0,0,0.5); border-bottom: 2px solid #f7941d; padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; }
-.header h1 { color: #f7941d; font-size: 1.2rem; letter-spacing: 2px; }
-.header .sub { color: #888; font-size: 0.75rem; }
-.grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; padding: 10px; overflow: hidden; }
+.header { background: rgba(0,0,0,0.5); border-bottom: 2px solid #f7941d; padding: 8px 20px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+.header h1 { color: #f7941d; font-size: 1.1rem; letter-spacing: 2px; }
+.header .sub { color: #888; font-size: 0.72rem; }
+/* 3×2 grid */
+.grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; padding: 8px; overflow: hidden; }
 .panel { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 8px; padding: 10px; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.panel h2 { color: #f7941d; font-size: 0.85rem; letter-spacing: 1px; margin-bottom: 10px; border-bottom: 1px solid rgba(247,148,29,0.3); padding-bottom: 6px; }
-/* Camera */
-#camera-panel { grid-column: 1; grid-row: 1; position: relative; }
-#camera-feed { width: 100%; border-radius: 4px; display: block; object-fit: contain; min-height: 0; max-height: calc(100% - 28px); }
-#camera-overlay { display: none; position: absolute; top: 36px; left: 12px; right: 12px; background: rgba(237,28,36,0.85); color: #fff; font-size: 0.75rem; padding: 6px 10px; border-radius: 4px; border: 1px solid #ed1c24; text-align: center; }
-/* Mission Control */
-#mission-panel { grid-column: 2; grid-row: 1; }
-.mission-input { display: flex; gap: 8px; margin-bottom: 10px; }
-.mission-input input { flex: 1; background: rgba(255,255,255,0.1); border: 1px solid rgba(247,148,29,0.5); color: #e0e0e0; padding: 8px; border-radius: 4px; font-family: monospace; }
-.mission-input input::placeholder { color: #666; }
-.autopilot-forms { margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.1); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
-.autopilot-row { display: flex; gap: 6px; }
-.autopilot-row input { width: 70px; }
-.autopilot-row button { min-width: 44px; }
-.btn { padding: 8px 14px; border: none; border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 0.8rem; transition: all 0.2s; }
+.panel h2 { color: #f7941d; font-size: 0.82rem; letter-spacing: 1px; margin-bottom: 8px; border-bottom: 1px solid rgba(247,148,29,0.3); padding-bottom: 5px; flex-shrink: 0; }
+/* Panel placement */
+#camera-panel    { grid-column: 1; grid-row: 1; position: relative; }
+#depth-panel     { grid-column: 2; grid-row: 1; position: relative; }
+#lidar-panel     { grid-column: 3; grid-row: 1; }
+#status-panel    { grid-column: 1; grid-row: 2; overflow-y: auto; }
+#vlm-panel       { grid-column: 2; grid-row: 2; }
+#switchable-panel { grid-column: 3; grid-row: 2; display: flex; flex-direction: column; }
+/* Camera / depth feeds */
+#camera-feed, #depth-feed { width: 100%; flex: 1; min-height: 0; object-fit: contain; border-radius: 4px; display: block; max-height: calc(100% - 60px); }
+.feed-overlay { display: none; position: absolute; top: 36px; left: 12px; right: 12px; background: rgba(237,28,36,0.85); color: #fff; font-size: 0.75rem; padding: 6px 10px; border-radius: 4px; border: 1px solid #ed1c24; text-align: center; z-index: 2; }
+.depth-legend { display: flex; align-items: center; gap: 6px; font-size: 0.66rem; margin-top: 4px; flex-shrink: 0; }
+.depth-gradient-bar { flex: 1; height: 6px; border-radius: 3px; background: linear-gradient(to right, #4fc3f7, #00ff7f, #ffff00, #ff5252); }
+#depth-age { color: #666; }
+/* LiDAR */
+#lidar-canvas { display: block; width: 100%; aspect-ratio: 1 / 1; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #0a0a0a; max-height: calc(100% - 56px); }
+.lidar-info { display: flex; gap: 12px; margin-top: 6px; font-size: 0.72rem; color: #888; flex-shrink: 0; }
+.lidar-info span { color: #4fc3f7; }
+/* Buttons */
+.btn { padding: 6px 12px; border: none; border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 0.78rem; transition: all 0.2s; }
 .btn-primary { background: #f7941d; color: #000; }
 .btn-primary:hover { background: #ffc107; }
 .btn-stop { background: #ed1c24; color: #fff; }
 .btn-stop:hover { background: #ff4444; }
 .btn-secondary { background: rgba(255,255,255,0.15); color: #e0e0e0; }
 .btn-secondary:hover { background: rgba(255,255,255,0.25); }
-.btn-return { background: #4fc3f7; color: #000; }
-.btn-return:hover { background: #81d4fa; }
-.mission-state { padding: 8px; border-radius: 4px; margin-bottom: 8px; font-size: 0.85rem; }
-.state-IDLE { background: rgba(100,100,100,0.3); border-left: 3px solid #888; }
-.state-EXPLORING { background: rgba(255,193,7,0.2); border-left: 3px solid #ffc107; }
-.state-NAVIGATING { background: rgba(33,150,243,0.2); border-left: 3px solid #2196f3; }
-.state-ARRIVED { background: rgba(76,175,80,0.2); border-left: 3px solid #4caf50; }
-.state-RETURNING { background: rgba(156,39,176,0.2); border-left: 3px solid #9c27b0; }
-.state-RETURNED { background: rgba(76,175,80,0.2); border-left: 3px solid #4caf50; }
-.state-FAILED { background: rgba(244,67,54,0.2); border-left: 3px solid #f44336; }
-.state-CANCELLED { background: rgba(100,100,100,0.3); border-left: 3px solid #888; }
-.progress-bar { height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; margin-top: 6px; }
-.progress-fill { height: 100%; background: #f7941d; border-radius: 3px; transition: width 0.5s; }
-.quick-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-/* Map Panel */
-#map-panel { grid-column: 3; grid-row: 1 / 3; }
-#map-canvas { width: 100%; aspect-ratio: 1 / 1; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #1a1a2e; max-height: calc(100% - 42px); }
-/* LiDAR Panel */
-#lidar-panel { grid-column: 4; grid-row: 1 / 3; }
-#lidar-canvas { display: block; width: 100%; aspect-ratio: 1 / 1; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: #0a0a0a; max-height: calc(100% - 56px); }
-.lidar-info { display: flex; gap: 12px; margin-top: 6px; font-size: 0.75rem; color: #888; }
-.lidar-info span { color: #4fc3f7; }
-.map-legend { display: flex; gap: 12px; margin-top: 6px; font-size: 0.7rem; }
-.legend-item { display: flex; align-items: center; gap: 4px; }
-.legend-dot { width: 10px; height: 10px; border-radius: 50%; }
-/* Teleop Panel */
-#teleop-panel { grid-column: 1; grid-row: 2; }
-.dpad { display: grid; grid-template-columns: repeat(3, clamp(44px, 6vh, 60px)); grid-template-rows: repeat(3, clamp(44px, 6vh, 60px)); gap: 4px; margin: 8px auto; width: fit-content; }
-.dpad-btn { width: clamp(44px, 6vh, 60px); height: clamp(44px, 6vh, 60px); background: linear-gradient(160deg, rgba(247,148,29,0.18), rgba(255,255,255,0.08)); border: 1px solid rgba(255,255,255,0.25); border-radius: 10px; color: #e0e0e0; cursor: pointer; font-size: 1.15rem; display: flex; align-items: center; justify-content: center; transition: all 0.1s; user-select: none; }
+.btn-xs { padding: 1px 5px; font-size: 0.65rem; }
+/* Status panel (box 4) */
+.status-section { border-bottom: 1px solid rgba(255,255,255,0.07); padding: 5px 0; }
+.status-row { display: flex; align-items: center; gap: 5px; font-size: 0.70rem; flex-wrap: wrap; margin-bottom: 2px; }
+.stat-label { color: #888; font-size: 0.63rem; text-transform: uppercase; }
+.stat-val   { color: #4fc3f7; font-size: 0.75rem; }
+.lat-val    { color: #f7941d; font-size: 0.72rem; }
+.battery-bar-wrap { flex: 1; height: 8px; background: rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; }
+.battery-bar { height: 100%; border-radius: 4px; transition: width 1s, background 1s; }
+.safety-ok   { color: #4caf50; }
+.safety-warn { color: #ffc107; }
+.safety-stop { color: #ed1c24; font-weight: bold; }
+.dir-blocks { display: flex; gap: 8px; margin-top: 4px; align-items: flex-start; }
+.dir-grid { display: grid; grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 22px); gap: 3px; }
+.clearance-grid { display: grid; grid-template-columns: auto auto; gap: 2px 6px; font-size: 0.65rem; align-content: start; }
+.clr-label { color: #888; } .clr-val { color: #4fc3f7; }
+.block-cell { border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 0.55rem; font-weight: bold; }
+.block-free    { background: rgba(76,175,80,0.2); border: 1px solid #4caf50; color: #4caf50; }
+.block-blocked { background: rgba(237,28,36,0.4); border: 1px solid #ed1c24; color: #ed1c24; }
+.motion-strip { overflow-x: auto; white-space: nowrap; font-size: 0.65rem; color: #9ad2ff; border: 1px solid rgba(79,195,247,0.3); border-radius: 4px; padding: 3px 5px; margin-top: 3px; }
+/* VLM perception log (box 5) */
+#vlm-panel { overflow: hidden; }
+#vlm-log { flex: 1; min-height: 0; overflow-y: auto; font-size: 0.70rem; }
+.vlm-entry { padding: 5px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 3px; }
+.vlm-time { color: #888; }
+.vlm-env { color: #4fc3f7; }
+.vlm-room { background: rgba(247,148,29,0.3); border: 1px solid #f7941d; border-radius: 3px; padding: 1px 4px; color: #f7941d; font-weight: bold; }
+.vlm-obstacle { color: #ed1c24; }
+.vlm-desc { color: #aaa; margin-top: 2px; line-height: 1.3; }
+/* Switchable panel (box 6) */
+.panel-header-tabs { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; border-bottom: 1px solid rgba(247,148,29,0.3); padding-bottom: 5px; flex-shrink: 0; }
+.panel-header-tabs h2 { flex: 1; border: none; margin: 0; padding: 0; }
+.tab-btn { padding: 3px 9px; font-family: monospace; font-size: 0.68rem; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.2); border-radius: 4px; color: #888; cursor: pointer; transition: all 0.15s; }
+.tab-btn:hover { background: rgba(247,148,29,0.2); color: #f7941d; }
+.tab-btn.tab-active { background: rgba(247,148,29,0.25); border-color: #f7941d; color: #f7941d; }
+#pane-teleop, #pane-vlmprompt { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.kbd-hint { font-size: 0.65rem; color: #888; margin-bottom: 5px; flex-shrink: 0; }
+/* D-pad */
+.dpad { display: grid; grid-template-columns: repeat(3, clamp(40px, 5.5vh, 56px)); grid-template-rows: repeat(3, clamp(40px, 5.5vh, 56px)); gap: 4px; margin: 4px auto; width: fit-content; flex-shrink: 0; }
+.dpad-btn { width: clamp(40px, 5.5vh, 56px); height: clamp(40px, 5.5vh, 56px); background: linear-gradient(160deg, rgba(247,148,29,0.18), rgba(255,255,255,0.08)); border: 1px solid rgba(255,255,255,0.25); border-radius: 10px; color: #e0e0e0; cursor: pointer; font-size: 1.1rem; display: flex; align-items: center; justify-content: center; transition: all 0.1s; user-select: none; }
 .dpad-btn:hover { background: rgba(247,148,29,0.3); border-color: #f7941d; }
 .dpad-btn.active { background: #f7941d; color: #000; border-color: #ffc107; }
 .dpad-stop { background: rgba(237,28,36,0.3); border-color: #ed1c24; }
-.speed-sliders { display: flex; gap: 10px; margin-top: 8px; font-size: 0.75rem; }
+.speed-sliders { display: flex; gap: 10px; margin-top: 6px; font-size: 0.72rem; flex-shrink: 0; }
 .speed-sliders label { display: flex; flex-direction: column; gap: 2px; }
-.speed-sliders input[type=range] { width: 100px; }
-.pose-row { display: flex; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
-.pose-val { font-size: 0.75rem; }
-.pose-val span { color: #4fc3f7; font-size: 0.9rem; }
-/* VLM Log Panel */
-#vlm-panel { grid-column: 2; grid-row: 2; }
-#vlm-log { flex: 1; min-height: 0; overflow-y: auto; font-size: 0.72rem; }
-.vlm-entry { padding: 6px; border-bottom: 1px solid rgba(255,255,255,0.05); margin-bottom: 4px; }
-.vlm-time { color: #888; }
-.vlm-env { color: #4fc3f7; }
-.vlm-room { background: rgba(247,148,29,0.3); border: 1px solid #f7941d; border-radius: 3px; padding: 1px 5px; color: #f7941d; font-weight: bold; }
-.vlm-obstacle { color: #ed1c24; }
-.vlm-desc { color: #aaa; margin-top: 2px; line-height: 1.3; }
-/* Bottom status strip */
-.status-strip { margin: 0 10px 10px; min-height: 72px; max-height: 84px; background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; display: grid; grid-template-columns: 1.2fr auto auto auto auto auto 1.6fr auto auto auto auto; gap: 8px; align-items: center; padding: 8px 10px; overflow: hidden; }
-.safety-ok { color: #4caf50; }
-.safety-warn { color: #ffc107; }
-.safety-stop { color: #ed1c24; font-weight: bold; }
-.stat { color: #888; font-size: 0.72rem; white-space: nowrap; }
-.stat span { color: #4fc3f7; font-size: 0.78rem; }
-.motion-strip { overflow-x: auto; white-space: nowrap; font-size: 0.68rem; color: #9ad2ff; border: 1px solid rgba(79,195,247,0.3); border-radius: 4px; padding: 4px 6px; }
-.axis-strip { display: flex; gap: 4px; align-items: center; }
-.block-cell { min-width: 38px; height: 26px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 0.62rem; font-weight: bold; padding: 0 4px; }
-.block-free { background: rgba(76,175,80,0.2); border: 1px solid #4caf50; color: #4caf50; }
-.block-blocked { background: rgba(237,28,36,0.4); border: 1px solid #ed1c24; color: #ed1c24; }
-.btn-rear-override { font-size: 0.7rem; padding: 3px 8px; }
-.btn-rear-override.active { background: #ed1c24; color: #fff; }
-.clearance-row { display: flex; gap: 8px; font-size: 0.7rem; color: #888; flex-wrap: wrap; margin-top: 4px; }
-.clearance-row span { color: #4fc3f7; }
-/* Memory panel (inside mission panel) */
-#memory-list { max-height: 80px; overflow-y: auto; margin-top: 6px; font-size: 0.72rem; }
-.memory-row { display: flex; justify-content: space-between; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
-.memory-room { color: #f7941d; }
-.memory-pos { color: #888; }
+.speed-sliders input[type=range] { width: 90px; }
+.toggle-row { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 5px; flex-shrink: 0; }
+.toggle-sm { font-size: 0.63rem; padding: 3px 6px; }
+.btn-rear-override.active { background: #ed1c24; color: #fff; border-color: #ed1c24; }
+/* VLM prompt pane */
+.vlm-chat-history { flex: 1; min-height: 0; overflow-y: auto; font-size: 0.70rem; border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 6px; margin-bottom: 7px; background: rgba(0,0,0,0.2); }
+.chat-user  { color: #f7941d; margin-bottom: 2px; }
+.chat-robot { color: #4fc3f7; margin-bottom: 7px; }
+.chat-ts    { color: #666; font-size: 0.63rem; }
+.vlm-prompt-row { display: flex; gap: 6px; flex-shrink: 0; }
+.vlm-prompt-row input { flex: 1; background: rgba(255,255,255,0.1); border: 1px solid rgba(247,148,29,0.5); color: #e0e0e0; padding: 6px; border-radius: 4px; font-family: monospace; font-size: 0.76rem; }
+.vlm-prompt-row input::placeholder { color: #555; }
+/* Responsive collapse */
+@media (max-width: 900px) {
+  body { overflow: auto; height: auto; }
+  .grid { grid-template-columns: 1fr; grid-template-rows: auto; overflow: visible; }
+  #camera-panel, #depth-panel, #lidar-panel, #status-panel, #vlm-panel, #switchable-panel { grid-column: 1; grid-row: auto; min-height: 300px; }
+  #camera-feed, #depth-feed { max-height: 220px; }
+  #lidar-canvas { max-height: 220px; }
+}
 </style>
 </head>
 <body>
@@ -929,158 +1010,160 @@ body { background: linear-gradient(135deg, #0d0f1a 0%, #1a1e2e 100%); color: #e0
 </div>
 
 <div class="grid">
-  <!-- Camera -->
+
+  <!-- Box 1: RGB Camera -->
   <div class="panel" id="camera-panel">
-    <h2>CAMERA FEED</h2>
+    <h2>RGB CAMERA</h2>
     <img id="camera-feed" src="/video_feed" alt="Camera Feed">
-    <div id="camera-overlay">⚠ NO CAMERA — run image_publisher on Ridgeback</div>
+    <div id="camera-overlay" class="feed-overlay">NO CAMERA SIGNAL</div>
   </div>
 
-  <!-- Mission Control -->
-  <div class="panel" id="mission-panel">
-    <h2>MISSION CONTROL</h2>
-    <div class="mission-input">
-      <input id="mission-input" type="text" placeholder='e.g. "go to room 305" or "come back"' />
-      <button class="btn btn-primary" onclick="sendMission()">GO</button>
-    </div>
-    <div class="quick-btns">
-      <button class="btn btn-return" onclick="sendMissionCmd('come back')">⟵ Return</button>
-      <button class="btn btn-stop" onclick="sendMissionCmd('stop')">■ STOP</button>
-      <button class="btn btn-secondary" onclick="sendMissionCmd('where am i')">? Status</button>
-    </div>
-    <div id="mission-state" class="mission-state state-IDLE" style="margin-top:10px">
-      <div id="mission-state-label">IDLE</div>
-      <div id="mission-status-text" style="font-size:0.75rem; color:#aaa; margin-top:3px">Ready</div>
-      <div class="progress-bar"><div id="mission-progress" class="progress-fill" style="width:0%"></div></div>
-    </div>
-    <div id="mission-response" style="font-size:0.75rem; color:#4fc3f7; margin-top:6px; min-height:20px"></div>
-    <!-- Memory -->
-    <div style="margin-top:10px">
-      <div style="display:flex; justify-content:space-between; align-items:center">
-        <span style="font-size:0.75rem; color:#888">SPATIAL MEMORY</span>
-        <button class="btn btn-secondary" style="padding:2px 8px; font-size:0.7rem" onclick="loadMemory()">⟳ Refresh</button>
-      </div>
-      <div id="memory-list"></div>
-    </div>
-    <div class="autopilot-forms">
-      <div style="font-size:0.72rem; color:#888">AUTOPILOT</div>
-      <div class="autopilot-row">
-        <input id="move-dist" type="number" step="0.1" value="0.5" placeholder="dist m">
-        <input id="move-speed" type="number" step="0.05" value="0.2" placeholder="speed">
-        <button class="btn btn-primary" onclick="autopilotMove()">GO</button>
-      </div>
-      <div class="autopilot-row">
-        <input id="rot-angle" type="number" step="5" value="90" placeholder="angle">
-        <input id="rot-speed" type="number" step="0.1" value="0.5" placeholder="speed">
-        <button class="btn btn-primary" onclick="autopilotRotate()">GO</button>
-      </div>
+  <!-- Box 2: Depth Camera -->
+  <div class="panel" id="depth-panel">
+    <h2>DEPTH CAMERA</h2>
+    <img id="depth-feed" src="/depth_feed" alt="Depth Feed">
+    <div id="depth-overlay" class="feed-overlay">NO DEPTH SIGNAL</div>
+    <div class="depth-legend">
+      <span style="color:#4fc3f7">NEAR</span>
+      <div class="depth-gradient-bar"></div>
+      <span style="color:#ff5252">FAR (5m)</span>
+      <span id="depth-age"></span>
     </div>
   </div>
 
-  <!-- SLAM Map -->
-  <div class="panel" id="map-panel">
-    <h2>SLAM MAP</h2>
-    <canvas id="map-canvas" width="400" height="400"></canvas>
-    <div class="map-legend">
-      <div class="legend-item"><div class="legend-dot" style="background:#f0f0f0"></div> Free</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#28283c"></div> Unknown</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#1e1e1e"></div> Obstacle</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#f7941d"></div> Robot</div>
-      <div class="legend-item"><div class="legend-dot" style="background:#4caf50"></div> Room</div>
-    </div>
-  </div>
-
-  <!-- LiDAR Scan -->
+  <!-- Box 3: LiDAR Scan -->
   <div class="panel" id="lidar-panel">
     <h2>LIDAR SCAN</h2>
     <canvas id="lidar-canvas" width="600" height="600"></canvas>
     <div class="lidar-info">
-      Closest: <span id="lidar-closest">--</span>m &nbsp;
-      Points: <span id="lidar-points">--</span>
+      Closest: <span id="lidar-closest">--</span>m &nbsp; Points: <span id="lidar-points">--</span>
     </div>
   </div>
 
-  <!-- Teleop -->
-  <div class="panel" id="teleop-panel">
-    <h2>MANUAL CONTROL</h2>
-    <div style="font-size:0.7rem; color:#888; margin-bottom:4px">WASD/Arrows=move Q/E=rotate Space=stop | Click dir=start, click again=stop</div>
-    <div class="dpad">
-      <button class="dpad-btn" id="btn-fl"  data-lin="1"  data-lat="1"  data-ang="0">↖</button>
-      <button class="dpad-btn" id="btn-f"   data-lin="1"  data-lat="0"  data-ang="0">↑</button>
-      <button class="dpad-btn" id="btn-fr"  data-lin="1"  data-lat="-1" data-ang="0">↗</button>
-      <button class="dpad-btn" id="btn-sl"  data-lin="0"  data-lat="1"  data-ang="0">←</button>
-      <button class="dpad-btn dpad-stop" id="btn-stop" onclick="stopTeleop()">■</button>
-      <button class="dpad-btn" id="btn-sr"  data-lin="0"  data-lat="-1" data-ang="0">→</button>
-      <button class="dpad-btn" id="btn-bl"  data-lin="-1" data-lat="1"  data-ang="0">↙</button>
-      <button class="dpad-btn" id="btn-b"   data-lin="-1" data-lat="0"  data-ang="0">↓</button>
-      <button class="dpad-btn" id="btn-br"  data-lin="-1" data-lat="-1" data-ang="0">↘</button>
+  <!-- Box 4: System Status -->
+  <div class="panel" id="status-panel">
+    <h2>SYSTEM STATUS</h2>
+    <div class="status-section">
+      <div class="status-row">
+        <span class="stat-label">BATTERY</span>
+        <div class="battery-bar-wrap"><div id="batt-bar" class="battery-bar" style="width:0%;background:#4caf50"></div></div>
+        <span id="stat-batt-pct" class="stat-val">--%</span>
+        <span id="stat-batt-v" class="stat-val">--V</span>
+      </div>
     </div>
-    <div style="display:flex; gap:8px; justify-content:center; margin-top:4px">
-      <button class="dpad-btn" id="btn-ccw" data-lin="0" data-lat="0" data-ang="1">↺</button>
-      <button class="dpad-btn" id="btn-cw"  data-lin="0" data-lat="0" data-ang="-1">↻</button>
+    <div class="status-section">
+      <div class="status-row">
+        X:<span id="val-x" class="stat-val">--</span>m
+        Y:<span id="val-y" class="stat-val">--</span>m
+        YAW:<span id="val-yaw" class="stat-val">--</span>°
+        <button class="btn btn-secondary btn-xs" onclick="resetPose()">⊙RST</button>
+      </div>
+      <div class="status-row">
+        Vlin:<span id="val-vlin" class="stat-val">--</span>
+        Vlat:<span id="val-vlat" class="stat-val">--</span>
+        Vang:<span id="val-vang" class="stat-val">--</span>
+      </div>
     </div>
-    <div class="speed-sliders">
-      <label>Linear <span id="lbl-lin">0.20</span>m/s
-        <input type="range" id="spd-linear" min="0.05" max="0.5" step="0.05" value="0.2"
-               oninput="document.getElementById('lbl-lin').textContent=parseFloat(this.value).toFixed(2)">
-      </label>
-      <label>Angular <span id="lbl-ang">0.50</span>r/s
-        <input type="range" id="spd-angular" min="0.1" max="1.5" step="0.1" value="0.5"
-               oninput="document.getElementById('lbl-ang').textContent=parseFloat(this.value).toFixed(2)">
-      </label>
+    <div class="status-section">
+      <div class="status-row">
+        <span class="stat-label">LATENCY</span>
+        IMG<span id="lat-image" class="lat-val">--</span>
+        MOT<span id="lat-motion" class="lat-val">--</span>
+        ODO<span id="lat-odom" class="lat-val">--</span>
+      </div>
     </div>
-    <div class="pose-row">
-      <div class="pose-val">X:<span id="val-x">0.00</span>m</div>
-      <div class="pose-val">Y:<span id="val-y">0.00</span>m</div>
-      <div class="pose-val">Yaw:<span id="val-yaw">0.0</span>°</div>
-      <button class="btn btn-secondary" style="padding:2px 6px; font-size:0.7rem" onclick="resetPose()">⊙</button>
+    <div class="status-section">
+      <div id="strip-safety" class="status-row safety-ok">● SAFETY OK</div>
+      <div class="dir-blocks">
+        <div class="dir-grid">
+          <div></div>
+          <div class="block-cell block-free" id="blk-f">FWD</div>
+          <div></div>
+          <div class="block-cell block-free" id="blk-l">L</div>
+          <div class="block-cell block-free" id="blk-ccw">CCW</div>
+          <div class="block-cell block-free" id="blk-r">R</div>
+          <div></div>
+          <div class="block-cell block-free" id="blk-b">REV</div>
+          <div></div>
+        </div>
+        <div class="clearance-grid">
+          <span class="clr-label">FWD</span><span id="clr-fwd" class="clr-val">--</span>
+          <span class="clr-label">REV</span><span id="clr-rev" class="clr-val">--</span>
+          <span class="clr-label">L</span>  <span id="clr-l"   class="clr-val">--</span>
+          <span class="clr-label">R</span>  <span id="clr-r"   class="clr-val">--</span>
+        </div>
+      </div>
     </div>
-    <div class="clearance-row">
-      Fwd:<span id="clr-fwd">--</span>m
-      Rev:<span id="clr-rev">--</span>m
-      L:<span id="clr-l">--</span>m
-      R:<span id="clr-r">--</span>m
+    <div class="status-section">
+      <div class="status-row">
+        <span class="stat-label">ESTOP</span><span id="val-stop-loop" class="stat-val">--</span>
+        <span class="stat-label">CAM</span><span id="conn-cam" class="stat-val">--</span>
+        <span class="stat-label">ODOM</span><span id="conn-odom" class="stat-val">--</span>
+      </div>
+      <div id="motion-log" class="motion-strip">--</div>
     </div>
   </div>
 
-  <!-- VLM Perception Log -->
+  <!-- Box 5: VLM Perception Log -->
   <div class="panel" id="vlm-panel">
     <h2>VLM PERCEPTION LOG</h2>
     <div id="vlm-log"></div>
   </div>
 
-</div>
+  <!-- Box 6: Switchable Panel -->
+  <div class="panel" id="switchable-panel">
+    <div class="panel-header-tabs">
+      <h2>CONTROL</h2>
+      <button id="tab-teleop"    class="tab-btn tab-active" onclick="switchTab('teleop')">TELEOP</button>
+      <button id="tab-vlmprompt" class="tab-btn"            onclick="switchTab('vlmprompt')">VLM PROMPT</button>
+    </div>
 
-<div class="status-strip">
-  <div id="strip-safety" class="safety-ok">● SAFETY OK</div>
-  <div class="stat">BATT <span id="stat-batt-v">0.0V</span></div>
-  <div class="stat">CHG <span id="stat-batt-pct">0.0%</span></div>
-  <div class="stat">IMG <span id="lat-image">0ms</span></div>
-  <div class="stat">MOT <span id="lat-motion">0ms</span></div>
-  <div class="stat">ODO <span id="lat-odom">0ms</span></div>
-  <div id="motion-log" class="motion-strip">[log] ready</div>
-  <div class="axis-strip">
-    <div class="block-cell block-free" id="blk-f">+X</div>
-    <div class="block-cell block-free" id="blk-b">-X</div>
-    <div class="block-cell block-free" id="blk-l">+Y</div>
-    <div class="block-cell block-free" id="blk-r">-Y</div>
-    <div class="block-cell block-free" id="blk-ccw">+YAW</div>
-    <div class="block-cell block-free" id="blk-cw">-YAW</div>
+    <!-- Mode A: Teleop -->
+    <div id="pane-teleop">
+      <div class="kbd-hint">WASD / Arrows = move &nbsp; Q/E = rotate &nbsp; Space = stop</div>
+      <div class="dpad">
+        <button class="dpad-btn" id="btn-fl"  data-lin="1"  data-lat="1"  data-ang="0">↖</button>
+        <button class="dpad-btn" id="btn-f"   data-lin="1"  data-lat="0"  data-ang="0">↑</button>
+        <button class="dpad-btn" id="btn-fr"  data-lin="1"  data-lat="-1" data-ang="0">↗</button>
+        <button class="dpad-btn" id="btn-sl"  data-lin="0"  data-lat="1"  data-ang="0">←</button>
+        <button class="dpad-btn dpad-stop" id="btn-stop" onclick="stopRobot()">■</button>
+        <button class="dpad-btn" id="btn-sr"  data-lin="0"  data-lat="-1" data-ang="0">→</button>
+        <button class="dpad-btn" id="btn-bl"  data-lin="-1" data-lat="1"  data-ang="0">↙</button>
+        <button class="dpad-btn" id="btn-b"   data-lin="-1" data-lat="0"  data-ang="0">↓</button>
+        <button class="dpad-btn" id="btn-br"  data-lin="-1" data-lat="-1" data-ang="0">↘</button>
+      </div>
+      <div style="display:flex;gap:8px;justify-content:center;margin-top:4px">
+        <button class="dpad-btn" id="btn-ccw" data-lin="0" data-lat="0" data-ang="1">↺</button>
+        <button class="dpad-btn" id="btn-cw"  data-lin="0" data-lat="0" data-ang="-1">↻</button>
+      </div>
+      <div class="speed-sliders">
+        <label>Linear <span id="lbl-lin">0.20</span>m/s
+          <input type="range" id="spd-linear" min="0.05" max="0.5" step="0.05" value="0.2"
+                 oninput="document.getElementById('lbl-lin').textContent=parseFloat(this.value).toFixed(2)">
+        </label>
+        <label>Angular <span id="lbl-ang">0.50</span>r/s
+          <input type="range" id="spd-angular" min="0.1" max="1.5" step="0.1" value="0.5"
+                 oninput="document.getElementById('lbl-ang').textContent=parseFloat(this.value).toFixed(2)">
+        </label>
+      </div>
+      <div class="toggle-row">
+        <button class="btn btn-secondary toggle-sm" id="btn-safety-enabled" onclick="toggleSafetyEnabled()">SAFETY: ON</button>
+        <button class="btn btn-secondary toggle-sm" id="btn-soft-bumper"    onclick="toggleSoftBumper()">SOFT BUMPER: ON</button>
+        <button class="btn btn-secondary toggle-sm btn-rear-override" id="btn-rear-override" onclick="toggleRearOverride()">REV UNLOCK</button>
+      </div>
+      <button class="btn btn-stop" style="width:100%;margin-top:6px" onclick="stopRobot()">■ STOP</button>
+    </div>
+
+    <!-- Mode B: VLM Prompt -->
+    <div id="pane-vlmprompt" style="display:none">
+      <div id="vlm-chat" class="vlm-chat-history"></div>
+      <div class="vlm-prompt-row">
+        <input id="vlm-prompt-input" type="text" placeholder='"what do you see?" or "go to room 202"'>
+        <button class="btn btn-primary" onclick="sendVlmPrompt()">SEND</button>
+      </div>
+    </div>
   </div>
-  <button class="btn btn-secondary" id="btn-safety-enabled"
-          onclick="toggleSafetyEnabled()"
-          style="font-size:0.72rem; font-weight:bold; padding:4px 8px;
-                 background:rgba(76,175,80,0.3); border:1px solid #4caf50; color:#4caf50;">
-    SAFETY ENABLED: ON
-  </button>
-  <button class="btn btn-secondary" id="btn-soft-bumper"
-          onclick="toggleSoftBumper()"
-          style="font-size:0.72rem; font-weight:bold; padding:4px 8px;
-                 background:rgba(76,175,80,0.3); border:1px solid #4caf50; color:#4caf50;">
-    SOFT BUMPER: ON
-  </button>
-  <button class="btn btn-secondary btn-rear-override" id="btn-rear-override"
-          onclick="toggleRearOverride()">REV UNLOCK</button>
+
 </div>
 
 <script>
@@ -1090,33 +1173,18 @@ let teleopInterval = null;
 let keyboardInterval = null;
 const keyState = {};
 let safetyEnabled = true;
+let softBumperEnabled = true;
+let rearOverrideEnabled = false;
+const vlmChatHistory = [];
 
-// ── Mission Control ───────────────────────────────────────────────────────
-function sendMission() {
-  const input = document.getElementById('mission-input');
-  const cmd = input.value.trim();
-  if (!cmd) return;
-  sendMissionCmd(cmd);
-  input.value = '';
-}
-
-document.getElementById('mission-input').addEventListener('keydown', e => {
-  if (e.key === 'Enter') sendMission();
-});
-
-async function sendMissionCmd(cmd) {
-  try {
-    const r = await fetch('/mission', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({command: cmd})
-    });
-    const data = await r.json();
-    document.getElementById('mission-response').textContent =
-      `→ ${data.message || (data.accepted ? 'OK' : 'Not accepted')}`;
-  } catch(e) {
-    document.getElementById('mission-response').textContent = `Error: ${e}`;
-  }
+// ── Tab Switch ────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  ['teleop', 'vlmprompt'].forEach(p => {
+    const pane = document.getElementById('pane-' + p);
+    const btn  = document.getElementById('tab-'  + p);
+    if (pane) pane.style.display = (p === tab) ? 'flex' : 'none';
+    if (btn)  btn.classList.toggle('tab-active', p === tab);
+  });
 }
 
 // ── Teleop Buttons ────────────────────────────────────────────────────────
@@ -1126,7 +1194,7 @@ document.querySelectorAll('.dpad-btn[data-lin]').forEach(btn => {
 
 function toggleBtnTeleop(btn) {
   if (keyboardInterval) return;
-  if (activeBtn === btn) { stopTeleop(); return; }
+  if (activeBtn === btn) { stopRobot(); return; }
   if (activeBtn) { activeBtn.classList.remove('active'); }
   activeBtn = btn;
   btn.classList.add('active');
@@ -1144,8 +1212,7 @@ function sendTeleopFromBtn(btn) {
   sendTeleop(lin * linSpd, lat * linSpd, ang * angSpd);
 }
 
-function stopTeleop() {
-  if (keyboardInterval) return;
+function stopRobot() {
   clearInterval(teleopInterval);
   if (activeBtn) { activeBtn.classList.remove('active'); activeBtn = null; }
   sendStop();
@@ -1165,40 +1232,6 @@ async function sendStop() {
 
 async function resetPose() {
   fetch('/reset_pose', {method: 'POST'}).catch(() => {});
-}
-
-async function autopilotMove() {
-  const dist = parseFloat(document.getElementById('move-dist').value);
-  const speed = parseFloat(document.getElementById('move-speed').value);
-  if (!isFinite(dist) || !isFinite(speed) || speed <= 0.0) return;
-  try {
-    const r = await fetch('/move', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({distance: dist, speed: speed})
-    });
-    const data = await r.json();
-    document.getElementById('mission-response').textContent = `→ ${data.status || 'Move sent'}`;
-  } catch(e) {
-    document.getElementById('mission-response').textContent = `Error: ${e}`;
-  }
-}
-
-async function autopilotRotate() {
-  const angle = parseFloat(document.getElementById('rot-angle').value);
-  const speed = parseFloat(document.getElementById('rot-speed').value);
-  if (!isFinite(angle) || !isFinite(speed) || speed <= 0.0) return;
-  try {
-    const r = await fetch('/rotate', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({angle: angle, speed: speed})
-    });
-    const data = await r.json();
-    document.getElementById('mission-response').textContent = `→ ${data.status || 'Rotate sent'}`;
-  } catch(e) {
-    document.getElementById('mission-response').textContent = `Error: ${e}`;
-  }
 }
 
 // ── Keyboard Teleop — 20 Hz repeat while keys held ────────────────────────
@@ -1223,9 +1256,8 @@ document.addEventListener('keydown', e => {
   if (key === ' ') { e.preventDefault(); sendStop(); return; }
   if (!MOVE_KEYS.includes(key)) return;
   e.preventDefault();
-  if (keyState[key]) return;   // already held
+  if (keyState[key]) return;
   keyState[key] = true;
-  // Kill button teleop loop when keyboard takes over
   if (teleopInterval) { clearInterval(teleopInterval); teleopInterval = null; }
   if (activeBtn) { activeBtn.classList.remove('active'); activeBtn = null; }
   if (!keyboardInterval) {
@@ -1245,66 +1277,70 @@ document.addEventListener('keyup', e => {
 });
 
 // ── Status Polling ────────────────────────────────────────────────────────
+function setBlock(id, blocked) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = el.className.replace(/block-(free|blocked)/g, blocked ? 'block-blocked' : 'block-free');
+}
+
+function syncToggleButton(id, on, labelOn, labelOff) {
+  const btn = document.getElementById(id);
+  if (!btn) return;
+  btn.textContent    = on ? labelOn : labelOff;
+  btn.style.background   = on ? 'rgba(76,175,80,0.3)'  : 'rgba(237,28,36,0.3)';
+  btn.style.borderColor  = on ? '#4caf50' : '#ed1c24';
+  btn.style.color        = on ? '#4caf50' : '#ed1c24';
+}
+
 async function updateStatus() {
   try {
-    const [status, safety, mission, camStatus] = await Promise.all([
+    const [status, camStatus, depthStatus] = await Promise.all([
       fetch('/status').then(r => r.json()),
-      fetch('/safety').then(r => r.json()),
-      fetch('/mission_status').then(r => r.json()),
-      fetch('/camera_status').then(r => r.json())
+      fetch('/camera_status').then(r => r.json()),
+      fetch('/depth_status').then(r => r.json())
     ]);
+    const safety = status.safety || {};
 
-    // Camera availability indicator
-    const camOverlay = document.getElementById('camera-overlay');
-    if (camOverlay) {
-      const noFeed = !camStatus.has_frame || camStatus.last_frame_age_s > 3.0;
-      camOverlay.style.display = noFeed ? 'block' : 'none';
+    // Battery
+    const pct = status.battery_pct ?? 0;
+    const battBar = document.getElementById('batt-bar');
+    if (battBar) {
+      battBar.style.width = pct.toFixed(0) + '%';
+      battBar.style.background = pct < 20 ? '#ed1c24' : pct < 40 ? '#ffc107' : '#4caf50';
     }
+    const e = id => document.getElementById(id);
+    if (e('stat-batt-pct')) e('stat-batt-pct').textContent = pct.toFixed(1) + '%';
+    if (e('stat-batt-v'))   e('stat-batt-v').textContent   = (status.battery_v ?? 0).toFixed(1) + 'V';
 
-    // Odometry
-    document.getElementById('val-x').textContent = status.x.toFixed(2);
-    document.getElementById('val-y').textContent = status.y.toFixed(2);
-    document.getElementById('val-yaw').textContent = status.yaw_deg.toFixed(1);
+    // Pose
+    if (e('val-x'))    e('val-x').textContent    = (status.x   ?? 0).toFixed(2);
+    if (e('val-y'))    e('val-y').textContent     = (status.y   ?? 0).toFixed(2);
+    if (e('val-yaw'))  e('val-yaw').textContent   = (status.yaw_deg ?? 0).toFixed(1);
+    if (e('val-vlin')) e('val-vlin').textContent  = (status.vel_linear  ?? 0).toFixed(2);
+    if (e('val-vlat')) e('val-vlat').textContent  = (status.vel_lateral ?? 0).toFixed(2);
+    if (e('val-vang')) e('val-vang').textContent  = (status.vel_angular ?? 0).toFixed(2);
 
-    // Safety header
-    const safetyEl = document.getElementById('header-safety');
-    const stripSafetyEl = document.getElementById('strip-safety');
+    // Latency
+    if (e('lat-image'))  e('lat-image').textContent  = (status.latency?.image_ms  ?? 0).toFixed(0) + 'ms';
+    if (e('lat-motion')) e('lat-motion').textContent = (status.latency?.motion_ms ?? 0).toFixed(0) + 'ms';
+    if (e('lat-odom'))   e('lat-odom').textContent   = (status.latency?.odom_ms   ?? 0).toFixed(0) + 'ms';
+
+    // Safety header + strip
+    const safetyEl    = document.getElementById('header-safety');
+    const stripEl     = document.getElementById('strip-safety');
+    let safeText, safeCls;
     if (safety.stop_active) {
-      safetyEl.className = 'safety-stop';
-      safetyEl.textContent = `▲ SAFETY STOP: ${safety.status_text}`;
-      if (stripSafetyEl) {
-        stripSafetyEl.className = 'safety-stop';
-        stripSafetyEl.textContent = `▲ ${safety.status_text}`;
-      }
+      safeText = `▲ STOP: ${safety.status_text}`; safeCls = 'safety-stop';
     } else if (!safety.lidar_active) {
-      safetyEl.className = 'safety-warn';
-      safetyEl.textContent = `⚠ LIDAR INACTIVE`;
-      if (stripSafetyEl) {
-        stripSafetyEl.className = 'safety-warn';
-        stripSafetyEl.textContent = '⚠ LIDAR INACTIVE';
-      }
+      safeText = '⚠ LIDAR INACTIVE'; safeCls = 'safety-warn';
     } else if (safety.closest_m < 0.8) {
-      safetyEl.className = 'safety-warn';
-      safetyEl.textContent = `⚠ OBSTACLE ${safety.closest_m.toFixed(2)}m`;
-      if (stripSafetyEl) {
-        stripSafetyEl.className = 'safety-warn';
-        stripSafetyEl.textContent = `⚠ OBSTACLE ${safety.closest_m.toFixed(2)}m`;
-      }
+      safeText = `⚠ OBSTACLE ${(safety.closest_m ?? 0).toFixed(2)}m`; safeCls = 'safety-warn';
     } else {
-      safetyEl.className = 'safety-ok';
-      safetyEl.textContent = `● SAFETY OK  ${safety.closest_m > 0 ? safety.closest_m.toFixed(1)+'m' : ''}`;
-      if (stripSafetyEl) {
-        stripSafetyEl.className = 'safety-ok';
-        stripSafetyEl.textContent = `● SAFETY OK ${safety.closest_m > 0 ? safety.closest_m.toFixed(1) + 'm' : ''}`;
-      }
+      safeText = `● SAFETY OK ${safety.closest_m > 0 ? safety.closest_m.toFixed(1) + 'm' : ''}`; safeCls = 'safety-ok';
     }
+    [safetyEl, stripEl].forEach(el => { if (el) { el.className = safeCls + (el === stripEl ? ' status-row' : ''); el.textContent = safeText; }});
 
-    // Per-axis block indicators
-    function setBlock(id, blocked) {
-      const el = document.getElementById(id);
-      if (!el) return;
-      el.className = el.className.replace(/block-(free|blocked)/g, blocked ? 'block-blocked' : 'block-free');
-    }
+    // Directional blocks
     setBlock('blk-f',   safety.block_pos_x);
     setBlock('blk-b',   safety.block_neg_x);
     setBlock('blk-l',   safety.block_pos_y);
@@ -1312,74 +1348,55 @@ async function updateStatus() {
     setBlock('blk-ccw', safety.block_pos_yaw);
     setBlock('blk-cw',  safety.block_neg_yaw);
 
-    // Telemetry strip values
-    const battV = document.getElementById('stat-batt-v');
-    const battPct = document.getElementById('stat-batt-pct');
-    const latImg = document.getElementById('lat-image');
-    const latMot = document.getElementById('lat-motion');
-    const latOdo = document.getElementById('lat-odom');
-    const motionLog = document.getElementById('motion-log');
-    if (battV) battV.textContent = `${status.battery_v.toFixed(1)}V`;
-    if (battPct) battPct.textContent = `${status.battery_pct.toFixed(1)}%`;
-    if (latImg) latImg.textContent = `${(status.latency?.image_ms ?? 0).toFixed(0)}ms`;
-    if (latMot) latMot.textContent = `${(status.latency?.motion_ms ?? 0).toFixed(0)}ms`;
-    if (latOdo) latOdo.textContent = `${(status.latency?.odom_ms ?? 0).toFixed(0)}ms`;
-    if (motionLog) {
+    // Clearances
+    function fmtClr(v) { return (v >= 0) ? v.toFixed(2) + 'm' : 'blind'; }
+    if (e('clr-fwd')) e('clr-fwd').textContent = fmtClr(safety.clearance_fwd   ?? -1);
+    if (e('clr-rev')) e('clr-rev').textContent = fmtClr(safety.clearance_rev   ?? -1);
+    if (e('clr-l'))   e('clr-l').textContent   = fmtClr(safety.clearance_left  ?? -1);
+    if (e('clr-r'))   e('clr-r').textContent   = fmtClr(safety.clearance_right ?? -1);
+
+    // E-Stop
+    if (e('val-stop-loop')) {
+      const active = safety.stop_active ?? false;
+      e('val-stop-loop').textContent = active ? 'ACTIVE' : 'CLEAR';
+      e('val-stop-loop').style.color = active ? '#ed1c24' : '#4caf50';
+    }
+
+    // Connection
+    if (e('conn-cam')) {
+      e('conn-cam').textContent = status.camera_connected ? 'OK' : 'LOST';
+      e('conn-cam').style.color = status.camera_connected ? '#4caf50' : '#ed1c24';
+    }
+    if (e('conn-odom')) {
+      e('conn-odom').textContent = status.odom_connected ? 'OK' : 'LOST';
+      e('conn-odom').style.color = status.odom_connected ? '#4caf50' : '#ed1c24';
+    }
+
+    // Motion log
+    if (e('motion-log')) {
       const parts = status.logs && status.logs.length ? status.logs : [status.motion_status || 'Ready'];
-      motionLog.textContent = parts.join(' | ');
+      e('motion-log').textContent = parts.join(' | ');
     }
 
-    // Soft bumper button sync (ground-truth from safety controller)
-    const sbEnabled = safety.soft_bumper_enabled ?? true;
-    if (sbEnabled !== softBumperEnabled) {
-      softBumperEnabled = sbEnabled;
-      const sbBtn = document.getElementById('btn-soft-bumper');
-      if (sbBtn) {
-        sbBtn.textContent = sbEnabled ? 'SOFT BUMPER: ON' : 'SOFT BUMPER: OFF';
-        sbBtn.style.background = sbEnabled ? 'rgba(76,175,80,0.3)' : 'rgba(237,28,36,0.3)';
-        sbBtn.style.borderColor = sbEnabled ? '#4caf50' : '#ed1c24';
-        sbBtn.style.color = sbEnabled ? '#4caf50' : '#ed1c24';
-      }
-    }
+    // Toggle buttons
+    softBumperEnabled = safety.soft_bumper_enabled ?? softBumperEnabled;
+    safetyEnabled     = safety.safety_enabled      ?? safetyEnabled;
+    syncToggleButton('btn-soft-bumper',    softBumperEnabled, 'SOFT BUMPER: ON', 'SOFT BUMPER: OFF');
+    syncToggleButton('btn-safety-enabled', safetyEnabled,     'SAFETY: ON',      'SAFETY: OFF');
 
-    // Master safety toggle sync
-    const serverSafetyEnabled = safety.safety_enabled ?? true;
-    if (serverSafetyEnabled !== safetyEnabled) {
-      safetyEnabled = serverSafetyEnabled;
-    }
-    const seBtn = document.getElementById('btn-safety-enabled');
-    if (seBtn) {
-      seBtn.textContent = safetyEnabled ? 'SAFETY ENABLED: ON' : 'SAFETY ENABLED: OFF';
-      seBtn.style.background = safetyEnabled ? 'rgba(76,175,80,0.3)' : 'rgba(237,28,36,0.3)';
-      seBtn.style.borderColor = safetyEnabled ? '#4caf50' : '#ed1c24';
-      seBtn.style.color = safetyEnabled ? '#4caf50' : '#ed1c24';
-    }
+    // Camera feed overlays
+    const camOverlay   = document.getElementById('camera-overlay');
+    const depthOverlay = document.getElementById('depth-overlay');
+    if (camOverlay)   camOverlay.style.display   = (!camStatus.has_frame   || camStatus.last_frame_age_s   > 3.0) ? 'block' : 'none';
+    if (depthOverlay) depthOverlay.style.display = (!depthStatus.has_frame || depthStatus.last_frame_age_s > 3.0) ? 'block' : 'none';
+    if (e('depth-age') && depthStatus.last_frame_age_s >= 0)
+      e('depth-age').textContent = depthStatus.last_frame_age_s.toFixed(1) + 's ago';
 
-    // Clearance display
-    function fmtClr(v) { return (v >= 0) ? v.toFixed(2) : 'blind'; }
-    const cFwd = document.getElementById('clr-fwd');
-    const cRev = document.getElementById('clr-rev');
-    const cL   = document.getElementById('clr-l');
-    const cR   = document.getElementById('clr-r');
-    if (cFwd) cFwd.textContent = fmtClr(safety.clearance_fwd ?? -1);
-    if (cRev) cRev.textContent = fmtClr(safety.clearance_rev ?? -1);
-    if (cL)   cL.textContent   = fmtClr(safety.clearance_left ?? -1);
-    if (cR)   cR.textContent   = fmtClr(safety.clearance_right ?? -1);
-
-    // Mission state
-    const stateEl = document.getElementById('mission-state');
-    stateEl.className = `mission-state state-${mission.state}`;
-    document.getElementById('mission-state-label').textContent =
-      `${mission.state}${mission.target_room ? ' → Room ' + mission.target_room : ''}`;
-    document.getElementById('mission-status-text').textContent = mission.status_text;
-    document.getElementById('mission-progress').style.width =
-      (mission.progress * 100).toFixed(0) + '%';
-
-  } catch(e) {}
+  } catch(err) {}
 }
 
 // ── LiDAR Canvas ─────────────────────────────────────────────────────────
-const LIDAR_MAX_RANGE = 4.0;  // meters to display
+const LIDAR_MAX_RANGE = 4.0;
 
 function syncCanvasToDisplaySize(canvas) {
   const rect = canvas.getBoundingClientRect();
@@ -1408,129 +1425,59 @@ function drawLidar(data) {
   const rangeMax = Math.min(data.range_max || 10, LIDAR_MAX_RANGE);
   const lidarScale = Math.min(w, h) / (2 * (rangeMax + 0.25));
 
-  // Background
   ctx.fillStyle = '#0a0a0a';
   ctx.fillRect(0, 0, w, h);
 
-  // Range rings with meter labels
   ctx.strokeStyle = '#1a2a1a';
   ctx.lineWidth = 1;
   ctx.font = '11px monospace';
   ctx.fillStyle = '#2a4a2a';
   for (let r = 1; r <= rangeMax; r++) {
     const pr = r * lidarScale;
-    ctx.beginPath();
-    ctx.arc(cx, cy, pr, 0, Math.PI * 2);
-    ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, pr, 0, Math.PI * 2); ctx.stroke();
     ctx.fillText(r + 'm', cx + pr + 3, cy - 3);
   }
 
-  // Axis cross (forward=up, right=+canvas-x matches robot +y convention)
   ctx.strokeStyle = '#1a3a1a';
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(cx, cy - rangeMax * lidarScale - 10); ctx.lineTo(cx, cy + rangeMax * lidarScale + 10); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(cx - rangeMax * lidarScale - 10, cy); ctx.lineTo(cx + rangeMax * lidarScale + 10, cy); ctx.stroke();
 
-  // Forward label
   ctx.fillStyle = '#2a6a2a';
   ctx.font = '10px monospace';
   ctx.fillText('FWD', cx + 4, cy - rangeMax * lidarScale - 2);
 
-  // Scan points — forward=up, left=right (robot frame: x=fwd, y=left)
-  let validCount = 0;
-  let closestRange = Infinity;
-  const angleMin = data.angle_min;
-  const angleInc = data.angle_increment;
+  let validCount = 0, closestRange = Infinity;
+  const angleMin = data.angle_min, angleInc = data.angle_increment;
 
   for (let i = 0; i < data.ranges.length; i++) {
     const range = data.ranges[i];
     if (!isFinite(range) || range < 0.05 || range > rangeMax) continue;
     validCount++;
     if (range < closestRange) closestRange = range;
-
     const angle = angleMin + i * angleInc;
-    // robot x=forward→canvas-up, robot y=left→canvas-left
     const px = cx - range * Math.sin(angle) * lidarScale;
     const py = cy - range * Math.cos(angle) * lidarScale;
-
-    // Distance gradient: red (close) → yellow → green (far)
     const t = Math.min(range / rangeMax, 1.0);
     let r, g, b;
-    if (t < 0.33) {
-      r = 255; g = Math.floor(t * 3 * 255); b = 0;
-    } else if (t < 0.66) {
-      r = Math.floor((1 - (t - 0.33) * 3) * 255); g = 255; b = 0;
-    } else {
-      r = 0; g = 255; b = Math.floor((t - 0.66) * 3 * 255);
-    }
+    if (t < 0.33) { r = 255; g = Math.floor(t * 3 * 255); b = 0; }
+    else if (t < 0.66) { r = Math.floor((1 - (t - 0.33) * 3) * 255); g = 255; b = 0; }
+    else { r = 0; g = 255; b = Math.floor((t - 0.66) * 3 * 255); }
     ctx.fillStyle = `rgb(${r},${g},${b})`;
-    ctx.beginPath();
-    ctx.arc(px, py, 2, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(px, py, 2, 0, Math.PI * 2); ctx.fill();
   }
 
-  // Robot dot
-  ctx.beginPath();
-  ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-  ctx.fillStyle = '#f7941d';
-  ctx.fill();
-  ctx.strokeStyle = '#ffc107';
-  ctx.lineWidth = 2;
-  ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#f7941d'; ctx.fill();
+  ctx.strokeStyle = '#ffc107'; ctx.lineWidth = 2; ctx.stroke();
 
-  // Forward arrow tip
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - 26);
-  ctx.lineTo(cx - 7, cy - 14);
-  ctx.lineTo(cx + 7, cy - 14);
-  ctx.closePath();
-  ctx.fillStyle = '#ffc107';
-  ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx, cy - 26); ctx.lineTo(cx - 7, cy - 14); ctx.lineTo(cx + 7, cy - 14);
+  ctx.closePath(); ctx.fillStyle = '#ffc107'; ctx.fill();
 
-  // Update info bar
   const elClosest = document.getElementById('lidar-closest');
-  const elPoints = document.getElementById('lidar-points');
+  const elPoints  = document.getElementById('lidar-points');
   if (elClosest) elClosest.textContent = isFinite(closestRange) ? closestRange.toFixed(2) : '--';
-  if (elPoints) elPoints.textContent = validCount;
-}
-
-// ── SLAM Map Canvas ───────────────────────────────────────────────────────
-async function updateMap() {
-  try {
-    const data = await fetch('/map').then(r => r.json());
-    if (!data.image_b64) return;
-    const canvas = document.getElementById('map-canvas');
-    syncCanvasToDisplaySize(canvas);
-    const ctx = canvas.getContext('2d');
-    const img = new Image();
-    img.onload = () => {
-      const size = Math.min(canvas.width, canvas.height);
-      ctx.clearRect(0, 0, size, size);
-      ctx.drawImage(img, 0, 0, size, size);
-      // Draw robot position
-      const [rx, ry] = data.robot_px || [0, 0];
-      const sx = img.width > 0 ? (size / img.width) : 1.0;
-      const sy = img.height > 0 ? (size / img.height) : 1.0;
-      ctx.beginPath();
-      ctx.arc(rx * sx, ry * sy, 6, 0, 2 * Math.PI);
-      ctx.fillStyle = '#f7941d';
-      ctx.fill();
-      ctx.strokeStyle = '#ffc107';
-      ctx.lineWidth = 2;
-      ctx.stroke();
-      // Draw room markers
-      (data.rooms || []).forEach(room => {
-        ctx.beginPath();
-        ctx.arc(room.px * sx, room.py * sy, 5, 0, 2 * Math.PI);
-        ctx.fillStyle = '#4caf50';
-        ctx.fill();
-        ctx.fillStyle = '#fff';
-        ctx.font = '10px monospace';
-        ctx.fillText(room.room_id, room.px * sx + 8, room.py * sy + 4);
-      });
-    };
-    img.src = 'data:image/png;base64,' + data.image_b64;
-  } catch(e) {}
+  if (elPoints)  elPoints.textContent  = validCount;
 }
 
 // ── VLM Perception Log ────────────────────────────────────────────────────
@@ -1541,13 +1488,11 @@ async function updatePerceptionLog() {
     const log = await fetch('/perception_log').then(r => r.json());
     if (log.length === lastPerceptionCount) return;
     lastPerceptionCount = log.length;
-
     const container = document.getElementById('vlm-log');
     const wasAtBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 20;
-
     container.innerHTML = [...log].reverse().map(e => {
       const roomTags = e.rooms.map(r => `<span class="vlm-room">ROOM ${r}</span>`).join(' ');
-      const obstTag = e.has_obstacles ? '<span class="vlm-obstacle">⚠ OBSTACLES</span>' : '';
+      const obstTag  = e.has_obstacles ? '<span class="vlm-obstacle">⚠ OBSTACLES</span>' : '';
       return `<div class="vlm-entry">
         <span class="vlm-time">[${e.timestamp}]</span>
         <span class="vlm-env"> ${e.environment}</span>
@@ -1555,100 +1500,81 @@ async function updatePerceptionLog() {
         <div class="vlm-desc">${e.description}</div>
       </div>`;
     }).join('');
-
     if (wasAtBottom) container.scrollTop = 0;
   } catch(e) {}
 }
 
-// ── Memory ────────────────────────────────────────────────────────────────
-async function loadMemory() {
+// ── VLM Prompt (Box 6 Mode B) ─────────────────────────────────────────────
+async function sendVlmPrompt() {
+  const input = document.getElementById('vlm-prompt-input');
+  const prompt = input.value.trim();
+  if (!prompt) return;
+  input.value = '';
+  const ts = new Date().toLocaleTimeString('en-US', {hour12: false});
+  vlmChatHistory.push({role: 'user', text: prompt, ts});
+  renderVlmChat();
   try {
-    const rooms = await fetch('/memory').then(r => r.json());
-    const el = document.getElementById('memory-list');
-    if (!rooms.length) {
-      el.innerHTML = '<div style="color:#666;font-size:0.72rem">No rooms in memory</div>';
-      return;
-    }
-    el.innerHTML = rooms.map(r =>
-      `<div class="memory-row">
-        <span class="memory-room">${r.room_id}</span>
-        <span class="memory-pos">(${r.x.toFixed(1)}, ${r.y.toFixed(1)}) ×${r.count}</span>
-       </div>`
-    ).join('');
-  } catch(e) {}
-}
-
-// ── Soft Bumper Toggle ────────────────────────────────────────────────────
-let softBumperEnabled = true;
-let rearOverrideEnabled = false;
-
-async function toggleSoftBumper() {
-  softBumperEnabled = !softBumperEnabled;
-  const btn = document.getElementById('btn-soft-bumper');
-  if (btn) {
-    btn.textContent = softBumperEnabled ? 'SOFT BUMPER: ON' : 'SOFT BUMPER: OFF';
-    btn.style.background = softBumperEnabled ? 'rgba(76,175,80,0.3)' : 'rgba(237,28,36,0.3)';
-    btn.style.borderColor = softBumperEnabled ? '#4caf50' : '#ed1c24';
-    btn.style.color = softBumperEnabled ? '#4caf50' : '#ed1c24';
-  }
-  try {
-    await fetch('/soft_bumper', {
+    const data = await fetch('/vlm_prompt', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({enabled: softBumperEnabled})
-    });
-  } catch(e) {}
+      body: JSON.stringify({prompt})
+    }).then(r => r.json());
+    const reply = data.message || (data.accepted ? 'Command accepted' : 'Not accepted');
+    vlmChatHistory.push({role: 'robot', text: reply, ts: data.timestamp || ts});
+  } catch(err) {
+    vlmChatHistory.push({role: 'robot', text: `Error: ${err}`, ts});
+  }
+  renderVlmChat();
 }
 
-// ── Safety Enabled Toggle ─────────────────────────────────────────────────
+function renderVlmChat() {
+  const c = document.getElementById('vlm-chat');
+  if (!c) return;
+  c.innerHTML = vlmChatHistory.map(m =>
+    `<div class="chat-${m.role}"><span class="chat-ts">[${m.ts}] ${m.role === 'user' ? 'YOU' : 'ROBOT'}:</span> ${m.text}</div>`
+  ).join('');
+  c.scrollTop = c.scrollHeight;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const pi = document.getElementById('vlm-prompt-input');
+  if (pi) pi.addEventListener('keydown', e => { if (e.key === 'Enter') sendVlmPrompt(); });
+});
+
+// ── Safety Toggles ────────────────────────────────────────────────────────
+async function toggleSoftBumper() {
+  softBumperEnabled = !softBumperEnabled;
+  syncToggleButton('btn-soft-bumper', softBumperEnabled, 'SOFT BUMPER: ON', 'SOFT BUMPER: OFF');
+  fetch('/soft_bumper', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: softBumperEnabled})}).catch(() => {});
+}
 
 async function toggleSafetyEnabled() {
   safetyEnabled = !safetyEnabled;
-  const btn = document.getElementById('btn-safety-enabled');
-  if (btn) {
-    btn.textContent = safetyEnabled ? 'SAFETY ENABLED: ON' : 'SAFETY ENABLED: OFF';
-    btn.style.background = safetyEnabled ? 'rgba(76,175,80,0.3)' : 'rgba(237,28,36,0.3)';
-    btn.style.borderColor = safetyEnabled ? '#4caf50' : '#ed1c24';
-    btn.style.color = safetyEnabled ? '#4caf50' : '#ed1c24';
-  }
-  try {
-    await fetch('/safety_enabled', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({enabled: safetyEnabled})
-    });
-  } catch(e) {}
+  syncToggleButton('btn-safety-enabled', safetyEnabled, 'SAFETY: ON', 'SAFETY: OFF');
+  fetch('/safety_enabled', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: safetyEnabled})}).catch(() => {});
 }
-
-// ── Rear Override Toggle ──────────────────────────────────────────────────
 
 async function toggleRearOverride() {
   rearOverrideEnabled = !rearOverrideEnabled;
   const btn = document.getElementById('btn-rear-override');
-  btn.textContent = rearOverrideEnabled ? 'REV LOCKED' : 'REV UNLOCK';
-  btn.classList.toggle('active', rearOverrideEnabled);
-  try {
-    await fetch('/rear_override', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({enabled: rearOverrideEnabled})
-    });
-  } catch(e) {}
+  if (btn) {
+    btn.textContent = rearOverrideEnabled ? 'REV LOCKED' : 'REV UNLOCK';
+    btn.classList.toggle('active', rearOverrideEnabled);
+  }
+  fetch('/rear_override', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({enabled: rearOverrideEnabled})}).catch(() => {});
 }
 
 // ── Polling Intervals ─────────────────────────────────────────────────────
 setInterval(updateStatus, 1500);
 setInterval(updateLidar, 200);
-setInterval(updateMap, 2000);
 setInterval(updatePerceptionLog, 1000);
-setInterval(loadMemory, 5000);
 
-// Initial loads
 updateStatus();
 updateLidar();
-updateMap();
 updatePerceptionLog();
-loadMemory();
 </script>
 </body>
 </html>
