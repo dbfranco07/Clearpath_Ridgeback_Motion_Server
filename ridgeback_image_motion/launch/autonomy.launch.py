@@ -55,6 +55,10 @@ def generate_launch_description():
         name="slam_toolbox",
         output="screen",
         parameters=[slam_params],
+        remappings=[
+            ("/tf", "/r100_0140/tf"),
+            ("/tf_static", "/r100_0140/tf_static"),
+        ],
         condition=slam_condition,
     )
 
@@ -65,6 +69,8 @@ def generate_launch_description():
             SetRemap(src="cmd_vel", dst="/cmd_vel_nav_raw"),
             SetRemap(src="/cmd_vel_smoothed", dst="/cmd_vel_nav"),
             SetRemap(src="cmd_vel_smoothed", dst="/cmd_vel_nav"),
+            SetRemap(src="/tf", dst="/r100_0140/tf"),
+            SetRemap(src="/tf_static", dst="/r100_0140/tf_static"),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(nav2_launch),
                 launch_arguments={
@@ -138,7 +144,7 @@ def generate_launch_description():
         name="rtabmap_rgbd_odometry",
         output="screen",
         parameters=[{
-            "frame_id": "r100_0140/base_link",
+            "frame_id": "base_link",
             "odom_frame_id": "rtabmap_odom",
             "publish_tf": False,
             "approx_sync": True,

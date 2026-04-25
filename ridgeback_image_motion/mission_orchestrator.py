@@ -45,7 +45,7 @@ class MissionOrchestrator(Node):
         self.declare_parameter("stop_topic", "/cmd_vel_nav")
         self.declare_parameter("navigate_action", "navigate_to_pose")
         self.declare_parameter("map_frame", "map")
-        self.declare_parameter("base_frame", "r100_0140/base_link")
+        self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("memory_db_path", "")
         self.declare_parameter("room_min_confidence", 0.55)
         self.declare_parameter("start_tolerance_m", 0.45)

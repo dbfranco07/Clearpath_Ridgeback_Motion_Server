@@ -35,7 +35,7 @@ class FrontierExplorer(Node):
         self.declare_parameter("status_topic", "/ridgeback/exploration/status")
         self.declare_parameter("navigate_action", "navigate_to_pose")
         self.declare_parameter("map_frame", "map")
-        self.declare_parameter("base_frame", "r100_0140/base_link")
+        self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("min_frontier_size_cells", 8)
         self.declare_parameter("occupied_inflation_cells", 8)
         self.declare_parameter("goal_check_period_s", 2.0)

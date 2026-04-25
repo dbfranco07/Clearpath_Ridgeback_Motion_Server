@@ -48,37 +48,67 @@ source install/setup.bash
 cleanup() {
     echo ""
     echo "Shutting down..."
-    if [ ! -z "$MOTION_PID" ]; then
+    if [ ! -z "${MOTION_PID:-}" ]; then
         kill $MOTION_PID 2>/dev/null || true
     fi
-    if [ ! -z "$IMAGE_PID" ]; then
+    if [ ! -z "${IMAGE_PID:-}" ]; then
         kill $IMAGE_PID 2>/dev/null || true
+    fi
+    if [ ! -z "${TAIL_PID:-}" ]; then
+        kill $TAIL_PID 2>/dev/null || true
     fi
     exit 0
 }
 trap cleanup SIGINT SIGTERM
 
-# Run motion server in background
+# Run motion server in background, teeing output for post-mortem
 echo ""
 echo "[4/4] Starting services..."
 echo "=========================================="
 echo "Starting motion server..."
-ros2 run ridgeback_image_motion motion_server.py &
+MOTION_LOG=/tmp/ridgeback_motion.log
+IMAGE_LOG=/tmp/ridgeback_image.log
+ros2 run ridgeback_image_motion motion_server.py >"$MOTION_LOG" 2>&1 &
 MOTION_PID=$!
 
 sleep 1
 
-# Run image publisher in background
 echo "Starting image publisher..."
-ros2 run ridgeback_image_motion image_publisher.py &
+ros2 run ridgeback_image_motion image_publisher.py >"$IMAGE_LOG" 2>&1 &
 IMAGE_PID=$!
+
+# Give nodes a moment to crash if they're going to crash on import.
+sleep 3
+
+check_alive() {
+    local name="$1" pid="$2" log="$3" runcmd="$4"
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo ""
+        echo "ERROR: $name (PID $pid) died within 3s of launch."
+        echo "Last 40 lines of $log:"
+        tail -n 40 "$log" 2>/dev/null || echo "(no log available)"
+        echo ""
+        echo "Reproduce in foreground for the full traceback:"
+        echo "  $runcmd"
+        cleanup
+        exit 1
+    fi
+}
+
+check_alive "motion_server"   "$MOTION_PID" "$MOTION_LOG" "ros2 run ridgeback_image_motion motion_server.py"
+check_alive "image_publisher" "$IMAGE_PID"  "$IMAGE_LOG"  "ros2 run ridgeback_image_motion image_publisher.py"
 
 echo ""
 echo "=========================================="
 echo "All services running!"
-echo "  - Motion Server (PID: $MOTION_PID)"
-echo "  - Image Publisher (PID: $IMAGE_PID)"
+echo "  - Motion Server   (PID: $MOTION_PID, log: $MOTION_LOG)"
+echo "  - Image Publisher (PID: $IMAGE_PID, log: $IMAGE_LOG)"
 echo "Press Ctrl+C to stop all"
 echo "=========================================="
 
-wait
+# tail both logs into the foreground so the operator sees activity
+tail -n +1 -F "$MOTION_LOG" "$IMAGE_LOG" &
+TAIL_PID=$!
+
+wait "$MOTION_PID" "$IMAGE_PID"
+kill "$TAIL_PID" 2>/dev/null || true

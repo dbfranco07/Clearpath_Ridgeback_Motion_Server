@@ -39,21 +39,23 @@ class ImagePublisher(Node):
         self.depth_min_interval = 1.0 / max(0.1, float(depth_max_fps))
         self.last_publish_time = 0.0
 
-        # Publisher for compressed images
-        self.publisher_ = self.create_publisher(CompressedImage, compressed_topic, 1)
-
-        # Subscriber to raw RealSense images
+        # Sensor QoS: BEST_EFFORT matches RealSense raw publishers (sub side)
+        # and avoids reliable-retransmit failures over WiFi for the compressed
+        # republished topics (pub side, consumed by the Jetson dashboard).
         sensor_qos = QoSProfile(
             depth=1,
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE
         )
+
+        self.publisher_ = self.create_publisher(CompressedImage, compressed_topic, sensor_qos)
+
         self.subscription = self.create_subscription(
             Image, image_topic, self.image_callback, sensor_qos
         )
 
         self.depth_pub = self.create_publisher(
-            CompressedImage, '/r100_0140/image/depth_compressed', 10
+            CompressedImage, '/r100_0140/image/depth_compressed', sensor_qos
         )
         self.create_subscription(
             Image,

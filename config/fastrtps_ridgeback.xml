@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Ridgeback DDS profile: discover Jetson on WiFi + local Clearpath nodes -->
+<!--
+  Ridgeback DDS profile. Static fallback used when RIDGEBACK_IP / JETSON_IP env
+  vars are NOT set; otherwise scripts/generate_fastrtps_profile.py rewrites
+  /tmp/fastrtps_ridgeback_generated.xml at launch time and that overrides this.
+  Keep IPs here aligned with CLAUDE.md.
+-->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/FastRTPS_Profiles">
     <profiles>
         <participant profile_name="participant_profile" is_default_profile="true">
@@ -16,12 +21,7 @@
                     <initialPeersList>
                         <locator>
                             <udpv4>
-                                <address>10.158.39.28</address>
-                            </udpv4>
-                        </locator>
-                        <locator>
-                            <udpv4>
-                                <address>10.158.36.125</address>
+                                <address>10.158.36.90</address>
                             </udpv4>
                         </locator>
                         <locator>
@@ -32,6 +32,11 @@
                         <locator>
                             <udpv4>
                                 <address>192.168.131.1</address>
+                            </udpv4>
+                        </locator>
+                        <locator>
+                            <udpv4>
+                                <address>10.158.39.203</address>
                             </udpv4>
                         </locator>
                     </initialPeersList>

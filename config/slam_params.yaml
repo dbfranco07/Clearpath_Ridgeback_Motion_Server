@@ -5,7 +5,7 @@ slam_toolbox:
 
     map_frame: map
     odom_frame: odom
-    base_frame: r100_0140/base_link
+    base_frame: base_link
     scan_topic: /r100_0140/sensors/lidar2d_0/scan
 
     # Online async SLAM starts from a blank map. Do not set map_file_name or

@@ -7,7 +7,7 @@ ridgeback_vslam_ekf:
     publish_tf: false
     map_frame: map
     odom_frame: odom
-    base_link_frame: r100_0140/base_link
+    base_link_frame: base_link
     world_frame: odom
     odom0: /r100_0140/platform/odom/filtered
     odom0_config: [true, true, false,
