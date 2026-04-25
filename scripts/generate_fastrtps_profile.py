@@ -46,7 +46,8 @@ def main() -> None:
     args = parser.parse_args()
 
     local_locators = locator(args.local_ip)
-    peer_locators = "\n".join(locator(peer) for peer in args.peer_ip)
+    initial_peers = [args.local_ip, "127.0.0.1", *args.peer_ip]
+    peer_locators = "\n".join(locator(peer) for peer in dict.fromkeys(initial_peers))
     output = Path(args.output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(TEMPLATE.format(local_locators=local_locators, peer_locators=peer_locators))
