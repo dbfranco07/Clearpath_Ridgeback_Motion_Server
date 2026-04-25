@@ -6,7 +6,7 @@
                 <defaultUnicastLocatorList>
                     <locator>
                         <udpv4>
-                            <address>10.158.37.172</address>
+                            <address>jetson-ridgeback.local</address>
                         </udpv4>
                     </locator>
                 </defaultUnicastLocatorList>
