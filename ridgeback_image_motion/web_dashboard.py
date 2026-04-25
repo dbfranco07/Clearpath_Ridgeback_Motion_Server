@@ -972,6 +972,7 @@ class DashboardNode(Node):
         self.declare_parameter("teleop_command_max_age_s", 0.75)
 
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
+        compressed_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
         map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
@@ -985,22 +986,34 @@ class DashboardNode(Node):
         self.map_render_hz = max(0.1, float(self.get_parameter("map_render_hz").value))
         self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
 
+        self._dashboard_subscriptions = {}
+        self.subscription_topics = {
+            "image": image_topic,
+            "raw_image": raw_image_topic,
+            "depth_compressed": depth_compressed_topic if self.enable_depth_feed else "",
+            "depth_raw": depth_topic if self.enable_depth_feed else "",
+            "odom": str(self.get_parameter("odom_topic").value),
+            "lidar": str(self.get_parameter("lidar_topic").value),
+            "battery": str(self.get_parameter("battery_topic").value),
+            "map": str(self.get_parameter("map_topic").value),
+        }
+
         if image_topic:
-            self.create_subscription(CompressedImage, image_topic, self._image_cb, sensor_qos)
+            self._dashboard_subscriptions["image"] = self.create_subscription(CompressedImage, image_topic, self._image_cb, compressed_qos)
         if raw_image_topic:
-            self.create_subscription(Image, raw_image_topic, self._raw_image_cb, sensor_qos)
+            self._dashboard_subscriptions["raw_image"] = self.create_subscription(Image, raw_image_topic, self._raw_image_cb, sensor_qos)
         if self.enable_depth_feed and depth_compressed_topic:
-            self.create_subscription(CompressedImage, depth_compressed_topic, self._depth_compressed_cb, sensor_qos)
+            self._dashboard_subscriptions["depth_compressed"] = self.create_subscription(CompressedImage, depth_compressed_topic, self._depth_compressed_cb, compressed_qos)
         if self.enable_depth_feed and depth_topic:
-            self.create_subscription(Image, depth_topic, self._depth_cb, sensor_qos)
-        self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
-        self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
-        self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
-        self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self._map_cb, map_qos)
-        self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
-        self.create_subscription(String, self.get_parameter("safety_status_topic").value, self._safety_status_cb, reliable_qos)
-        self.create_subscription(String, self.get_parameter("vlm_status_topic").value, self._vlm_status_cb, reliable_qos)
-        self.create_subscription(String, self.get_parameter("mux_status_topic").value, self._mux_status_cb, reliable_qos)
+            self._dashboard_subscriptions["depth_raw"] = self.create_subscription(Image, depth_topic, self._depth_cb, sensor_qos)
+        self._dashboard_subscriptions["odom"] = self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
+        self._dashboard_subscriptions["lidar"] = self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
+        self._dashboard_subscriptions["battery"] = self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
+        self._dashboard_subscriptions["map"] = self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self._map_cb, map_qos)
+        self._dashboard_subscriptions["mission_status"] = self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
+        self._dashboard_subscriptions["safety_status"] = self.create_subscription(String, self.get_parameter("safety_status_topic").value, self._safety_status_cb, reliable_qos)
+        self._dashboard_subscriptions["vlm_status"] = self.create_subscription(String, self.get_parameter("vlm_status_topic").value, self._vlm_status_cb, reliable_qos)
+        self._dashboard_subscriptions["mux_status"] = self.create_subscription(String, self.get_parameter("mux_status_topic").value, self._mux_status_cb, reliable_qos)
         self.cmd_vel_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, sensor_qos)
         self.mission_command_pub = self.create_publisher(String, self.get_parameter("mission_command_topic").value, reliable_qos)
         self.operator_heartbeat_pub = self.create_publisher(
@@ -1026,6 +1039,15 @@ class DashboardNode(Node):
         self.last_depth_render_time = 0.0
         self.depth_compressed_frame: bytes | None = None
         self.depth_compressed_format = ""
+        self.callback_counts = {
+            "image": 0,
+            "raw_image": 0,
+            "depth_compressed": 0,
+            "depth_raw": 0,
+            "depth_rendered": 0,
+            "depth_errors": 0,
+        }
+        self.last_depth_error = ""
 
         self.odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self.last_odom_time = 0.0
@@ -1118,6 +1140,7 @@ class DashboardNode(Node):
             self.operator_heartbeat_pub.publish(Bool(data=True))
 
     def _image_cb(self, msg: CompressedImage) -> None:
+        self.callback_counts["image"] += 1
         try:
             now = self.get_clock().now()
             stamp = rclpy.time.Time.from_msg(msg.header.stamp)
@@ -1130,6 +1153,7 @@ class DashboardNode(Node):
         self.last_frame_time = time.time()
 
     def _raw_image_cb(self, msg: Image) -> None:
+        self.callback_counts["raw_image"] += 1
         try:
             now = self.get_clock().now()
             stamp = rclpy.time.Time.from_msg(msg.header.stamp)
@@ -1178,11 +1202,15 @@ class DashboardNode(Node):
                 with self.depth_lock:
                     self.depth_frame = buf.tobytes()
                 self.last_depth_time = time.time()
+                self.callback_counts["depth_rendered"] += 1
                 self.depth_event.set()
         except Exception as exc:
+            self.callback_counts["depth_errors"] += 1
+            self.last_depth_error = str(exc)
             self.get_logger().error(f"Depth visualization error: {exc}")
 
     def _depth_compressed_cb(self, msg: CompressedImage) -> None:
+        self.callback_counts["depth_compressed"] += 1
         self.last_depth_time = time.time()
         if self.last_depth_time - self.last_depth_render_time < 1.0 / self.depth_render_hz:
             return
@@ -1192,10 +1220,16 @@ class DashboardNode(Node):
             depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
             if depth is not None:
                 self._store_depth_visualization(depth, msg.format)
+            else:
+                self.callback_counts["depth_errors"] += 1
+                self.last_depth_error = "cv2.imdecode returned None"
         except Exception as exc:
+            self.callback_counts["depth_errors"] += 1
+            self.last_depth_error = str(exc)
             self.get_logger().error(f"Compressed depth render error: {exc}")
 
     def _depth_cb(self, msg: Image) -> None:
+        self.callback_counts["depth_raw"] += 1
         now = time.time()
         self.last_depth_time = now
         if now - self.last_depth_render_time < 1.0 / self.depth_render_hz:
@@ -1205,6 +1239,8 @@ class DashboardNode(Node):
             depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
             self._store_depth_visualization(depth, msg.encoding)
         except Exception as exc:
+            self.callback_counts["depth_errors"] += 1
+            self.last_depth_error = str(exc)
             self.get_logger().error(f"Raw depth cb error: {exc}")
 
     def _lidar_cb(self, msg: LaserScan) -> None:
@@ -1538,11 +1574,37 @@ def create_app(node: DashboardNode) -> FastAPI:
             "enabled": bool(node.enable_depth_feed),
             "has_frame": node.last_depth_time > 0,
             "age_s": round(age, 1) if age >= 0 else -1.0,
+            "callbacks": dict(node.callback_counts),
+            "last_error": node.last_depth_error,
         })
 
     @app.get("/lidar_scan")
     def lidar_scan() -> JSONResponse:
         return JSONResponse(node.lidar)
+
+    @app.get("/api/debug/feeds")
+    def api_debug_feeds() -> JSONResponse:
+        now = time.time()
+        return JSONResponse({
+            "topics": node.subscription_topics,
+            "subscriptions": sorted(node._dashboard_subscriptions.keys()),
+            "callbacks": dict(node.callback_counts),
+            "last_error": node.last_depth_error,
+            "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
+            "depth_age_s": round(now - node.last_depth_time, 2) if node.last_depth_time > 0 else -1.0,
+            "has_rgb_frame": node.latest_frame_copy() is not None,
+            "has_depth_frame": node.depth_frame is not None,
+            "publishers": {
+                topic: node.count_publishers(topic)
+                for topic in (
+                    node.subscription_topics.get("image", ""),
+                    node.subscription_topics.get("depth_compressed", ""),
+                    node.subscription_topics.get("raw_image", ""),
+                    node.subscription_topics.get("depth_raw", ""),
+                )
+                if topic
+            },
+        })
 
     @app.post("/api/mission")
     def api_mission(request: MissionRequest) -> JSONResponse:
