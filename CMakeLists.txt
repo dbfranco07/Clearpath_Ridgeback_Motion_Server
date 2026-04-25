@@ -27,6 +27,7 @@ install(PROGRAMS
   ridgeback_image_motion/mission_orchestrator.py
   ridgeback_image_motion/room_detector.py
   ridgeback_image_motion/safety_controller.py
+  ridgeback_image_motion/safety_policy.py
   ridgeback_image_motion/web_controller.py
   ridgeback_image_motion/web_dashboard.py
   ridgeback_image_motion/motion_server.py

@@ -189,8 +189,10 @@ These rules are enforced to prevent sim-only bugs:
 
 1. **Same namespace**: all topics are `/r100_0140/*` in both sim and hw.
 2. **Same message types and rates**: see `sim/worlds/*.world` sensor configs.
-3. **Shared launch file**: `sim.launch.py` and `hw.launch.py` both include
-   `autonomy_core.launch.py`. Only sensor sourcing differs.
+3. **Shared autonomy launch**: `sim/launch/sim.launch.py` includes
+   `ridgeback_image_motion/launch/autonomy.launch.py`, the same Jetson-owned
+   autonomy stack used on hardware. Gazebo/bridge only replace the sensor
+   sources.
 4. **Shared params**: `config/nav2_params.yaml`, `slam_params.yaml` are used
    verbatim. Sim overrides go in a separate overlay file.
 5. **No mocks inside autonomy**: the only mock is `mock_vlm_server`.

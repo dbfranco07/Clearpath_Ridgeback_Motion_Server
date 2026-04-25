@@ -8,7 +8,15 @@ import math
 import re
 from typing import Any
 
-from geometry_msgs.msg import Quaternion
+try:
+    from geometry_msgs.msg import Quaternion
+except ImportError:
+    class Quaternion:  # type: ignore[no-redef]
+        def __init__(self) -> None:
+            self.x = 0.0
+            self.y = 0.0
+            self.z = 0.0
+            self.w = 1.0
 
 
 ACTIVE_MISSION_STATES = {"STARTING", "EXPLORING", "NAVIGATING_TO_ROOM", "RETURNING_TO_START"}
@@ -24,10 +32,10 @@ def parse_intent_and_room(text: str) -> dict[str, str]:
     intent = "QUERY"
     if re.search(r"\b(stop|halt|cancel|abort)\b", lowered):
         intent = "STOP"
-    elif re.search(r"\b(return|go back|come back|home|start)\b", lowered):
-        intent = "RETURN_TO_START"
     elif room and re.search(r"\b(go|navigate|head|move|find|reach|visit)\b", lowered):
         intent = "GO_TO_ROOM"
+    elif re.search(r"\b(return|go back|come back|home|start)\b", lowered):
+        intent = "RETURN_TO_START"
     elif room:
         intent = "ROOM_QUERY"
 
@@ -65,4 +73,3 @@ def twist_is_nonzero(msg: Any, epsilon: float = 1e-5) -> bool:
         or abs(float(msg.linear.y)) > epsilon
         or abs(float(msg.angular.z)) > epsilon
     )
-

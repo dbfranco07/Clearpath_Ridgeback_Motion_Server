@@ -25,11 +25,13 @@ def generate_launch_description():
     launch_slam = LaunchConfiguration("launch_slam")
     launch_nav2 = LaunchConfiguration("launch_nav2")
     launch_vlm = LaunchConfiguration("launch_vlm")
+    launch_vslam = LaunchConfiguration("launch_vslam")
     launch_dashboard = LaunchConfiguration("launch_dashboard")
 
     slam_condition = profile_condition(profile, launch_slam, ["mapping", "mission", "debug"])
     nav2_condition = profile_condition(profile, launch_nav2, ["mission", "debug"])
     vlm_condition = profile_condition(profile, launch_vlm, ["mission", "debug"])
+    vslam_condition = IfCondition(PythonExpression(["'", launch_vslam, "' == 'true'"]))
     dashboard_condition = profile_condition(profile, launch_dashboard, ["teleop", "mapping", "mission", "debug"])
     mission_condition = IfCondition(PythonExpression(["'", profile, "' in ['mission', 'debug']"]))
 
@@ -37,6 +39,7 @@ def generate_launch_description():
     autonomy_params = PathJoinSubstitution([pkg_share, "config", "autonomy_params.yaml"])
     slam_params = PathJoinSubstitution([pkg_share, "config", "slam_params.yaml"])
     nav2_params = PathJoinSubstitution([pkg_share, "config", "nav2_params.yaml"])
+    vslam_params = PathJoinSubstitution([pkg_share, "config", "vslam_params.yaml"])
 
     nav2_launch = PathJoinSubstitution(
         [get_package_share_directory("nav2_bringup"), "launch", "navigation_launch.py"]
@@ -86,7 +89,7 @@ def generate_launch_description():
             "heartbeat_timeout": 2.0,
             "init_grace_period": 5.0,
             "cmd_vel_topic": "/r100_0140/cmd_vel",
-            "require_initial_heartbeat": False,
+            "require_initial_heartbeat": True,
         }],
     )
 
@@ -123,6 +126,36 @@ def generate_launch_description():
         output="screen",
         parameters=[autonomy_params],
         condition=vlm_condition,
+    )
+
+    rgbd_odometry = Node(
+        package="rtabmap_odom",
+        executable="rgbd_odometry",
+        name="rtabmap_rgbd_odometry",
+        output="screen",
+        parameters=[{
+            "frame_id": "r100_0140/base_link",
+            "odom_frame_id": "rtabmap_odom",
+            "publish_tf": False,
+            "approx_sync": True,
+            "queue_size": 10,
+        }],
+        remappings=[
+            ("rgb/image", "/r100_0140/sensors/camera_0/color/image"),
+            ("depth/image", "/r100_0140/sensors/camera_0/depth/image"),
+            ("rgb/camera_info", "/r100_0140/sensors/camera_0/color/camera_info"),
+            ("odom", "/ridgeback/vslam/odom"),
+        ],
+        condition=vslam_condition,
+    )
+
+    vslam_fusion = Node(
+        package="robot_localization",
+        executable="ekf_node",
+        name="ridgeback_vslam_ekf",
+        output="screen",
+        parameters=[vslam_params],
+        condition=vslam_condition,
     )
 
     dashboard = Node(
@@ -168,6 +201,11 @@ def generate_launch_description():
             DeclareLaunchArgument("launch_slam", default_value="auto"),
             DeclareLaunchArgument("launch_nav2", default_value="auto"),
             DeclareLaunchArgument("launch_vlm", default_value="auto"),
+            DeclareLaunchArgument(
+                "launch_vslam",
+                default_value="false",
+                description="Optional RTAB-Map RGB-D odometry + EKF fusion path. Disabled until Jetson load/TF validation.",
+            ),
             DeclareLaunchArgument("launch_dashboard", default_value="auto"),
             LogInfo(msg=["Starting Ridgeback Jetson autonomy stack profile=", profile]),
             LogInfo(
@@ -178,6 +216,7 @@ def generate_launch_description():
             mux,
             TimerAction(period=1.0, actions=[slam]),
             TimerAction(period=3.0, actions=[nav2]),
+            TimerAction(period=4.0, actions=[rgbd_odometry, vslam_fusion]),
             TimerAction(period=6.0, actions=[mission, frontier, room_detector]),
             TimerAction(period=8.0, actions=[dashboard]),
         ]

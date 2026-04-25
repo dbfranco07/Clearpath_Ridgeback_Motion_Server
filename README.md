@@ -155,8 +155,17 @@ Or use the web controller script:
 bash ~/ridgeback/scripts/ridgeback_web.sh
 ```
 
+If campus WiFi IPs change, prefer deploy-time DDS profile generation instead
+of editing XML by hand:
+
+```bash
+export JETSON_IP=<jetson-wifi-ip>
+export RIDGEBACK_IP=<ridgeback-wifi-ip>
+bash ~/ridgeback/scripts/ridgeback_web.sh
+```
+
 This starts:
-- `web_controller.py` — FastAPI server that subscribes to compressed images, odometry, and LiDAR, and serves the web dashboard
+- `autonomy.launch.py` on the Jetson — safety, watchdog, cmd_vel mux, SLAM, Nav2, frontier exploration, room detection, mission orchestration, and the dashboard
 
 ---
 

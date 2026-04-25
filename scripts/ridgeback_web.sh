@@ -9,6 +9,14 @@ export RMW_FASTRTPS_USE_SHM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE=~/ridgeback/config/fastrtps_jetson.xml
 export RIDGEBACK_ENV_FILE=~/ridgeback/ridgeback_image_motion/.env
 
+if [[ -n "${JETSON_IP:-}" && -n "${RIDGEBACK_IP:-}" ]]; then
+    export FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/fastrtps_jetson_generated.xml
+    python3 ~/ridgeback/scripts/generate_fastrtps_profile.py \
+        --local-ip "$JETSON_IP" \
+        --peer-ip "$RIDGEBACK_IP" \
+        --output "$FASTRTPS_DEFAULT_PROFILES_FILE" >/dev/null
+fi
+
 echo "=========================================="
 echo "Ridgeback R100 - Jetson Autonomy Dashboard"
 echo "=========================================="

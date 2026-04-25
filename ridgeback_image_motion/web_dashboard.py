@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import base64
 import math
-import re
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -22,18 +21,18 @@ from pydantic import BaseModel
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, CompressedImage, Image, LaserScan
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 from cv_bridge import CvBridge
 import uvicorn
 
 from ridgeback_image_motion.srv import Motion
 
 try:
-    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads
+    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads, parse_intent_and_room
     from ridgeback_image_motion.spatial_memory import SpatialMemory
     from ridgeback_image_motion.vlm_client import build_vlm_client, chat_completion_messages
 except ImportError:
-    from autonomy_common import json_dumps, json_loads
+    from autonomy_common import json_dumps, json_loads, parse_intent_and_room
     from spatial_memory import SpatialMemory
     from vlm_client import build_vlm_client, chat_completion_messages
 
@@ -51,26 +50,6 @@ class TeleopRequest(BaseModel):
     lateral: float = 0.0
     angular: float = 0.0
     source: str = "keyboard"
-
-
-def parse_intent_and_room(text: str) -> dict[str, str]:
-    lowered = text.lower().strip()
-    room = ""
-    room_match = re.search(r"(?:room|rm|r)\s*#?\s*(\d{2,4}[a-z]?)", lowered)
-    if room_match:
-        room = room_match.group(1).upper()
-
-    intent = "QUERY"
-    if re.search(r"\b(stop|halt|cancel|abort)\b", lowered):
-        intent = "STOP"
-    elif re.search(r"\b(return|go back|come back|home|start)\b", lowered):
-        intent = "RETURN_TO_START"
-    elif room and re.search(r"\b(go|navigate|head|move|find|reach|visit)\b", lowered):
-        intent = "GO_TO_ROOM"
-    elif room:
-        intent = "ROOM_QUERY"
-
-    return {"intent": intent, "room": room}
 
 
 def extract_reasoning_trace(response: Any) -> str:
@@ -871,6 +850,11 @@ async function sendChat() {
   await refreshStatus();
 }
 
+async function sendHeartbeat() {
+  if (document.hidden) return;
+  await fetch('/api/heartbeat', {method:'POST'}).catch(()=>{});
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   const ci = document.getElementById('chat-input');
   if (ci) ci.addEventListener('keydown', e => { if(e.key==='Enter') sendChat(); });
@@ -895,10 +879,13 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
+document.addEventListener('visibilitychange', sendHeartbeat);
 setInterval(refreshStatus, 1500);
 setInterval(updateLidar, 500);
 setInterval(updateMapView, 2000);
+setInterval(sendHeartbeat, 1000);
 
+sendHeartbeat();
 refreshStatus();
 updateLidar();
 </script>
@@ -929,6 +916,7 @@ class DashboardNode(Node):
         self.declare_parameter("motion_service", "motion_service")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_teleop")
         self.declare_parameter("mission_command_topic", "/ridgeback/mission/command")
+        self.declare_parameter("operator_heartbeat_topic", "/pc_heartbeat")
         self.declare_parameter("mission_status_topic", "/ridgeback/mission/status")
         self.declare_parameter("safety_status_topic", "/ridgeback/safety/status")
         self.declare_parameter("vlm_status_topic", "/ridgeback/vlm/status")
@@ -969,6 +957,9 @@ class DashboardNode(Node):
         self.create_subscription(String, self.get_parameter("mux_status_topic").value, self._mux_status_cb, reliable_qos)
         self.cmd_vel_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, sensor_qos)
         self.mission_command_pub = self.create_publisher(String, self.get_parameter("mission_command_topic").value, reliable_qos)
+        self.operator_heartbeat_pub = self.create_publisher(
+            Bool, self.get_parameter("operator_heartbeat_topic").value, reliable_qos
+        )
 
         self.motion_client = self.create_client(Motion, self.get_parameter("motion_service").value)
         self.teleop_linear_speed = float(self.get_parameter("teleop_linear_speed").value)
@@ -1015,8 +1006,11 @@ class DashboardNode(Node):
         self.vlm_client, self.vlm_config = build_vlm_client()
         self.teleop_status = "idle"
         self.last_teleop = {"linear": 0.0, "lateral": 0.0, "angular": 0.0, "source": "none"}
+        self.last_browser_heartbeat_time = 0.0
         self.safety_warning_m = 0.80
         self.safety_danger_m = 0.45
+
+        self.create_timer(1.0, self._publish_operator_heartbeat)
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
         self.get_logger().info(
@@ -1068,6 +1062,13 @@ class DashboardNode(Node):
         )
         if len(self.vlm_events) > self.max_vlm_events:
             self.vlm_events.pop(0)
+
+    def mark_browser_heartbeat(self) -> None:
+        self.last_browser_heartbeat_time = time.time()
+
+    def _publish_operator_heartbeat(self) -> None:
+        if self.last_browser_heartbeat_time and time.time() - self.last_browser_heartbeat_time <= 2.5:
+            self.operator_heartbeat_pub.publish(Bool(data=True))
 
     def _image_cb(self, msg: CompressedImage) -> None:
         try:
@@ -1315,6 +1316,7 @@ class DashboardNode(Node):
         depth_alive = (now - self.last_depth_time) < 5.0 if self.last_depth_time > 0 else False
         map_ready = int(map_payload["width"]) > 0
         connected = camera_alive or depth_alive or map_ready or int(self.lidar["range_count"]) > 0
+        heartbeat_age = now - self.last_browser_heartbeat_time if self.last_browser_heartbeat_time else 999.0
 
         return {
             "connected": connected,
@@ -1365,6 +1367,10 @@ class DashboardNode(Node):
                 "status": self.teleop_status,
                 "last": self.last_teleop,
                 "mux": self.mux_status,
+                "operator_heartbeat": {
+                    "age_s": heartbeat_age,
+                    "active": heartbeat_age <= 2.5,
+                },
                 "speeds": {
                     "linear": self.teleop_linear_speed,
                     "lateral": self.teleop_lateral_speed,
@@ -1402,6 +1408,11 @@ def create_app(node: DashboardNode) -> FastAPI:
     @app.get("/health")
     def health() -> JSONResponse:
         return JSONResponse({"ok": True, "node": "ridgeback_dashboard", "mission": node.mission_status})
+
+    @app.post("/api/heartbeat")
+    def api_heartbeat() -> JSONResponse:
+        node.mark_browser_heartbeat()
+        return JSONResponse({"ok": True, "stamp": time.time()})
 
     @app.get("/api/mission/status")
     def api_mission_status() -> JSONResponse:

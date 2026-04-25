@@ -16,10 +16,12 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool, String
 
 try:
-    from ridgeback_image_motion.autonomy_common import ACTIVE_MISSION_STATES, json_dumps, json_loads
+    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads
+    from ridgeback_image_motion.safety_policy import SafetyDecisionFilter, SafetyInputs, SafetyPolicyConfig
     from ridgeback_image_motion.vlm_client import load_vlm_config
 except ImportError:
-    from autonomy_common import ACTIVE_MISSION_STATES, json_dumps, json_loads
+    from autonomy_common import json_dumps, json_loads
+    from safety_policy import SafetyDecisionFilter, SafetyInputs, SafetyPolicyConfig
     from vlm_client import load_vlm_config
 
 
@@ -32,13 +34,18 @@ class SafetyController(Node):
         self.declare_parameter("emergency_stop_topic", "/r100_0140/platform/emergency_stop")
         self.declare_parameter("mission_status_topic", "/ridgeback/mission/status")
         self.declare_parameter("vlm_status_topic", "/ridgeback/vlm/status")
+        self.declare_parameter("operator_heartbeat_topic", "/pc_heartbeat")
         self.declare_parameter("safety_cmd_topic", "/cmd_vel_safety")
         self.declare_parameter("status_topic", "/ridgeback/safety/status")
         self.declare_parameter("warning_distance_m", 0.80)
         self.declare_parameter("danger_distance_m", 0.45)
+        self.declare_parameter("danger_release_distance_m", 0.60)
         self.declare_parameter("lidar_timeout_s", 1.0)
         self.declare_parameter("odom_timeout_s", 1.0)
         self.declare_parameter("vlm_timeout_s", 8.0)
+        self.declare_parameter("operator_heartbeat_timeout_s", 2.0)
+        self.declare_parameter("require_operator_heartbeat", True)
+        self.declare_parameter("stop_hold_s", 1.0)
         self.declare_parameter("check_vlm_network", True)
         self.declare_parameter("vlm_check_period_s", 5.0)
         self.declare_parameter("vlm_http_timeout_s", 1.5)
@@ -51,12 +58,15 @@ class SafetyController(Node):
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, qos)
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, qos)
         self.create_subscription(Bool, self.get_parameter("emergency_stop_topic").value, self._estop_cb, reliable_qos)
+        self.create_subscription(Bool, self.get_parameter("operator_heartbeat_topic").value, self._heartbeat_cb, reliable_qos)
         self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
         self.create_subscription(String, self.get_parameter("vlm_status_topic").value, self._vlm_status_cb, reliable_qos)
 
+        self.policy = self._build_policy()
         self.closest_obstacle_m = 99.0
         self.last_lidar_time = 0.0
         self.last_odom_time = 0.0
+        self.last_operator_heartbeat_time = 0.0
         self.estop_active = False
         self.mission_state = "IDLE"
         self.vlm_healthy = True
@@ -79,6 +89,10 @@ class SafetyController(Node):
 
     def _estop_cb(self, msg: Bool) -> None:
         self.estop_active = bool(msg.data)
+
+    def _heartbeat_cb(self, msg: Bool) -> None:
+        if bool(msg.data):
+            self.last_operator_heartbeat_time = time.time()
 
     def _mission_status_cb(self, msg: String) -> None:
         payload = json_loads(msg.data)
@@ -122,57 +136,66 @@ class SafetyController(Node):
             self.network_error = str(exc)[:160]
             self.network_check_inflight = False
 
+    def _build_policy(self) -> SafetyDecisionFilter:
+        return SafetyDecisionFilter(
+            SafetyPolicyConfig(
+                warning_distance_m=float(self.get_parameter("warning_distance_m").value),
+                danger_distance_m=float(self.get_parameter("danger_distance_m").value),
+                danger_release_distance_m=float(self.get_parameter("danger_release_distance_m").value),
+                lidar_timeout_s=float(self.get_parameter("lidar_timeout_s").value),
+                odom_timeout_s=float(self.get_parameter("odom_timeout_s").value),
+                vlm_timeout_s=float(self.get_parameter("vlm_timeout_s").value),
+                operator_heartbeat_timeout_s=float(self.get_parameter("operator_heartbeat_timeout_s").value),
+                stop_hold_s=float(self.get_parameter("stop_hold_s").value),
+                require_operator_heartbeat=bool(self.get_parameter("require_operator_heartbeat").value),
+            )
+        )
+
     def _tick(self) -> None:
         now = time.time()
         self._check_vlm_network()
 
         warning_distance = float(self.get_parameter("warning_distance_m").value)
         danger_distance = float(self.get_parameter("danger_distance_m").value)
-        lidar_age = now - self.last_lidar_time if self.last_lidar_time else 999.0
-        odom_age = now - self.last_odom_time if self.last_odom_time else 999.0
-        vlm_age = now - self.last_vlm_status_time if self.last_vlm_status_time else 999.0
-        mission_active = self.mission_state in ACTIVE_MISSION_STATES
+        decision = self.policy.evaluate(
+            SafetyInputs(
+                now=now,
+                closest_obstacle_m=self.closest_obstacle_m,
+                last_lidar_time=self.last_lidar_time,
+                last_odom_time=self.last_odom_time,
+                estop_active=self.estop_active,
+                mission_state=self.mission_state,
+                network_healthy=self.network_healthy,
+                vlm_healthy=self.vlm_healthy,
+                last_vlm_status_time=self.last_vlm_status_time,
+                last_operator_heartbeat_time=self.last_operator_heartbeat_time,
+            )
+        )
 
-        reasons: list[str] = []
-        if self.closest_obstacle_m < danger_distance:
-            reasons.append(f"obstacle {self.closest_obstacle_m:.2f}m")
-        if lidar_age > float(self.get_parameter("lidar_timeout_s").value):
-            reasons.append("stale_lidar")
-        if odom_age > float(self.get_parameter("odom_timeout_s").value):
-            reasons.append("stale_odom")
-        if self.estop_active:
-            reasons.append("robot_estop")
-        if mission_active and (not self.network_healthy):
-            reasons.append("vlm_network_lost")
-        if mission_active and vlm_age < float(self.get_parameter("vlm_timeout_s").value) and not self.vlm_healthy:
-            reasons.append("vlm_unhealthy")
-
-        is_safe = not reasons
-        if not is_safe:
+        if not decision.is_safe:
             self.stop_pub.publish(Twist())
-
-        risk = "OK"
-        if reasons:
-            risk = "DANGER"
-        elif self.closest_obstacle_m < warning_distance:
-            risk = "WARNING"
 
         status = {
             "stamp": now,
-            "is_safe": is_safe,
-            "risk_level": risk,
-            "stop_recommended": not is_safe,
+            "is_safe": decision.is_safe,
+            "risk_level": decision.risk_level,
+            "stop_recommended": decision.stop_recommended,
+            "stop_latched": decision.stop_latched,
+            "hold_remaining_s": decision.hold_remaining_s,
             "closest_obstacle_m": self.closest_obstacle_m,
             "warning_threshold_m": warning_distance,
             "danger_threshold_m": danger_distance,
+            "danger_release_distance_m": decision.release_distance_m,
             "warning_distance_m": warning_distance,
             "danger_distance_m": danger_distance,
-            "lidar_age_s": lidar_age,
-            "odom_age_s": odom_age,
+            "lidar_age_s": decision.lidar_age_s,
+            "odom_age_s": decision.odom_age_s,
             "mission_state": self.mission_state,
             "vlm_network_healthy": self.network_healthy,
             "vlm_status_healthy": self.vlm_healthy,
-            "reasons": reasons,
+            "operator_heartbeat_age_s": decision.operator_heartbeat_age_s,
+            "operator_heartbeat_required": bool(self.get_parameter("require_operator_heartbeat").value),
+            "reasons": decision.reasons,
             "network_error": self.network_error,
         }
         self.status_pub.publish(String(data=json_dumps(status)))

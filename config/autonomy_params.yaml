@@ -51,13 +51,18 @@ safety_controller:
     emergency_stop_topic: /r100_0140/platform/emergency_stop
     mission_status_topic: /ridgeback/mission/status
     vlm_status_topic: /ridgeback/vlm/status
+    operator_heartbeat_topic: /pc_heartbeat
     safety_cmd_topic: /cmd_vel_safety
     status_topic: /ridgeback/safety/status
     warning_distance_m: 0.80
     danger_distance_m: 0.45
+    danger_release_distance_m: 0.60
     lidar_timeout_s: 1.0
     odom_timeout_s: 1.0
     vlm_timeout_s: 8.0
+    operator_heartbeat_timeout_s: 2.0
+    require_operator_heartbeat: true
+    stop_hold_s: 1.0
     check_vlm_network: true
     vlm_check_period_s: 5.0
     vlm_http_timeout_s: 1.5
@@ -96,6 +101,7 @@ ridgeback_dashboard:
     map_topic: /map
     cmd_vel_topic: /cmd_vel_teleop
     mission_command_topic: /ridgeback/mission/command
+    operator_heartbeat_topic: /pc_heartbeat
     mission_status_topic: /ridgeback/mission/status
     safety_status_topic: /ridgeback/safety/status
     vlm_status_topic: /ridgeback/vlm/status
