@@ -39,9 +39,14 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
+THIS_FILE = os.path.abspath(__file__)
+DEFAULT_WORKSPACE = os.path.dirname(os.path.dirname(THIS_FILE))
+RIDGEBACK_WORKSPACE = os.path.abspath(
+    os.path.expanduser(os.environ.get("RIDGEBACK_WORKSPACE", DEFAULT_WORKSPACE))
+)
 HOME = os.path.expanduser("~")
-SLAM_PARAMS = os.path.join(HOME, "ridgeback", "config", "ridgeback_slam_params.yaml")
-NAV2_PARAMS  = os.path.join(HOME, "ridgeback", "config", "nav2_live_map_params.yaml")
+SLAM_PARAMS = os.path.join(RIDGEBACK_WORKSPACE, "config", "ridgeback_slam_params.yaml")
+NAV2_PARAMS = os.path.join(RIDGEBACK_WORKSPACE, "config", "nav2_live_map_params.yaml")
 MAP_DIR      = os.path.join(HOME, ".ridgeback")
 
 
