@@ -27,13 +27,22 @@ cd ~/ridgeback
 # Pull latest changes
 echo ""
 echo "[1/5] Pulling latest changes..."
-git pull
+if [[ "${RIDGEBACK_SKIP_PULL:-0}" == "1" ]]; then
+    echo "Skipping git pull (RIDGEBACK_SKIP_PULL=1)"
+else
+    git pull
+fi
 
 # Build
 echo ""
 echo "[2/5] Building package..."
-# colcon build --packages-select ridgeback_image_motion
-colcon build --packages-select ridgeback_image_motion --cmake-clean-cache
+if [[ "${RIDGEBACK_SKIP_BUILD:-0}" == "1" ]]; then
+    echo "Skipping build (RIDGEBACK_SKIP_BUILD=1)"
+elif [[ "${RIDGEBACK_CLEAN_BUILD:-0}" == "1" ]]; then
+    colcon build --packages-select ridgeback_image_motion --cmake-clean-cache
+else
+    colcon build --packages-select ridgeback_image_motion
+fi
 
 
 # Source

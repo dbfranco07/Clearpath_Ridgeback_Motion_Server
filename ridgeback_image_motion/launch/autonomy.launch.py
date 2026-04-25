@@ -27,6 +27,10 @@ def generate_launch_description():
     launch_vlm = LaunchConfiguration("launch_vlm")
     launch_vslam = LaunchConfiguration("launch_vslam")
     launch_dashboard = LaunchConfiguration("launch_dashboard")
+    vslam_rgb_topic = LaunchConfiguration("vslam_rgb_topic")
+    vslam_depth_topic = LaunchConfiguration("vslam_depth_topic")
+    vslam_camera_info_topic = LaunchConfiguration("vslam_camera_info_topic")
+    vslam_output_odom_topic = LaunchConfiguration("vslam_output_odom_topic")
 
     slam_condition = profile_condition(profile, launch_slam, ["mapping", "mission", "debug"])
     nav2_condition = profile_condition(profile, launch_nav2, ["mission", "debug"])
@@ -138,12 +142,13 @@ def generate_launch_description():
             "odom_frame_id": "rtabmap_odom",
             "publish_tf": False,
             "approx_sync": True,
+            "approx_sync_max_interval": 0.08,
             "queue_size": 10,
         }],
         remappings=[
-            ("rgb/image", "/r100_0140/sensors/camera_0/color/image"),
-            ("depth/image", "/r100_0140/sensors/camera_0/depth/image"),
-            ("rgb/camera_info", "/r100_0140/sensors/camera_0/color/camera_info"),
+            ("rgb/image", vslam_rgb_topic),
+            ("depth/image", vslam_depth_topic),
+            ("rgb/camera_info", vslam_camera_info_topic),
             ("odom", "/ridgeback/vslam/odom"),
         ],
         condition=vslam_condition,
@@ -155,6 +160,9 @@ def generate_launch_description():
         name="ridgeback_vslam_ekf",
         output="screen",
         parameters=[vslam_params],
+        remappings=[
+            ("odometry/filtered", vslam_output_odom_topic),
+        ],
         condition=vslam_condition,
     )
 
@@ -205,6 +213,26 @@ def generate_launch_description():
                 "launch_vslam",
                 default_value="false",
                 description="Optional RTAB-Map RGB-D odometry + EKF fusion path. Disabled until Jetson load/TF validation.",
+            ),
+            DeclareLaunchArgument(
+                "vslam_rgb_topic",
+                default_value="/r100_0140/sensors/camera_0/color/image",
+                description="RGB image topic for RTAB-Map RGB-D odometry.",
+            ),
+            DeclareLaunchArgument(
+                "vslam_depth_topic",
+                default_value="/r100_0140/sensors/camera_0/depth/image",
+                description="Depth image topic for RTAB-Map. Prefer an aligned-depth-to-color topic if available.",
+            ),
+            DeclareLaunchArgument(
+                "vslam_camera_info_topic",
+                default_value="/r100_0140/sensors/camera_0/color/camera_info",
+                description="CameraInfo topic matching the RGB image used by vSLAM.",
+            ),
+            DeclareLaunchArgument(
+                "vslam_output_odom_topic",
+                default_value="/ridgeback/vslam/odom_filtered",
+                description="Filtered odometry output from the optional vSLAM EKF.",
             ),
             DeclareLaunchArgument("launch_dashboard", default_value="auto"),
             LogInfo(msg=["Starting Ridgeback Jetson autonomy stack profile=", profile]),

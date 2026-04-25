@@ -24,14 +24,19 @@ class ImagePublisher(Node):
         self.declare_parameter('compressed_topic', '/r100_0140/image/compressed')
         self.declare_parameter('jpeg_quality', 75)
         self.declare_parameter('max_fps', 15.0)
+        self.declare_parameter('depth_max_fps', 2.0)
+        self.declare_parameter('depth_png_compression', 1)
 
         image_topic = self.get_parameter('image_topic').value
         compressed_topic = self.get_parameter('compressed_topic').value
         self.jpeg_quality = self.get_parameter('jpeg_quality').value
         max_fps = self.get_parameter('max_fps').value
+        depth_max_fps = self.get_parameter('depth_max_fps').value
+        self.depth_png_compression = int(self.get_parameter('depth_png_compression').value)
 
         self.bridge = CvBridge()
         self.min_interval = 1.0 / max_fps
+        self.depth_min_interval = 1.0 / max(0.1, float(depth_max_fps))
         self.last_publish_time = 0.0
 
         # Publisher for compressed images
@@ -96,13 +101,17 @@ class ImagePublisher(Node):
 
     def _depth_cb(self, msg: Image):
         now = self.get_clock().now().nanoseconds / 1e9
-        if now - self.last_depth_publish_time < self.min_interval:
+        if now - self.last_depth_publish_time < self.depth_min_interval:
             return
         self.last_depth_publish_time = now
 
         try:
             depth = self.bridge.imgmsg_to_cv2(msg, 'passthrough')  # uint16
-            success, buf = cv2.imencode('.png', depth)
+            success, buf = cv2.imencode(
+                '.png',
+                depth,
+                [int(cv2.IMWRITE_PNG_COMPRESSION), max(0, min(9, self.depth_png_compression))],
+            )
             if success:
                 out = CompressedImage()
                 out.header = msg.header
