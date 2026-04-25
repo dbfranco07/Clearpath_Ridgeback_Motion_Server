@@ -970,11 +970,17 @@ class DashboardNode(Node):
         self.declare_parameter("teleop_lateral_speed", 0.28)
         self.declare_parameter("teleop_angular_speed", 0.85)
         self.declare_parameter("teleop_command_max_age_s", 0.75)
+        self.declare_parameter("auto_raw_camera_fallback", True)
+        self.declare_parameter("raw_fallback_after_s", 8.0)
+        self.declare_parameter("fallback_raw_image_topic", "/r100_0140/sensors/camera_0/color/image")
+        self.declare_parameter("fallback_depth_topic", "/r100_0140/sensors/camera_0/depth/image")
 
-        sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
+        self._sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
+        sensor_qos = self._sensor_qos
         # BEST_EFFORT matches the image_publisher republisher and avoids
         # reliable-retransmit stalls over WiFi for the compressed RGB/depth feeds.
-        compressed_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
+        self._compressed_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
+        compressed_qos = self._compressed_qos
         map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
@@ -987,6 +993,15 @@ class DashboardNode(Node):
         self.depth_render_hz = max(0.5, float(self.get_parameter("depth_render_hz").value))
         self.map_render_hz = max(0.1, float(self.get_parameter("map_render_hz").value))
         self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
+        self.auto_raw_camera_fallback = bool(self.get_parameter("auto_raw_camera_fallback").value)
+        self.raw_fallback_after_s = max(2.0, float(self.get_parameter("raw_fallback_after_s").value))
+        self.fallback_raw_image_topic = str(self.get_parameter("fallback_raw_image_topic").value).strip()
+        self.fallback_depth_topic = str(self.get_parameter("fallback_depth_topic").value).strip()
+        self.started_at = time.time()
+        self._fallback_attempted = {
+            "raw_image": False,
+            "depth_raw": False,
+        }
 
         self._dashboard_subscriptions = {}
         self.subscription_topics = {
@@ -994,6 +1009,8 @@ class DashboardNode(Node):
             "raw_image": raw_image_topic,
             "depth_compressed": depth_compressed_topic if self.enable_depth_feed else "",
             "depth_raw": depth_topic if self.enable_depth_feed else "",
+            "fallback_raw_image": self.fallback_raw_image_topic if self.auto_raw_camera_fallback else "",
+            "fallback_depth_raw": self.fallback_depth_topic if (self.auto_raw_camera_fallback and self.enable_depth_feed) else "",
             "odom": str(self.get_parameter("odom_topic").value),
             "lidar": str(self.get_parameter("lidar_topic").value),
             "battery": str(self.get_parameter("battery_topic").value),
@@ -1082,15 +1099,19 @@ class DashboardNode(Node):
         self.safety_danger_m = 0.45
 
         self.create_timer(1.0, self._publish_operator_heartbeat)
+        if self.auto_raw_camera_fallback:
+            self.create_timer(2.0, self._enable_raw_camera_fallbacks)
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
         self.get_logger().info(
-            "Dashboard topics: compressed=%s raw=%s depth_compressed=%s depth_raw=%s cmd_vel=%s"
+          "Dashboard topics: compressed=%s raw=%s depth_compressed=%s depth_raw=%s fallback_raw=%s fallback_depth=%s cmd_vel=%s"
             % (
                 image_topic or "disabled",
                 raw_image_topic or "disabled",
                 depth_compressed_topic if self.enable_depth_feed else "disabled",
                 depth_topic if self.enable_depth_feed else "disabled",
+            self.fallback_raw_image_topic if self.auto_raw_camera_fallback else "disabled",
+            self.fallback_depth_topic if (self.auto_raw_camera_fallback and self.enable_depth_feed) else "disabled",
                 self.get_parameter("cmd_vel_topic").value,
             )
         )
@@ -1140,6 +1161,55 @@ class DashboardNode(Node):
     def _publish_operator_heartbeat(self) -> None:
         if self.last_browser_heartbeat_time and time.time() - self.last_browser_heartbeat_time <= 2.5:
             self.operator_heartbeat_pub.publish(Bool(data=True))
+
+    def _enable_raw_camera_fallbacks(self) -> None:
+        if time.time() - self.started_at < self.raw_fallback_after_s:
+            return
+
+        if (
+            self.last_frame_time <= 0.0
+            and "raw_image" not in self._dashboard_subscriptions
+            and not self._fallback_attempted["raw_image"]
+        ):
+            topic = self.fallback_raw_image_topic
+            if topic and self.count_publishers(topic) > 0:
+                self._fallback_attempted["raw_image"] = True
+                try:
+                    self._dashboard_subscriptions["raw_image"] = self.create_subscription(
+                        Image,
+                        topic,
+                        self._raw_image_cb,
+                        self._sensor_qos,
+                    )
+                    self.subscription_topics["raw_image"] = topic
+                    self.add_log("camera", f"RGB raw fallback enabled: {topic}")
+                    self.get_logger().warn(f"Enabled RGB raw fallback subscription on {topic}")
+                except Exception as exc:
+                    self.add_log("camera", f"RGB fallback subscribe failed: {exc}")
+
+        if not self.enable_depth_feed:
+            return
+
+        if (
+            self.depth_frame is None
+            and "depth_raw" not in self._dashboard_subscriptions
+            and not self._fallback_attempted["depth_raw"]
+        ):
+            topic = self.fallback_depth_topic
+            if topic and self.count_publishers(topic) > 0:
+                self._fallback_attempted["depth_raw"] = True
+                try:
+                    self._dashboard_subscriptions["depth_raw"] = self.create_subscription(
+                        Image,
+                        topic,
+                        self._depth_cb,
+                        self._sensor_qos,
+                    )
+                    self.subscription_topics["depth_raw"] = topic
+                    self.add_log("camera", f"Depth raw fallback enabled: {topic}")
+                    self.get_logger().warn(f"Enabled depth raw fallback subscription on {topic}")
+                except Exception as exc:
+                    self.add_log("camera", f"Depth fallback subscribe failed: {exc}")
 
     def _image_cb(self, msg: CompressedImage) -> None:
         self.callback_counts["image"] += 1
@@ -1591,6 +1661,11 @@ def create_app(node: DashboardNode) -> FastAPI:
             "topics": node.subscription_topics,
             "subscriptions": sorted(node._dashboard_subscriptions.keys()),
             "callbacks": dict(node.callback_counts),
+        "fallback": {
+          "enabled": bool(node.auto_raw_camera_fallback),
+          "after_s": float(node.raw_fallback_after_s),
+          "attempted": dict(node._fallback_attempted),
+        },
             "last_error": node.last_depth_error,
             "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
             "depth_age_s": round(now - node.last_depth_time, 2) if node.last_depth_time > 0 else -1.0,
@@ -1603,6 +1678,8 @@ def create_app(node: DashboardNode) -> FastAPI:
                     node.subscription_topics.get("depth_compressed", ""),
                     node.subscription_topics.get("raw_image", ""),
                     node.subscription_topics.get("depth_raw", ""),
+                    node.subscription_topics.get("fallback_raw_image", ""),
+                    node.subscription_topics.get("fallback_depth_raw", ""),
                 )
                 if topic
             },
