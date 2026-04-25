@@ -109,3 +109,4 @@ ridgeback_dashboard:
     teleop_linear_speed: 0.28
     teleop_lateral_speed: 0.28
     teleop_angular_speed: 0.85
+    teleop_command_max_age_s: 0.75

@@ -50,6 +50,8 @@ class TeleopRequest(BaseModel):
     lateral: float = 0.0
     angular: float = 0.0
     source: str = "keyboard"
+    issued_at: float | None = None
+    seq: int = 0
 
 
 def extract_reasoning_trace(response: Any) -> str:
@@ -472,6 +474,16 @@ let lastChatCount = 0;
 let latestVlmEvents = [];
 let worldView = 'lidar';
 let latestMapUrl = '/api/map.png';
+let serverClockOffsetMs = 0;
+let teleopSeq = 0;
+let teleopInFlight = false;
+let pendingTeleop = null;
+
+function updateServerClock(serverTimeSec) {
+  const value = Number(serverTimeSec);
+  if (!Number.isFinite(value) || value <= 0) return;
+  serverClockOffsetMs = value * 1000 - Date.now();
+}
 
 function switchStatusTab(tab) {
   statusTab = tab;
@@ -597,8 +609,34 @@ document.addEventListener('visibilitychange', () => {
 });
 
 async function sendTeleop(linear, lateral, angular, source='keyboard') {
-  fetch('/api/teleop', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({linear, lateral, angular, source})}).catch(()=>{});
+  pendingTeleop = {
+    linear, lateral, angular, source,
+    issued_at: (Date.now() + serverClockOffsetMs) / 1000.0,
+    seq: ++teleopSeq
+  };
+  pumpTeleop();
+}
+
+async function pumpTeleop() {
+  if (teleopInFlight || !pendingTeleop) return;
+  const payload = pendingTeleop;
+  pendingTeleop = null;
+  teleopInFlight = true;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 350);
+  try {
+    await fetch('/api/teleop', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch(_) {
+  } finally {
+    clearTimeout(timeoutId);
+    teleopInFlight = false;
+    if (pendingTeleop) pumpTeleop();
+  }
 }
 
 function escHtml(v) {
@@ -670,6 +708,7 @@ async function refreshStatus() {
       fetch('/api/status').then(r => r.json()),
       fetch('/depth_status').then(r => r.json())
     ]);
+    updateServerClock(data.server_time);
     teleopSpeeds = data.teleop?.speeds || teleopSpeeds;
 
     // Header connection
@@ -857,7 +896,8 @@ async function sendChat() {
 
 async function sendHeartbeat() {
   if (document.hidden) return;
-  await fetch('/api/heartbeat', {method:'POST'}).catch(()=>{});
+  const data = await fetch('/api/heartbeat', {method:'POST'}).then(r => r.json()).catch(()=>null);
+  if (data?.stamp) updateServerClock(data.stamp);
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -929,6 +969,7 @@ class DashboardNode(Node):
         self.declare_parameter("teleop_linear_speed", 0.28)
         self.declare_parameter("teleop_lateral_speed", 0.28)
         self.declare_parameter("teleop_angular_speed", 0.85)
+        self.declare_parameter("teleop_command_max_age_s", 0.75)
 
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
@@ -1247,12 +1288,40 @@ class DashboardNode(Node):
         with self.frame_lock:
             return self.latest_frame
 
-    def send_motion_command(self, linear: float, lateral: float, angular: float, source: str = "manual") -> tuple[bool, str]:
+    def send_motion_command(
+        self,
+        linear: float,
+        lateral: float,
+        angular: float,
+        source: str = "manual",
+        issued_at: float | None = None,
+        seq: int = 0,
+    ) -> tuple[bool, str]:
+        now = time.time()
+        command_is_zero = (abs(linear) + abs(lateral) + abs(angular)) <= 1e-6
+        age_s = now - float(issued_at) if issued_at is not None else 0.0
+        max_age_s = float(self.get_parameter("teleop_command_max_age_s").value)
+        if issued_at is not None and age_s > max_age_s and not command_is_zero:
+            self.last_teleop = {
+                "linear": float(linear),
+                "lateral": float(lateral),
+                "angular": float(angular),
+                "source": source,
+                "seq": int(seq),
+                "age_s": float(age_s),
+                "ignored": True,
+            }
+            self.teleop_status = "stale/ignored"
+            return False, f"stale teleop command ignored age={age_s:.2f}s"
+
         self.last_teleop = {
             "linear": float(linear),
             "lateral": float(lateral),
             "angular": float(angular),
             "source": source,
+            "seq": int(seq),
+            "age_s": float(age_s),
+            "ignored": False,
         }
         self._publish_direct_motion(linear, lateral, angular)
         self.teleop_status = "active/mux" if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle/mux"
@@ -1328,6 +1397,7 @@ class DashboardNode(Node):
         heartbeat_age = now - self.last_browser_heartbeat_time if self.last_browser_heartbeat_time else 999.0
 
         return {
+            "server_time": now,
             "connected": connected,
             "battery_pct": float(self.battery["pct"]),
             "battery_voltage": float(self.battery["voltage"]),
@@ -1518,7 +1588,14 @@ def create_app(node: DashboardNode) -> FastAPI:
         linear = float(request.linear)
         lateral = float(request.lateral)
         angular = float(request.angular)
-        ok, message = node.send_motion_command(linear, lateral, angular, source=request.source)
+        ok, message = node.send_motion_command(
+            linear,
+            lateral,
+            angular,
+            source=request.source,
+            issued_at=request.issued_at,
+            seq=request.seq,
+        )
         if not ok:
             if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6:
                 node.add_log("teleop", f"Rejected command ({request.source}): {message}")
