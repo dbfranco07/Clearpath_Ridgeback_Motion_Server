@@ -33,9 +33,16 @@
                                 <address>127.0.0.1</address>
                             </udpv4>
                         </locator>
+                        <!-- Ridgeback bridge (Ethernet to MCU/sensors) -->
                         <locator>
                             <udpv4>
                                 <address>192.168.131.1</address>
+                            </udpv4>
+                        </locator>
+                        <!-- Ridgeback WiFi -->
+                        <locator>
+                            <udpv4>
+                                <address>10.158.39.203</address>
                             </udpv4>
                         </locator>
                     </initialPeersList>
