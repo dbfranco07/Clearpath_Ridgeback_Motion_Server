@@ -7,13 +7,13 @@ set -e
 
 export ROS_DOMAIN_ID=0
 export RMW_FASTRTPS_USE_SHM=0
-export FASTRTPS_DEFAULT_PROFILES_FILE=~/ridgeback/config/fastrtps_ridgeback.xml
+export FASTRTPS_DEFAULT_PROFILES_FILE=~/ridgeback99/config/fastrtps_ridgeback.xml
 
 if [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
     unset FASTRTPS_DEFAULT_PROFILES_FILE
 elif [[ -n "${RIDGEBACK_IP:-}" && -n "${JETSON_IP:-}" ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/fastrtps_ridgeback_generated.xml
-    python3 ~/ridgeback/scripts/generate_fastrtps_profile.py \
+    python3 ~/ridgeback99/scripts/generate_fastrtps_profile.py \
         --local-ip "$RIDGEBACK_IP" \
         --peer-ip "$JETSON_IP" \
         --output "$FASTRTPS_DEFAULT_PROFILES_FILE" >/dev/null
@@ -24,7 +24,7 @@ echo "Ridgeback R100 - Start Script"
 echo "=========================================="
 
 # Navigate to workspace
-cd ~/ridgeback
+cd ~/ridgeback99
 
 # Pull latest changes
 echo ""
