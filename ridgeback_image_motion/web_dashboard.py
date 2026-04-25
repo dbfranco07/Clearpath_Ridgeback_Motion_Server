@@ -1110,8 +1110,8 @@ class DashboardNode(Node):
                 raw_image_topic or "disabled",
                 depth_compressed_topic if self.enable_depth_feed else "disabled",
                 depth_topic if self.enable_depth_feed else "disabled",
-            self.fallback_raw_image_topic if self.auto_raw_camera_fallback else "disabled",
-            self.fallback_depth_topic if (self.auto_raw_camera_fallback and self.enable_depth_feed) else "disabled",
+                self.fallback_raw_image_topic if self.auto_raw_camera_fallback else "disabled",
+                self.fallback_depth_topic if (self.auto_raw_camera_fallback and self.enable_depth_feed) else "disabled",
                 self.get_parameter("cmd_vel_topic").value,
             )
         )
@@ -1661,11 +1661,11 @@ def create_app(node: DashboardNode) -> FastAPI:
             "topics": node.subscription_topics,
             "subscriptions": sorted(node._dashboard_subscriptions.keys()),
             "callbacks": dict(node.callback_counts),
-        "fallback": {
-          "enabled": bool(node.auto_raw_camera_fallback),
-          "after_s": float(node.raw_fallback_after_s),
-          "attempted": dict(node._fallback_attempted),
-        },
+            "fallback": {
+                "enabled": bool(node.auto_raw_camera_fallback),
+                "after_s": float(node.raw_fallback_after_s),
+                "attempted": dict(node._fallback_attempted),
+            },
             "last_error": node.last_depth_error,
             "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
             "depth_age_s": round(now - node.last_depth_time, 2) if node.last_depth_time > 0 else -1.0,
