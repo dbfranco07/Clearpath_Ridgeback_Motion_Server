@@ -25,12 +25,12 @@
                     <initialPeersList>
                         <locator>
                             <udpv4>
-                                <address>127.0.0.1</address>
+                                <address>jetson-ridgeback.local</address>
                             </udpv4>
                         </locator>
                         <locator>
                             <udpv4>
-                                <address>10.158.39.203</address>
+                                <address>127.0.0.1</address>
                             </udpv4>
                         </locator>
                         <locator>
