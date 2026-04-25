@@ -175,7 +175,7 @@ def generate_launch_description():
                     "'/r100_0140/sensors/camera_0/depth/image' if '", profile, "' == 'debug' else ''"
                 ]),
                 "enable_depth_feed": ParameterValue(
-                    PythonExpression(["'", profile, "' == 'debug'"]),
+                    PythonExpression(["'", profile, "' in ['mission', 'debug']"]),
                     value_type=bool,
                 ),
                 "rgb_stream_hz": PythonExpression([

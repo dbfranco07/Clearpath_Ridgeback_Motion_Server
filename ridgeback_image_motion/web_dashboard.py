@@ -305,7 +305,7 @@ PAGE_HTML = """<!DOCTYPE html>
             YAW:<span id="p-yaw" class="sv">--</span>°
           </div>
           <div class="sr">
-            <span class="sl">LATENCY</span>
+            <span class="sl">AGE</span>
             IMG<span id="lat-img" class="lv">--</span>
             ODO<span id="lat-odo" class="lv">--</span>
           </div>
@@ -691,15 +691,17 @@ async function refreshStatus() {
     if (e('p-x'))   e('p-x').textContent   = (pose.x??0).toFixed(2);
     if (e('p-y'))   e('p-y').textContent   = (pose.y??0).toFixed(2);
     if (e('p-yaw')) e('p-yaw').textContent = (pose.yaw_deg??0).toFixed(1);
-    if (e('lat-img')) e('lat-img').textContent = (data.latency?.image_ms??0).toFixed(0)+'ms';
-    if (e('lat-odo')) e('lat-odo').textContent = (data.latency?.odom_ms??0).toFixed(0)+'ms';
+    const imgAgeMs = data.feeds?.camera_age_ms ?? data.latency?.image_ms ?? 0;
+    const odomAgeMs = data.feeds?.odom_age_ms ?? data.latency?.odom_ms ?? 0;
+    if (e('lat-img')) e('lat-img').textContent = imgAgeMs.toFixed(0)+'ms';
+    if (e('lat-odo')) e('lat-odo').textContent = odomAgeMs.toFixed(0)+'ms';
 
     // LiDAR
     if (e('st-lid')) e('st-lid').textContent = (data.lidar?.closest_m??0).toFixed(2);
     if (e('st-pts')) e('st-pts').textContent = (data.lidar?.range_count??0);
 
     // Camera / map connection
-    const camOk = data.latency?.image_ms > 0 && data.latency?.image_ms < 5000;
+    const camOk = Boolean(data.feeds?.camera_alive);
     if (e('st-cam')) { e('st-cam').textContent = camOk ? 'OK' : 'LOST';
                        e('st-cam').style.color = camOk ? 'var(--accent)' : 'var(--danger)'; }
     const mapOk = data.map?.width > 0;
@@ -731,7 +733,10 @@ async function refreshStatus() {
     if (e('mm-locs')) e('mm-locs').innerHTML = renderLocationList(data.memory?.recent_locations || []);
 
     const dno = document.getElementById('depth-nosig');
-    if (dno) dno.style.display = (!depthSt.has_frame || depthSt.age_s > 3) ? 'block' : 'none';
+    if (dno) {
+      dno.textContent = depthSt.enabled === false ? 'DEPTH DISABLED' : 'NO DEPTH SIGNAL';
+      dno.style.display = (depthSt.enabled === false || !depthSt.has_frame || depthSt.age_s > 3) ? 'block' : 'none';
+    }
     if (e('depth-age') && depthSt.age_s >= 0) e('depth-age').textContent = depthSt.age_s.toFixed(1)+'s';
 
     const cno = document.getElementById('rgb-nosig');
@@ -982,6 +987,7 @@ class DashboardNode(Node):
         self.depth_compressed_format = ""
 
         self.odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+        self.last_odom_time = 0.0
         self.lidar = {"closest_m": 99.0, "range_count": 0,
                       "ranges": [], "angle_min": 0.0, "angle_increment": 0.0, "range_max": 10.0}
         self.battery = {"voltage": 0.0, "pct": 0.0}
@@ -1103,6 +1109,7 @@ class DashboardNode(Node):
             self.get_logger().error(f"Raw image cb error: {exc}")
 
     def _odom_cb(self, msg: Odometry) -> None:
+        self.last_odom_time = time.time()
         try:
             now = self.get_clock().now()
             stamp = rclpy.time.Time.from_msg(msg.header.stamp)
@@ -1314,6 +1321,8 @@ class DashboardNode(Node):
 
         camera_alive = (now - self.last_frame_time) < 5.0 if self.last_frame_time > 0 else False
         depth_alive = (now - self.last_depth_time) < 5.0 if self.last_depth_time > 0 else False
+        camera_age_ms = (now - self.last_frame_time) * 1000.0 if self.last_frame_time > 0 else 0.0
+        odom_age_ms = (now - self.last_odom_time) * 1000.0 if self.last_odom_time > 0 else 0.0
         map_ready = int(map_payload["width"]) > 0
         connected = camera_alive or depth_alive or map_ready or int(self.lidar["range_count"]) > 0
         heartbeat_age = now - self.last_browser_heartbeat_time if self.last_browser_heartbeat_time else 999.0
@@ -1328,6 +1337,8 @@ class DashboardNode(Node):
                 "camera_alive": camera_alive,
                 "depth_alive": depth_alive,
                 "map_ready": map_ready,
+                "camera_age_ms": camera_age_ms,
+                "odom_age_ms": odom_age_ms,
             },
             "safety": self.safety_status or self._safety_payload(),
             "map": {
@@ -1453,7 +1464,11 @@ def create_app(node: DashboardNode) -> FastAPI:
     @app.get("/depth_status")
     def depth_status() -> JSONResponse:
         age = time.time() - node.last_depth_time if node.last_depth_time > 0 else -1.0
-        return JSONResponse({"has_frame": node.last_depth_time > 0, "age_s": round(age, 1) if age >= 0 else -1.0})
+        return JSONResponse({
+            "enabled": bool(node.enable_depth_feed),
+            "has_frame": node.last_depth_time > 0,
+            "age_s": round(age, 1) if age >= 0 else -1.0,
+        })
 
     @app.get("/lidar_scan")
     def lidar_scan() -> JSONResponse:

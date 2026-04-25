@@ -57,7 +57,7 @@ class SafetyController(Node):
         self.status_pub = self.create_publisher(String, self.get_parameter("status_topic").value, reliable_qos)
         self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, qos)
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, qos)
-        self.create_subscription(Bool, self.get_parameter("emergency_stop_topic").value, self._estop_cb, reliable_qos)
+        self.create_subscription(Bool, self.get_parameter("emergency_stop_topic").value, self._estop_cb, qos)
         self.create_subscription(Bool, self.get_parameter("operator_heartbeat_topic").value, self._heartbeat_cb, reliable_qos)
         self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
         self.create_subscription(String, self.get_parameter("vlm_status_topic").value, self._vlm_status_cb, reliable_qos)
