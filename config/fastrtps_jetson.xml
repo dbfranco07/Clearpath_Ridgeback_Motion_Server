@@ -3,26 +3,26 @@
   Jetson DDS profile. Static fallback used when JETSON_IP / RIDGEBACK_IP env
   vars are NOT set; otherwise scripts/generate_fastrtps_profile.py rewrites
   /tmp/fastrtps_jetson_generated.xml at launch time and that overrides this.
-  Keep IPs here aligned with CLAUDE.md.
+
+  Important: do NOT set defaultUnicastLocatorList here. Hardcoding it to a
+  specific IP breaks all DDS data delivery whenever the Jetson's WiFi address
+  changes. Letting FastDDS auto-discover interfaces is safer; initialPeersList
+  below is only a discovery hint.
 -->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/FastRTPS_Profiles">
     <profiles>
         <participant profile_name="participant_profile" is_default_profile="true">
             <rtps>
-                <defaultUnicastLocatorList>
-                    <locator>
-                        <udpv4>
-                            <address>10.158.36.90</address>
-                        </udpv4>
-                    </locator>
-                </defaultUnicastLocatorList>
                 <builtin>
-                    <initialPeersList>
+                    <metatrafficMulticastLocatorList>
                         <locator>
                             <udpv4>
-                                <address>10.158.36.90</address>
+                                <address>239.255.0.1</address>
+                                <port>7400</port>
                             </udpv4>
                         </locator>
+                    </metatrafficMulticastLocatorList>
+                    <initialPeersList>
                         <locator>
                             <udpv4>
                                 <address>127.0.0.1</address>

@@ -3,7 +3,11 @@
   Ridgeback DDS profile. Static fallback used when RIDGEBACK_IP / JETSON_IP env
   vars are NOT set; otherwise scripts/generate_fastrtps_profile.py rewrites
   /tmp/fastrtps_ridgeback_generated.xml at launch time and that overrides this.
-  Keep IPs here aligned with CLAUDE.md.
+
+  Discovery is via metatraffic multicast; initialPeersList only adds hints for
+  campus links where multicast may be filtered. Avoid hardcoding the Jetson IP
+  here — it moves on every WiFi reconnect; export JETSON_IP / RIDGEBACK_IP
+  before launch to get a fresh per-deploy unicast profile instead.
 -->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/FastRTPS_Profiles">
     <profiles>
@@ -21,22 +25,12 @@
                     <initialPeersList>
                         <locator>
                             <udpv4>
-                                <address>10.158.36.90</address>
-                            </udpv4>
-                        </locator>
-                        <locator>
-                            <udpv4>
                                 <address>127.0.0.1</address>
                             </udpv4>
                         </locator>
                         <locator>
                             <udpv4>
                                 <address>192.168.131.1</address>
-                            </udpv4>
-                        </locator>
-                        <locator>
-                            <udpv4>
-                                <address>10.158.39.203</address>
                             </udpv4>
                         </locator>
                     </initialPeersList>
