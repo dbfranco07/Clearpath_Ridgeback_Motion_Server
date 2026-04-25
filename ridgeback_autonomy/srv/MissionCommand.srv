@@ -1,7 +1,0 @@
-# Send a natural language command to the mission orchestrator
-string command          # e.g. "go to room 305", "come back", "stop", "where am i"
----
-bool accepted           # True if command was understood and accepted
-string message          # Human-readable response
-string parsed_intent    # What the system understood: GO_TO_ROOM, RETURN_TO_START, STOP, QUERY_STATUS, UNKNOWN
-string parsed_room      # Extracted room number (if applicable)

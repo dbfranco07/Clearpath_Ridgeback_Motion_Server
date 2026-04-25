@@ -895,9 +895,9 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 });
 
-setInterval(refreshStatus, 1200);
-setInterval(updateLidar, 200);
-setInterval(updateMapView, 1000);
+setInterval(refreshStatus, 1500);
+setInterval(updateLidar, 500);
+setInterval(updateMapView, 2000);
 
 refreshStatus();
 updateLidar();
@@ -918,6 +918,7 @@ class DashboardNode(Node):
         self.declare_parameter("depth_compressed_topic", "/r100_0140/image/depth_compressed")
         self.declare_parameter("depth_topic", "")
         self.declare_parameter("enable_depth_feed", True)
+        self.declare_parameter("rgb_stream_hz", 8.0)
         self.declare_parameter("depth_render_hz", 4.0)
         self.declare_parameter("map_render_hz", 1.0)
         self.declare_parameter("map_target_long_side", 1000)
@@ -945,6 +946,7 @@ class DashboardNode(Node):
         depth_compressed_topic = str(self.get_parameter("depth_compressed_topic").value).strip()
         depth_topic = str(self.get_parameter("depth_topic").value).strip()
         self.enable_depth_feed = bool(self.get_parameter("enable_depth_feed").value)
+        self.rgb_stream_hz = max(1.0, float(self.get_parameter("rgb_stream_hz").value))
         self.depth_render_hz = max(0.5, float(self.get_parameter("depth_render_hz").value))
         self.map_render_hz = max(0.1, float(self.get_parameter("map_render_hz").value))
         self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
@@ -984,6 +986,7 @@ class DashboardNode(Node):
         self.depth_lock = threading.Lock()
         self.depth_event = threading.Event()
         self.last_depth_time = 0.0
+        self.last_depth_render_time = 0.0
         self.depth_compressed_frame: bytes | None = None
         self.depth_compressed_format = ""
 
@@ -1131,13 +1134,24 @@ class DashboardNode(Node):
             self.get_logger().error(f"Depth visualization error: {exc}")
 
     def _depth_compressed_cb(self, msg: CompressedImage) -> None:
-        with self.depth_lock:
-            self.depth_compressed_frame = bytes(msg.data)
-            self.depth_compressed_format = msg.format
         self.last_depth_time = time.time()
-        self.depth_event.set()
+        if self.last_depth_time - self.last_depth_render_time < 1.0 / self.depth_render_hz:
+            return
+        self.last_depth_render_time = self.last_depth_time
+        try:
+            encoded = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+            depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
+            if depth is not None:
+                self._store_depth_visualization(depth, msg.format)
+        except Exception as exc:
+            self.get_logger().error(f"Compressed depth render error: {exc}")
 
     def _depth_cb(self, msg: Image) -> None:
+        now = time.time()
+        self.last_depth_time = now
+        if now - self.last_depth_render_time < 1.0 / self.depth_render_hz:
+            return
+        self.last_depth_render_time = now
         try:
             depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
             self._store_depth_visualization(depth, msg.encoding)
@@ -1244,13 +1258,14 @@ class DashboardNode(Node):
         self.cmd_vel_pub.publish(twist)
 
     def video_stream(self):
+        interval = 1.0 / self.rgb_stream_hz
         while True:
             frame = self.latest_frame_copy()
             if frame is None:
                 time.sleep(0.04)
                 continue
             yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            time.sleep(0.04)
+            time.sleep(interval)
 
     def depth_stream(self):
         last_render = 0.0
@@ -1265,19 +1280,7 @@ class DashboardNode(Node):
             self.depth_event.wait(timeout=2.0)
             self.depth_event.clear()
             with self.depth_lock:
-                compressed_frame = self.depth_compressed_frame
-                compressed_format = self.depth_compressed_format
                 frame = self.depth_frame
-            if compressed_frame:
-                try:
-                    encoded = np.frombuffer(compressed_frame, dtype=np.uint8)
-                    depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
-                    if depth is not None:
-                        self._store_depth_visualization(depth, compressed_format)
-                        with self.depth_lock:
-                            frame = self.depth_frame
-                except Exception as exc:
-                    self.get_logger().error(f"Compressed depth render error: {exc}")
             last_render = time.time()
             if frame:
                 yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"

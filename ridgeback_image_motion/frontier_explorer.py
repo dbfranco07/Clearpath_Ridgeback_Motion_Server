@@ -155,8 +155,8 @@ class FrontierExplorer(Node):
         unknown = data < 0
         occupied = data >= 65
         frontier = np.zeros_like(unknown, dtype=bool)
-        frontier[1:-1, 1:-1] = unknown[1:-1, 1:-1] & (
-            free[:-2, 1:-1] | free[2:, 1:-1] | free[1:-1, :-2] | free[1:-1, 2:]
+        frontier[1:-1, 1:-1] = free[1:-1, 1:-1] & (
+            unknown[:-2, 1:-1] | unknown[2:, 1:-1] | unknown[1:-1, :-2] | unknown[1:-1, 2:]
         )
 
         inflated_occupied = self._inflate_bool_grid(occupied, int(self.get_parameter("occupied_inflation_cells").value))

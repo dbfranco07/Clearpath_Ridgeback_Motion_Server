@@ -1,4 +1,0 @@
-# VLM deployment config — contains IP addresses, not for git
-.env
-*.pyc
-__pycache__/

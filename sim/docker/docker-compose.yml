@@ -111,8 +111,7 @@ services:
       - STRATEGY=${STRATEGY:-frontier_nearest}
       - SIM_MODE=true   # signals autonomy nodes we're in sim
     volumes:
-      - ../ridgeback_autonomy:/ros2_ws/src/ridgeback_autonomy:rw
-      - ../config:/ros2_ws/src/ridgeback_autonomy/config:ro
+      - ..:/ros2_ws/src/ridgeback_image_motion:rw
       - ros2_build:/ros2_ws/build
     ports:
       - "8081:8081"   # mission dashboard
@@ -127,11 +126,11 @@ services:
       bash -c "
         source /opt/ros/humble/setup.bash &&
         cd /ros2_ws &&
-        colcon build --packages-select ridgeback_autonomy --symlink-install 2>&1 | tail -5 &&
+        colcon build --packages-select ridgeback_image_motion --symlink-install 2>&1 | tail -5 &&
         source install/setup.bash &&
-        ros2 launch ridgeback_autonomy sim.launch.py \
-          strategy:=$${STRATEGY} \
-          vlm_endpoint:=$${VLM_ENDPOINT}
+        ros2 launch ridgeback_image_motion autonomy.launch.py \
+          profile:=debug \
+          launch_vlm:=false
       "
 
   # ─────────────────────────────────────────────────────────────────────

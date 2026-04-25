@@ -51,7 +51,7 @@ def generate_launch_description():
     #         "/launch/online_async_launch.py"
     #     ]),
     #     launch_arguments={
-    #         "slam_params_file": "/ros2_ws/src/ridgeback_autonomy/config/slam_params.yaml",
+    #         "slam_params_file": "/ros2_ws/src/ridgeback_image_motion/config/slam_params.yaml",
     #         "use_sim_time": "true",
     #     }.items(),
     # )
@@ -63,7 +63,7 @@ def generate_launch_description():
     #         get_package_share_directory("nav2_bringup"), "/launch/navigation_launch.py"
     #     ]),
     #     launch_arguments={
-    #         "params_file": "/ros2_ws/src/ridgeback_autonomy/config/nav2_params.yaml",
+    #         "params_file": "/ros2_ws/src/ridgeback_image_motion/config/nav2_params.yaml",
     #         "use_sim_time": "true",
     #     }.items(),
     # )
@@ -84,7 +84,7 @@ def generate_launch_description():
     # ── Safety controller ─────────────────────────────────────────────
     # TODO: uncomment when safety_controller.py is implemented
     # safety_controller = Node(
-    #     package="ridgeback_autonomy",
+    #     package="ridgeback_image_motion",
     #     executable="safety_controller.py",
     #     name="safety_controller",
     #     parameters=[{
@@ -98,7 +98,7 @@ def generate_launch_description():
     # ── cmd_vel mux ───────────────────────────────────────────────────
     # TODO: uncomment when cmd_vel_mux.py is implemented
     # cmd_vel_mux = Node(
-    #     package="ridgeback_autonomy",
+    #     package="ridgeback_image_motion",
     #     executable="cmd_vel_mux.py",
     #     name="cmd_vel_mux",
     #     parameters=[{"use_sim_time": True}],
@@ -108,13 +108,13 @@ def generate_launch_description():
     # ── VLM client + room detector ────────────────────────────────────
     # TODO: uncomment when vlm_client.py and room_detector.py are implemented
     # vlm_client = Node(
-    #     package="ridgeback_autonomy",
+    #     package="ridgeback_image_motion",
     #     executable="vlm_client.py",
     #     name="vlm_client",
     #     parameters=[{
     #         "endpoint": vlm_endpoint,
     #         "use_sim_time": True,
-    #         "prompts_file": "/ros2_ws/src/ridgeback_autonomy/config/prompts.yaml",
+    #         "prompts_file": "/ros2_ws/src/ridgeback_image_motion/config/prompts.yaml",
     #     }],
     #     output="screen",
     # )
@@ -122,7 +122,7 @@ def generate_launch_description():
     # ── Spatial memory ────────────────────────────────────────────────
     # TODO: uncomment when spatial_memory.py is implemented
     # spatial_memory = Node(
-    #     package="ridgeback_autonomy",
+    #     package="ridgeback_image_motion",
     #     executable="spatial_memory.py",
     #     name="spatial_memory",
     #     parameters=[{
@@ -135,7 +135,7 @@ def generate_launch_description():
     # ── Mission orchestrator ──────────────────────────────────────────
     # TODO: uncomment when mission_orchestrator.py is implemented
     # mission_orchestrator = Node(
-    #     package="ridgeback_autonomy",
+    #     package="ridgeback_image_motion",
     #     executable="mission_orchestrator.py",
     #     name="mission_orchestrator",
     #     parameters=[{
@@ -151,7 +151,7 @@ def generate_launch_description():
     # For now, use the existing web_controller.py as a placeholder
     # (it shows camera + LiDAR but no mission control)
     # dashboard = Node(
-    #     package="ridgeback_autonomy",
+    #     package="ridgeback_image_motion",
     #     executable="dashboard.py",
     #     name="dashboard",
     #     parameters=[{"port": 8081, "use_sim_time": True}],

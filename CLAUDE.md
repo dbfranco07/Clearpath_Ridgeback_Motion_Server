@@ -372,11 +372,11 @@ A user must be able to instruct the Clearpath Robot to go to a certain place, a 
 
 
 ## Rules
-My laptop performs ssh to both jetson orin nano and clearpath ridgeback
+My laptop performs SSH to both Jetson Orin Nano and Clearpath Ridgeback
 
-Ridgeback just runs image publisher and motion server using the script ridgeback_start.sh. nothing else
+Ridgeback just runs image_publisher and motion_server using the script ridgeback_start.sh. Nothing else.
 
-However in orin we will run ridgeback_web.sh which starts the web app. Orin must also run the nav2, frontier exploration, map building in memory, slam, and calling the VLM
+However in Orin, we will run ridgeback_web.sh which starts the web app. Orin must also run the nav2, frontier exploration, map building in memory, slam, and calling the VLM.
 
 Can you help suggest also how to perform this?
 

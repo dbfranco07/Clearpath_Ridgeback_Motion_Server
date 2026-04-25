@@ -132,7 +132,7 @@ bash sim/scripts/sim_down.sh --clean  # full reset (clears volumes)
 ## Development workflow
 
 The autonomy source is **bind-mounted** into the `autonomy` container at
-`/ros2_ws/src/ridgeback_autonomy`. Edit code locally in your IDE; rebuild
+`/ros2_ws/src/ridgeback_image_motion`. Edit code locally in your IDE; rebuild
 inside the container:
 
 ```bash
@@ -140,9 +140,9 @@ inside the container:
 docker exec -it ridgeback-sim-autonomy-1 bash
 
 # Inside container — rebuild and relaunch
-colcon build --packages-select ridgeback_autonomy --symlink-install
+colcon build --packages-select ridgeback_image_motion --symlink-install
 source install/setup.bash
-ros2 launch ridgeback_autonomy sim.launch.py strategy:=vlm_guided_frontier
+ros2 launch ridgeback_image_motion autonomy.launch.py profile:=debug launch_vlm:=false
 ```
 
 Or just restart the container to get a clean rebuild:
@@ -229,7 +229,7 @@ docker logs ridgeback-sim-gazebo-1
 **Dashboard not reachable at :8081**
 ```bash
 docker logs ridgeback-sim-autonomy-1 | tail -30
-# If 'ridgeback_autonomy not found': colcon build failed — check Python deps
+# If 'ridgeback_image_motion not found': colcon build failed — check Python deps
 ```
 
 **DGX not reachable**

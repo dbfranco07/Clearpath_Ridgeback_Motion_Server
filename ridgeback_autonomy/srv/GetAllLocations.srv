@@ -1,9 +1,0 @@
-# Get all room locations stored in memory
-bool include_start_position   # Whether to include the start_position entry
----
-string[] room_ids
-float64[] map_xs
-float64[] map_ys
-float32[] confidences
-string[] last_seen_times
-int32[] detection_counts

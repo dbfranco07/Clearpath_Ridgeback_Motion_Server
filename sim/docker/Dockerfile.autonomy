@@ -4,7 +4,7 @@
 # The osrf/ros:humble-desktop image is multi-arch; no emulation needed on
 # Apple Silicon.
 #
-# The ridgeback_autonomy source is bind-mounted at runtime so you can edit
+# The ridgeback_image_motion source is bind-mounted at runtime so you can edit
 # locally and rebuild inside the container without rebuilding the image.
 
 FROM osrf/ros:humble-desktop

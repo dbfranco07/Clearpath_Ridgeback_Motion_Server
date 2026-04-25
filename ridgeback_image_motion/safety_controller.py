@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import time
+import threading
 import urllib.request
 
 import rclpy
@@ -63,6 +64,7 @@ class SafetyController(Node):
         self.network_healthy = True
         self.network_error = ""
         self.last_network_check = 0.0
+        self.network_check_inflight = False
 
         self.create_timer(0.10, self._tick)
         self.get_logger().info("safety_controller ready")
@@ -95,16 +97,30 @@ class SafetyController(Node):
         period = float(self.get_parameter("vlm_check_period_s").value)
         if now - self.last_network_check < period:
             return
+        if self.network_check_inflight:
+            return
         self.last_network_check = now
+
+        def worker() -> None:
+            try:
+                config = load_vlm_config()
+                request = urllib.request.Request(config.openai_base_url.rstrip("/") + "/models", method="GET")
+                with urllib.request.urlopen(request, timeout=float(self.get_parameter("vlm_http_timeout_s").value)) as response:
+                    self.network_healthy = response.status < 500
+                    self.network_error = "" if self.network_healthy else f"http {response.status}"
+            except Exception as exc:
+                self.network_healthy = False
+                self.network_error = str(exc)[:160]
+            finally:
+                self.network_check_inflight = False
+
+        self.network_check_inflight = True
         try:
-            config = load_vlm_config()
-            request = urllib.request.Request(config.openai_base_url.rstrip("/") + "/models", method="GET")
-            with urllib.request.urlopen(request, timeout=float(self.get_parameter("vlm_http_timeout_s").value)) as response:
-                self.network_healthy = response.status < 500
-                self.network_error = "" if self.network_healthy else f"http {response.status}"
+            threading.Thread(target=worker, daemon=True).start()
         except Exception as exc:
             self.network_healthy = False
             self.network_error = str(exc)[:160]
+            self.network_check_inflight = False
 
     def _tick(self) -> None:
         now = time.time()

@@ -124,7 +124,7 @@ cd ~/projects/ridgeback
 source install/setup.bash
 
 # Launch ONLY the safety controller + cmd_vel_mux
-ros2 launch ridgeback_autonomy safety.launch.py
+ros2 launch ridgeback_image_motion autonomy.launch.py profile:=teleop
 ```
 
 **What this does:**
@@ -195,7 +195,7 @@ Press `Ctrl+C` in T2 to stop the safety-only launch. Then:
 
 ```bash
 # Launch the full autonomy stack (but without VLM for now)
-ros2 launch ridgeback_autonomy autonomy.launch.py launch_vlm:=false
+ros2 launch ridgeback_image_motion autonomy.launch.py launch_vlm:=false
 ```
 
 **What this does:** Launches the tiered startup:
@@ -336,7 +336,7 @@ Go back to the main Jetson terminal and stop the current launch (`Ctrl+C`), then
 
 ```bash
 # Launch with VLM enabled
-ros2 launch ridgeback_autonomy autonomy.launch.py
+ros2 launch ridgeback_image_motion autonomy.launch.py
 ```
 
 (VLM is enabled by default, so no extra flags needed.)
@@ -385,19 +385,16 @@ robot_yaw: 0.1
 ### Step 2.6 — Verify Spatial Memory Storage (T3)
 
 ```bash
-# Check what the spatial memory has stored
-ros2 service call /memory/get_all_locations \
-  ridgeback_autonomy/srv/GetAllLocations \
-  '{include_start_position: true}'
+# Check what spatial memory has stored in the dashboard Mission+Mem panel.
+# The current ridgeback_image_motion stack stores this in ~/ridgeback_memory.db.
+sqlite3 ~/ridgeback_memory.db 'select label, room_number, x, y, confidence, created_at from locations order by id desc limit 20;'
 ```
 
 **Expected:** Should list the start position and any rooms the VLM detected with confidence ≥ 0.6.
 
 ```bash
 # Query a specific room
-ros2 service call /memory/query_location \
-  ridgeback_autonomy/srv/QueryLocation \
-  '{room_id: "301"}'
+sqlite3 ~/ridgeback_memory.db "select label, x, y, confidence, created_at from locations where room_number='301' order by confidence desc, id desc limit 5;"
 ```
 
 **What is happening:**
@@ -578,7 +575,7 @@ Use teleop (dashboard) to drive the robot to the hallway entrance. Or physically
 ```bash
 # T2 — Stop and restart the full stack
 # Ctrl+C in T2 to stop, then:
-ros2 launch ridgeback_autonomy autonomy.launch.py
+ros2 launch ridgeback_image_motion autonomy.launch.py
 
 # T3 — Reset memory for a clean start
 ros2 service call /memory/reset std_srvs/srv/Trigger '{}'
@@ -660,7 +657,7 @@ Go to room 301
 
 ```bash
 # T2 — Fresh launch
-ros2 launch ridgeback_autonomy autonomy.launch.py
+ros2 launch ridgeback_image_motion autonomy.launch.py
 
 # T3 — Optional: keep some known rooms in memory from Phase 4
 # Or reset for a full tabula rasa demo:

@@ -4,6 +4,7 @@ from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node, SetRemap
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 
@@ -139,6 +140,16 @@ def generate_launch_description():
                 ]),
                 "depth_topic": PythonExpression([
                     "'/r100_0140/sensors/camera_0/depth/image' if '", profile, "' == 'debug' else ''"
+                ]),
+                "enable_depth_feed": ParameterValue(
+                    PythonExpression(["'", profile, "' == 'debug'"]),
+                    value_type=bool,
+                ),
+                "rgb_stream_hz": PythonExpression([
+                    "12.0 if '", profile, "' == 'debug' else 8.0"
+                ]),
+                "depth_render_hz": PythonExpression([
+                    "4.0 if '", profile, "' == 'debug' else 1.0"
                 ]),
             },
         ],
