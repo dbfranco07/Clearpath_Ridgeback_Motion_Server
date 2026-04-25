@@ -1766,12 +1766,15 @@ def create_app(node: DashboardNode) -> FastAPI:
 
 
 def main() -> None:
-    rclpy.init()
-    node = DashboardNode()
-    app = create_app(node)
-    port = int(node.get_parameter("port").value)
-    host = str(node.get_parameter("host").value)
-    uvicorn.run(app, host=host, port=port, log_level="info")
+  rclpy.init()
+  node = DashboardNode()
+  app = create_app(node)
+  port = int(node.get_parameter("port").value)
+  host = str(node.get_parameter("host").value)
+  # Force ASGI lifespan so the ROS spin thread in create_app(...lifespan=...)
+  # is always started. Without this, subscriptions can be created but never
+  # serviced, which leaves image/depth callbacks stuck at zero.
+  uvicorn.run(app, host=host, port=port, log_level="info", lifespan="on")
 
 
 if __name__ == "__main__":
