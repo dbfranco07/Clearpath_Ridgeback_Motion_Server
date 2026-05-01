@@ -108,6 +108,39 @@ topic_status() {
     fi
 }
 
+wait_for_publishers() {
+    local wait_s="${RIDGEBACK_PREFLIGHT_WAIT_S:-45}"
+    local step_s=3
+    local waited=0
+    local required_topics=(
+        "/r100_0140/sensors/lidar2d_0/scan"
+        "/r100_0140/platform/odom/filtered"
+        "/r100_0140/tf"
+    )
+
+    while (( waited < wait_s )); do
+        local missing=0
+        for topic in "${required_topics[@]}"; do
+            count="$(topic_publishers "$topic")"
+            if [[ -z "$count" || "$count" == "0" ]]; then
+                missing=$((missing + 1))
+            fi
+        done
+
+        if (( missing == 0 )); then
+            return 0
+        fi
+
+        if (( waited == 0 )); then
+            echo "  Waiting up to ${wait_s}s for Ridgeback ROS publishers..."
+        fi
+        sleep "$step_s"
+        waited=$((waited + step_s))
+    done
+
+    return 1
+}
+
 sample_stamp_age() {
     local topic="$1"
     timeout 6 ros2 topic echo "$topic" --once --field header.stamp 2>/dev/null | awk '
@@ -129,6 +162,12 @@ echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-unset}"
 echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "  RIDGEBACK_PROFILE=${RIDGEBACK_PROFILE:-mission}"
+if ! wait_for_publishers; then
+    echo "  WARN Ridgeback core ROS publishers are still not visible."
+    echo "       Check that the Ridgeback terminal is already running:"
+    echo "         bash ~/ridgeback99/scripts/ridgeback_start.sh"
+    echo "       Also verify RIDGEBACK_IP/JETSON_IP and ROS_DOMAIN_ID match on both machines."
+fi
 topic_status "/r100_0140/sensors/lidar2d_0/scan" "2D LiDAR"
 topic_status "/r100_0140/platform/odom/filtered" "Filtered odom"
 topic_status "/r100_0140/image/compressed" "Compressed RGB"
