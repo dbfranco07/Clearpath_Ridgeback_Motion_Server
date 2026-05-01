@@ -21,6 +21,7 @@ RIDGEBACK_DEPTH_MAX_FPS="${RIDGEBACK_DEPTH_MAX_FPS:-1}"
 RIDGEBACK_DEPTH_MAX_WIDTH="${RIDGEBACK_DEPTH_MAX_WIDTH:-320}"
 RIDGEBACK_DEPTH_PNG_COMPRESSION="${RIDGEBACK_DEPTH_PNG_COMPRESSION:-3}"
 RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
+RIDGEBACK_REQUIRE_WIRED="${RIDGEBACK_REQUIRE_WIRED:-$RIDGEBACK_PREFER_WIRED}"
 RIDGEBACK_WIRED_IP="${RIDGEBACK_WIRED_IP:-192.168.131.1}"
 JETSON_WIRED_IP="${JETSON_WIRED_IP:-192.168.131.50}"
 
@@ -86,6 +87,11 @@ if is_true "$RIDGEBACK_PREFER_WIRED"; then
             echo "WARN: overriding RIDGEBACK_IP=$RIDGEBACK_IP with wired $wired_ridgeback_ip" >&2
         fi
         RIDGEBACK_IP="$wired_ridgeback_ip"
+    elif is_true "$RIDGEBACK_REQUIRE_WIRED"; then
+        echo "ERROR: wired Ridgeback IP is required but $RIDGEBACK_WIRED_IP is not present." >&2
+        echo "       Check: ip -br addr; ip route get $JETSON_WIRED_IP; ping -c 3 $JETSON_WIRED_IP" >&2
+        echo "       To intentionally debug over WiFi: RIDGEBACK_PREFER_WIRED=false goridge" >&2
+        exit 1
     fi
 fi
 
@@ -118,7 +124,7 @@ echo "=========================================="
 echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}"
 echo "FastDDS profile: ${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "Ridgeback IP: ${RIDGEBACK_IP:-unknown}  Jetson IP: ${JETSON_IP:-unknown}"
-echo "Network preference: wired=${RIDGEBACK_PREFER_WIRED} ridgeback_wired=${RIDGEBACK_WIRED_IP} jetson_wired=${JETSON_WIRED_IP}"
+echo "Network preference: wired=${RIDGEBACK_PREFER_WIRED} require_wired=${RIDGEBACK_REQUIRE_WIRED} ridgeback_wired=${RIDGEBACK_WIRED_IP} jetson_wired=${JETSON_WIRED_IP}"
 echo "Workspace: $RIDGEBACK_WORKSPACE"
 
 # Navigate to workspace

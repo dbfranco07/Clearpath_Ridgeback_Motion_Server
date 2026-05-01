@@ -25,6 +25,7 @@ Environment overrides:
   RIDGEBACK_LAUNCH_DASHBOARD auto|true|false (default: auto)
   RIDGEBACK_LAUNCH_VSLAM    true|false (default: false; keep false until Ethernet/raw RGB-D validation)
   RIDGEBACK_PREFER_WIRED    true|false (default: true)
+  RIDGEBACK_REQUIRE_WIRED   true|false (default: true when RIDGEBACK_PREFER_WIRED=true)
   RIDGEBACK_CONFIGURE_WIRED true|false (default: true)
   RIDGEBACK_WIRED_IFACE     Ethernet interface or auto (default: auto)
   JETSON_WIRED_CIDR         Jetson wired CIDR (default: 192.168.131.50/24)
@@ -39,6 +40,7 @@ RIDGEBACK_LAUNCH_VLM="${RIDGEBACK_LAUNCH_VLM:-auto}"
 RIDGEBACK_LAUNCH_DASHBOARD="${RIDGEBACK_LAUNCH_DASHBOARD:-auto}"
 RIDGEBACK_LAUNCH_VSLAM="${RIDGEBACK_LAUNCH_VSLAM:-false}"
 RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
+RIDGEBACK_REQUIRE_WIRED="${RIDGEBACK_REQUIRE_WIRED:-$RIDGEBACK_PREFER_WIRED}"
 RIDGEBACK_CONFIGURE_WIRED="${RIDGEBACK_CONFIGURE_WIRED:-true}"
 RIDGEBACK_WIRED_IFACE="${RIDGEBACK_WIRED_IFACE:-auto}"
 JETSON_WIRED_CIDR="${JETSON_WIRED_CIDR:-192.168.131.50/24}"
@@ -117,6 +119,7 @@ validate_launch_toggle RIDGEBACK_LAUNCH_VLM "$RIDGEBACK_LAUNCH_VLM"
 validate_launch_toggle RIDGEBACK_LAUNCH_DASHBOARD "$RIDGEBACK_LAUNCH_DASHBOARD"
 validate_bool_toggle RIDGEBACK_LAUNCH_VSLAM "$RIDGEBACK_LAUNCH_VSLAM"
 validate_bool_toggle RIDGEBACK_PREFER_WIRED "$RIDGEBACK_PREFER_WIRED"
+validate_bool_toggle RIDGEBACK_REQUIRE_WIRED "$RIDGEBACK_REQUIRE_WIRED"
 validate_bool_toggle RIDGEBACK_CONFIGURE_WIRED "$RIDGEBACK_CONFIGURE_WIRED"
 
 export ROS_DOMAIN_ID=0
@@ -204,6 +207,13 @@ if is_true "$RIDGEBACK_PREFER_WIRED"; then
             echo "WARN: overriding JETSON_IP=$JETSON_IP with wired $wired_jetson_ip" >&2
         fi
         JETSON_IP="$wired_jetson_ip"
+    elif is_true "$RIDGEBACK_REQUIRE_WIRED"; then
+        echo "ERROR: wired Ridgeback link is required but not available." >&2
+        echo "       Expected Jetson wired CIDR: $JETSON_WIRED_CIDR" >&2
+        echo "       Expected Ridgeback wired IP: $RIDGEBACK_WIRED_IP" >&2
+        echo "       Check: ip -br addr; ip route get $RIDGEBACK_WIRED_IP; ping -c 3 $RIDGEBACK_WIRED_IP" >&2
+        echo "       To intentionally debug over WiFi: RIDGEBACK_PREFER_WIRED=false goridge" >&2
+        exit 1
     fi
 fi
 JETSON_IP="${JETSON_IP:-$(detect_local_ip)}"
@@ -214,6 +224,11 @@ if is_true "$RIDGEBACK_PREFER_WIRED" \
         echo "WARN: overriding RIDGEBACK_IP=$RIDGEBACK_IP with wired $RIDGEBACK_WIRED_IP" >&2
     fi
     RIDGEBACK_IP="$RIDGEBACK_WIRED_IP"
+elif is_true "$RIDGEBACK_REQUIRE_WIRED"; then
+    echo "ERROR: wired Ridgeback peer $RIDGEBACK_WIRED_IP is required but not reachable from ${JETSON_IP:-unknown}." >&2
+    echo "       Check: ip -br addr; ip route get $RIDGEBACK_WIRED_IP; ping -c 3 $RIDGEBACK_WIRED_IP" >&2
+    echo "       To intentionally debug over WiFi: RIDGEBACK_PREFER_WIRED=false goridge" >&2
+    exit 1
 elif [[ -z "${RIDGEBACK_IP:-}" ]]; then
     for candidate in \
         "${RIDGEBACK_HOST:-}" \
@@ -247,7 +262,7 @@ echo "=========================================="
 echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}"
 echo "FastDDS profile: ${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "Jetson IP: ${JETSON_IP:-unknown}  Ridgeback IP: ${RIDGEBACK_IP:-unknown}"
-echo "Network preference: wired=${RIDGEBACK_PREFER_WIRED} configure_wired=${RIDGEBACK_CONFIGURE_WIRED} iface=${RIDGEBACK_WIRED_IFACE} jetson_wired=${JETSON_WIRED_CIDR} ridgeback_wired=${RIDGEBACK_WIRED_IP}"
+echo "Network preference: wired=${RIDGEBACK_PREFER_WIRED} require_wired=${RIDGEBACK_REQUIRE_WIRED} configure_wired=${RIDGEBACK_CONFIGURE_WIRED} iface=${RIDGEBACK_WIRED_IFACE} jetson_wired=${JETSON_WIRED_CIDR} ridgeback_wired=${RIDGEBACK_WIRED_IP}"
 echo "Workspace: $RIDGEBACK_WORKSPACE"
 
 # Navigate to workspace

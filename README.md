@@ -175,6 +175,12 @@ export RIDGEBACK_IP=192.168.131.1
 bash ~/ridgeback/scripts/ridgeback_web.sh
 ```
 
+To intentionally fall back to WiFi for debugging, set
+`RIDGEBACK_PREFER_WIRED=false`.
+
+By default, the scripts now require the wired link when
+`RIDGEBACK_PREFER_WIRED=true`; they fail fast instead of silently using WiFi.
+
 This starts:
 - `autonomy.launch.py` on the Jetson — safety, watchdog, cmd_vel mux, SLAM, Nav2, frontier exploration, room detection, mission orchestration, and the dashboard
 

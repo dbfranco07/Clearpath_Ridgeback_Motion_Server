@@ -1125,7 +1125,12 @@ class DashboardNode(Node):
         self.last_browser_heartbeat_time = 0.0
         self.safety_warning_m = 0.80
         self.safety_danger_m = 0.45
+        self.spin_started_at = 0.0
+        self.spin_thread_alive = False
+        self.spin_error = ""
+        self.spin_tick_count = 0
 
+        self.spin_tick_timer = self.create_timer(1.0, self._spin_tick)
         self.heartbeat_timer = self.create_timer(0.2, self._publish_operator_heartbeat)
         self.teleop_repeat_timer = self.create_timer(1.0 / self.teleop_repeat_hz, self._repeat_teleop_command)
         if self.auto_raw_camera_fallback:
@@ -1183,6 +1188,9 @@ class DashboardNode(Node):
         )
         if len(self.vlm_events) > self.max_vlm_events:
             self.vlm_events.pop(0)
+
+    def _spin_tick(self) -> None:
+        self.spin_tick_count += 1
 
     def mark_browser_heartbeat(self) -> None:
         self.last_browser_heartbeat_time = time.time()
@@ -1653,7 +1661,19 @@ class DashboardNode(Node):
 def create_app(node: DashboardNode) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+        def spin_worker() -> None:
+            node.spin_started_at = time.time()
+            node.spin_thread_alive = True
+            node.spin_error = ""
+            try:
+                rclpy.spin(node)
+            except Exception as exc:
+                node.spin_error = str(exc)
+                node.get_logger().error(f"Dashboard ROS spin failed: {exc}")
+            finally:
+                node.spin_thread_alive = False
+
+        spin_thread = threading.Thread(target=spin_worker, daemon=True)
         spin_thread.start()
         try:
             yield
@@ -1740,6 +1760,12 @@ def create_app(node: DashboardNode) -> FastAPI:
             "topics": node.subscription_topics,
             "subscriptions": sorted(node._dashboard_subscriptions.keys()),
             "callbacks": dict(node.callback_counts),
+            "spin": {
+                "started": node.spin_started_at > 0.0,
+                "alive": bool(node.spin_thread_alive),
+                "tick_count": int(node.spin_tick_count),
+                "error": node.spin_error,
+            },
             "fallback": {
                 "enabled": bool(node.auto_raw_camera_fallback),
                 "after_s": float(node.raw_fallback_after_s),
