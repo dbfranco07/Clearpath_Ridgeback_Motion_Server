@@ -24,6 +24,11 @@ Environment overrides:
   RIDGEBACK_LAUNCH_VLM      auto|true|false (default: auto)
   RIDGEBACK_LAUNCH_DASHBOARD auto|true|false (default: auto)
   RIDGEBACK_LAUNCH_VSLAM    true|false (default: false; keep false until Ethernet/raw RGB-D validation)
+  RIDGEBACK_PREFER_WIRED    true|false (default: true)
+  RIDGEBACK_CONFIGURE_WIRED true|false (default: true)
+  RIDGEBACK_WIRED_IFACE     Ethernet interface or auto (default: auto)
+  JETSON_WIRED_CIDR         Jetson wired CIDR (default: 192.168.131.50/24)
+  RIDGEBACK_WIRED_IP        Ridgeback wired bridge IP (default: 192.168.131.1)
 EOF
 }
 
@@ -33,6 +38,11 @@ RIDGEBACK_LAUNCH_NAV2="${RIDGEBACK_LAUNCH_NAV2:-auto}"
 RIDGEBACK_LAUNCH_VLM="${RIDGEBACK_LAUNCH_VLM:-auto}"
 RIDGEBACK_LAUNCH_DASHBOARD="${RIDGEBACK_LAUNCH_DASHBOARD:-auto}"
 RIDGEBACK_LAUNCH_VSLAM="${RIDGEBACK_LAUNCH_VSLAM:-false}"
+RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
+RIDGEBACK_CONFIGURE_WIRED="${RIDGEBACK_CONFIGURE_WIRED:-true}"
+RIDGEBACK_WIRED_IFACE="${RIDGEBACK_WIRED_IFACE:-auto}"
+JETSON_WIRED_CIDR="${JETSON_WIRED_CIDR:-192.168.131.50/24}"
+RIDGEBACK_WIRED_IP="${RIDGEBACK_WIRED_IP:-192.168.131.1}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -106,6 +116,8 @@ validate_launch_toggle RIDGEBACK_LAUNCH_NAV2 "$RIDGEBACK_LAUNCH_NAV2"
 validate_launch_toggle RIDGEBACK_LAUNCH_VLM "$RIDGEBACK_LAUNCH_VLM"
 validate_launch_toggle RIDGEBACK_LAUNCH_DASHBOARD "$RIDGEBACK_LAUNCH_DASHBOARD"
 validate_bool_toggle RIDGEBACK_LAUNCH_VSLAM "$RIDGEBACK_LAUNCH_VSLAM"
+validate_bool_toggle RIDGEBACK_PREFER_WIRED "$RIDGEBACK_PREFER_WIRED"
+validate_bool_toggle RIDGEBACK_CONFIGURE_WIRED "$RIDGEBACK_CONFIGURE_WIRED"
 
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
@@ -114,10 +126,67 @@ export RMW_FASTRTPS_USE_SHM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_jetson.xml"
 export RIDGEBACK_ENV_FILE="$RIDGEBACK_WORKSPACE/ridgeback_image_motion/.env"
 
+is_true() {
+    [[ "$1" == "true" ]]
+}
+
 detect_local_ip() {
     hostname -I | tr ' ' '\n' | awk '
         /^[0-9]+\./ && $1 !~ /^127\./ && $1 != "192.168.131.1" { print; exit }
     '
+}
+
+detect_wired_iface() {
+    if [[ "$RIDGEBACK_WIRED_IFACE" != "auto" ]]; then
+        ip link show "$RIDGEBACK_WIRED_IFACE" >/dev/null 2>&1 && echo "$RIDGEBACK_WIRED_IFACE"
+        return
+    fi
+
+    ip -o link show | awk -F': ' '
+        $2 ~ /^(en|eth)/ && $0 ~ /LOWER_UP/ { print $2; exit }
+    '
+}
+
+iface_ipv4_in_subnet() {
+    local iface="$1"
+    ip -4 addr show dev "$iface" 2>/dev/null | awk '
+        /inet 192\.168\.131\./ {
+            split($2, parts, "/")
+            print parts[1]
+            exit
+        }
+    '
+}
+
+ensure_wired_link() {
+    local iface wired_ip
+    iface="$(detect_wired_iface)"
+    if [[ -z "$iface" ]]; then
+        return 1
+    fi
+
+    wired_ip="$(iface_ipv4_in_subnet "$iface")"
+    if [[ -z "$wired_ip" ]] && is_true "$RIDGEBACK_CONFIGURE_WIRED"; then
+        echo "Configuring wired interface $iface with $JETSON_WIRED_CIDR (sudo may prompt)..." >&2
+        if sudo -v; then
+            sudo ip link set "$iface" up >/dev/null 2>&1 || true
+            sudo ip addr add "$JETSON_WIRED_CIDR" dev "$iface" 2>/dev/null || true
+        else
+            echo "WARN: could not get sudo credentials to configure $iface" >&2
+        fi
+        wired_ip="$(iface_ipv4_in_subnet "$iface")"
+    fi
+
+    if [[ -z "$wired_ip" ]]; then
+        return 1
+    fi
+
+    if timeout 1 ping -c 1 -W 1 "$RIDGEBACK_WIRED_IP" >/dev/null 2>&1; then
+        echo "$wired_ip"
+        return 0
+    fi
+
+    return 1
 }
 
 resolve_ipv4() {
@@ -128,8 +197,24 @@ resolve_ipv4() {
     getent ahostsv4 "$host" 2>/dev/null | awk '{ print $1; exit }'
 }
 
+if is_true "$RIDGEBACK_PREFER_WIRED"; then
+    wired_jetson_ip="$(ensure_wired_link || true)"
+    if [[ -n "$wired_jetson_ip" ]]; then
+        if [[ -n "${JETSON_IP:-}" && "$JETSON_IP" != "$wired_jetson_ip" ]]; then
+            echo "WARN: overriding JETSON_IP=$JETSON_IP with wired $wired_jetson_ip" >&2
+        fi
+        JETSON_IP="$wired_jetson_ip"
+    fi
+fi
 JETSON_IP="${JETSON_IP:-$(detect_local_ip)}"
-if [[ -z "${RIDGEBACK_IP:-}" ]]; then
+if is_true "$RIDGEBACK_PREFER_WIRED" \
+    && [[ "${JETSON_IP:-}" == 192.168.131.* ]] \
+    && timeout 1 ping -c 1 -W 1 "$RIDGEBACK_WIRED_IP" >/dev/null 2>&1; then
+    if [[ -n "${RIDGEBACK_IP:-}" && "$RIDGEBACK_IP" != "$RIDGEBACK_WIRED_IP" ]]; then
+        echo "WARN: overriding RIDGEBACK_IP=$RIDGEBACK_IP with wired $RIDGEBACK_WIRED_IP" >&2
+    fi
+    RIDGEBACK_IP="$RIDGEBACK_WIRED_IP"
+elif [[ -z "${RIDGEBACK_IP:-}" ]]; then
     for candidate in \
         "${RIDGEBACK_HOST:-}" \
         "administrator.local" \
@@ -162,6 +247,7 @@ echo "=========================================="
 echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}"
 echo "FastDDS profile: ${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "Jetson IP: ${JETSON_IP:-unknown}  Ridgeback IP: ${RIDGEBACK_IP:-unknown}"
+echo "Network preference: wired=${RIDGEBACK_PREFER_WIRED} configure_wired=${RIDGEBACK_CONFIGURE_WIRED} iface=${RIDGEBACK_WIRED_IFACE} jetson_wired=${JETSON_WIRED_CIDR} ridgeback_wired=${RIDGEBACK_WIRED_IP}"
 echo "Workspace: $RIDGEBACK_WORKSPACE"
 
 # Navigate to workspace
@@ -304,6 +390,21 @@ echo ""
 echo "[4/5] Clearing port 8081..."
 if pids=$(lsof -t -i:8081); then
 	kill $pids 2>/dev/null || true
+fi
+
+if [[ "${RIDGEBACK_SKIP_STALE_CLEANUP:-0}" != "1" ]]; then
+    echo "Clearing stale Ridgeback autonomy processes..."
+    for pattern in \
+        "ros2 launch ridgeback_image_motion autonomy.launch.py" \
+        "ridgeback_image_motion/.*/web_dashboard.py" \
+        "ridgeback_image_motion/.*/room_detector.py" \
+        "ridgeback_image_motion/.*/mission_orchestrator.py" \
+        "ridgeback_image_motion/.*/frontier_explorer.py" \
+        "ridgeback_image_motion/.*/cmd_vel_mux.py" \
+        "ridgeback_image_motion/.*/safety_controller.py" \
+        "ridgeback_image_motion/.*/jetson_watchdog.py"; do
+        pkill -f "$pattern" 2>/dev/null || true
+    done
 fi
 sleep 1
 

@@ -20,6 +20,9 @@ RIDGEBACK_RGB_MAX_WIDTH="${RIDGEBACK_RGB_MAX_WIDTH:-640}"
 RIDGEBACK_DEPTH_MAX_FPS="${RIDGEBACK_DEPTH_MAX_FPS:-1}"
 RIDGEBACK_DEPTH_MAX_WIDTH="${RIDGEBACK_DEPTH_MAX_WIDTH:-320}"
 RIDGEBACK_DEPTH_PNG_COMPRESSION="${RIDGEBACK_DEPTH_PNG_COMPRESSION:-3}"
+RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
+RIDGEBACK_WIRED_IP="${RIDGEBACK_WIRED_IP:-192.168.131.1}"
+JETSON_WIRED_IP="${JETSON_WIRED_IP:-192.168.131.50}"
 
 as_ros_double() {
     local value="$1"
@@ -30,9 +33,41 @@ as_ros_double() {
     fi
 }
 
+is_true() {
+    [[ "$1" == "true" ]]
+}
+
+detect_wired_ridgeback_ip() {
+    ip -4 addr show scope global 2>/dev/null | awk -v preferred="$RIDGEBACK_WIRED_IP" '
+        $1 == "inet" {
+            split($2, parts, "/")
+            if (parts[1] == preferred) {
+                print parts[1]
+                found = 1
+                exit
+            }
+            if (parts[1] ~ /^192\.168\.131\./ && fallback == "") {
+                fallback = parts[1]
+            }
+        }
+        END {
+            if (!found && fallback != "") print fallback
+        }
+    '
+}
+
 detect_local_ip() {
-    hostname -I | tr ' ' '\n' | awk '
-        /^[0-9]+\./ && $1 !~ /^127\./ && $1 != "192.168.131.1" { print; exit }
+    local wired_ip
+    if is_true "$RIDGEBACK_PREFER_WIRED"; then
+        wired_ip="$(detect_wired_ridgeback_ip)"
+        if [[ -n "$wired_ip" ]]; then
+            echo "$wired_ip"
+            return
+        fi
+    fi
+
+    hostname -I | tr ' ' '\n' | awk -v wired="$RIDGEBACK_WIRED_IP" '
+        /^[0-9]+\./ && $1 !~ /^127\./ && $1 != wired { print; exit }
     '
 }
 
@@ -44,8 +79,23 @@ resolve_ipv4() {
     getent ahostsv4 "$host" 2>/dev/null | awk '{ print $1; exit }'
 }
 
+if is_true "$RIDGEBACK_PREFER_WIRED"; then
+    wired_ridgeback_ip="$(detect_wired_ridgeback_ip)"
+    if [[ -n "$wired_ridgeback_ip" ]]; then
+        if [[ -n "${RIDGEBACK_IP:-}" && "$RIDGEBACK_IP" != "$wired_ridgeback_ip" ]]; then
+            echo "WARN: overriding RIDGEBACK_IP=$RIDGEBACK_IP with wired $wired_ridgeback_ip" >&2
+        fi
+        RIDGEBACK_IP="$wired_ridgeback_ip"
+    fi
+fi
+
 RIDGEBACK_IP="${RIDGEBACK_IP:-$(detect_local_ip)}"
-if [[ -z "${JETSON_IP:-}" ]]; then
+if is_true "$RIDGEBACK_PREFER_WIRED" && [[ "${RIDGEBACK_IP:-}" == 192.168.131.* ]]; then
+    if [[ -n "${JETSON_IP:-}" && "$JETSON_IP" != "$JETSON_WIRED_IP" ]]; then
+        echo "WARN: overriding JETSON_IP=$JETSON_IP with wired $JETSON_WIRED_IP" >&2
+    fi
+    JETSON_IP="$JETSON_WIRED_IP"
+elif [[ -z "${JETSON_IP:-}" ]]; then
     JETSON_IP="$(resolve_ipv4 "${JETSON_HOST:-jetson-ridgeback.local}")"
 fi
 
@@ -56,7 +106,7 @@ elif [[ -n "${RIDGEBACK_IP:-}" && -n "${JETSON_IP:-}" ]]; then
     python3 "$RIDGEBACK_WORKSPACE/scripts/generate_fastrtps_profile.py" \
         --local-ip "$RIDGEBACK_IP" \
         --peer-ip "$JETSON_IP" \
-        --peer-ip "192.168.131.1" \
+        --peer-ip "$RIDGEBACK_WIRED_IP" \
         --output "$FASTRTPS_DEFAULT_PROFILES_FILE" >/dev/null
 else
     echo "WARN: using static FastDDS profile; could not infer RIDGEBACK_IP/JETSON_IP"
@@ -68,6 +118,7 @@ echo "=========================================="
 echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}"
 echo "FastDDS profile: ${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "Ridgeback IP: ${RIDGEBACK_IP:-unknown}  Jetson IP: ${JETSON_IP:-unknown}"
+echo "Network preference: wired=${RIDGEBACK_PREFER_WIRED} ridgeback_wired=${RIDGEBACK_WIRED_IP} jetson_wired=${JETSON_WIRED_IP}"
 echo "Workspace: $RIDGEBACK_WORKSPACE"
 
 # Navigate to workspace

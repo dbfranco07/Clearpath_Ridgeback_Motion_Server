@@ -155,12 +155,23 @@ Or use the Jetson autonomy dashboard script:
 bash ~/ridgeback/scripts/ridgeback_web.sh
 ```
 
-If campus WiFi IPs change, prefer deploy-time DDS profile generation instead
-of editing XML by hand:
+The `goridge` scripts prefer the wired Ridgeback link by default:
 
 ```bash
-export JETSON_IP=<jetson-wifi-ip>
-export RIDGEBACK_IP=<ridgeback-wifi-ip>
+# Jetson default wired endpoint
+JETSON_WIRED_CIDR=192.168.131.50/24
+
+# Ridgeback bridge endpoint
+RIDGEBACK_WIRED_IP=192.168.131.1
+```
+
+You normally do not need to export `JETSON_IP` or `RIDGEBACK_IP`; the scripts
+infer them and generate a deploy-time FastDDS profile. If you must override the
+DDS endpoints manually, use the wired addresses:
+
+```bash
+export JETSON_IP=192.168.131.50
+export RIDGEBACK_IP=192.168.131.1
 bash ~/ridgeback/scripts/ridgeback_web.sh
 ```
 
@@ -413,12 +424,12 @@ These are the custom nodes that bridge the **Ridgeback** and the **Jetson contro
 
 #### How It Works
 
-The system runs on **two computers** that communicate over WiFi using **ROS2 DDS** (Domain ID 0) — no broker or central server needed, nodes discover each other automatically.
+The system runs on **two computers** that communicate over ROS2 DDS (Domain ID 0). Prefer the wired Ridgeback link (`192.168.131.x`) for DDS traffic; WiFi should only be a fallback or the laptop-facing access path.
 
 **Image Pipeline (Ridgeback → Jetson → Browser):**
 1. The **RealSense D435** camera captures raw frames
 2. The `/intel_realsense` driver node publishes them as `sensor_msgs/Image`
-3. `/image_publisher` subscribes, compresses each frame to JPEG, and publishes as `CompressedImage` — this reduces bandwidth for WiFi streaming
+3. `/image_publisher` subscribes, compresses each frame to JPEG, and publishes as `CompressedImage` — this reduces RGB-D bandwidth before it crosses the robot network
 4. The **web dashboard** on the Jetson subscribes to the compressed images and streams them as MJPEG video to the browser
 
 **Motion Pipeline (Browser → Jetson → Ridgeback → Wheels):**
