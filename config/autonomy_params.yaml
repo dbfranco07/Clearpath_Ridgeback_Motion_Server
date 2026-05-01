@@ -60,7 +60,7 @@ safety_controller:
     lidar_timeout_s: 1.0
     odom_timeout_s: 1.0
     vlm_timeout_s: 8.0
-    operator_heartbeat_timeout_s: 2.0
+    operator_heartbeat_timeout_s: 4.0
     require_operator_heartbeat: true
     stop_hold_s: 1.0
     check_vlm_network: true
@@ -76,7 +76,7 @@ cmd_vel_mux:
     safety_status_topic: /ridgeback/safety/status
     status_topic: /ridgeback/cmd_vel_mux/status
     nav_timeout_s: 0.75
-    teleop_timeout_s: 0.35
+    teleop_timeout_s: 0.75
     safety_timeout_s: 0.50
     max_linear_mps: 0.45
     max_lateral_mps: 0.35
@@ -109,4 +109,4 @@ ridgeback_dashboard:
     teleop_linear_speed: 0.28
     teleop_lateral_speed: 0.28
     teleop_angular_speed: 0.85
-    teleop_command_max_age_s: 0.75
+    teleop_command_max_age_s: 1.50

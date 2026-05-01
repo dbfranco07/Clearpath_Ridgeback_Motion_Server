@@ -333,6 +333,9 @@ PAGE_HTML = """<!DOCTYPE html>
             <span class="sl">MODE</span><span id="st-teleop" class="sv">idle</span>
             &nbsp;<span class="sl">SOURCE</span><span id="st-source" class="sv">none</span>
           </div>
+          <div class="sr">
+            <span class="sl">BLOCK</span><span id="st-safety-reasons" class="sv">none</span>
+          </div>
         </div>
         <div id="st-log" class="mlog">--</div>
       </div>
@@ -623,7 +626,7 @@ async function pumpTeleop() {
   pendingTeleop = null;
   teleopInFlight = true;
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 350);
+  const timeoutId = setTimeout(() => controller.abort(), 800);
   try {
     await fetch('/api/teleop', {
       method:'POST',
@@ -757,6 +760,11 @@ async function refreshStatus() {
     if (e('st-stop-rec')) e('st-stop-rec').textContent = data.safety?.stop_recommended ? 'YES' : 'NO';
     if (e('st-teleop')) e('st-teleop').textContent = data.teleop?.status || 'idle';
     if (e('st-source')) e('st-source').textContent = data.teleop?.mux?.source || data.teleop?.last?.source || 'none';
+    if (e('st-safety-reasons')) {
+      const reasons = Array.isArray(data.safety?.reasons) ? data.safety.reasons : [];
+      e('st-safety-reasons').textContent = reasons.length ? reasons.slice(0, 3).join(', ') : 'none';
+      e('st-safety-reasons').style.color = reasons.length ? 'var(--danger)' : 'var(--accent)';
+    }
 
     if (e('st-log') && data.logs?.length) {
       const last = data.logs[data.logs.length-1];
@@ -928,7 +936,7 @@ document.addEventListener('visibilitychange', sendHeartbeat);
 setInterval(refreshStatus, 1500);
 setInterval(updateLidar, 500);
 setInterval(updateMapView, 2000);
-setInterval(sendHeartbeat, 1000);
+setInterval(sendHeartbeat, 500);
 
 sendHeartbeat();
 refreshStatus();
@@ -1105,7 +1113,7 @@ class DashboardNode(Node):
         self.safety_warning_m = 0.80
         self.safety_danger_m = 0.45
 
-        self.create_timer(1.0, self._publish_operator_heartbeat)
+        self.create_timer(0.2, self._publish_operator_heartbeat)
         if self.auto_raw_camera_fallback:
             self.create_timer(2.0, self._enable_raw_camera_fallbacks)
 
@@ -1166,7 +1174,7 @@ class DashboardNode(Node):
         self.last_browser_heartbeat_time = time.time()
 
     def _publish_operator_heartbeat(self) -> None:
-        if self.last_browser_heartbeat_time and time.time() - self.last_browser_heartbeat_time <= 2.5:
+        if self.last_browser_heartbeat_time and time.time() - self.last_browser_heartbeat_time <= 5.0:
             self.operator_heartbeat_pub.publish(Bool(data=True))
 
     def _enable_raw_camera_fallbacks(self) -> None:
@@ -1498,6 +1506,7 @@ class DashboardNode(Node):
             "closest_m": closest,
             "warning_threshold_m": self.safety_warning_m,
             "danger_threshold_m": self.safety_danger_m,
+            "reasons": [],
             "risk_level": risk_level,
             "stop_recommended": stop_recommended,
         }
@@ -1582,7 +1591,7 @@ class DashboardNode(Node):
                 "mux": self.mux_status,
                 "operator_heartbeat": {
                     "age_s": heartbeat_age,
-                    "active": heartbeat_age <= 2.5,
+                    "active": heartbeat_age <= 5.0,
                 },
                 "speeds": {
                     "linear": self.teleop_linear_speed,

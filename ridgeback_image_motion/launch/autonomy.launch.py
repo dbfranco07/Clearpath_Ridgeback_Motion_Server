@@ -74,7 +74,9 @@ def generate_launch_description():
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(nav2_launch),
                 launch_arguments={
+                    "namespace": "",
                     "use_sim_time": "false",
+                    "use_composition": "False",
                     "autostart": "true",
                     "params_file": nav2_params,
                 }.items(),
@@ -96,7 +98,7 @@ def generate_launch_description():
         name="jetson_watchdog",
         output="screen",
         parameters=[{
-            "heartbeat_timeout": 2.0,
+            "heartbeat_timeout": 4.0,
             "init_grace_period": 12.0,
             "cmd_vel_topic": "/r100_0140/cmd_vel",
             "require_initial_heartbeat": True,
@@ -117,6 +119,10 @@ def generate_launch_description():
         name="mission_orchestrator",
         output="screen",
         parameters=[autonomy_params],
+        remappings=[
+            ("/tf", "/r100_0140/tf"),
+            ("/tf_static", "/r100_0140/tf_static"),
+        ],
         condition=mission_condition,
     )
 
@@ -126,6 +132,10 @@ def generate_launch_description():
         name="frontier_explorer",
         output="screen",
         parameters=[autonomy_params],
+        remappings=[
+            ("/tf", "/r100_0140/tf"),
+            ("/tf_static", "/r100_0140/tf_static"),
+        ],
         condition=mission_condition,
     )
 
@@ -135,6 +145,10 @@ def generate_launch_description():
         name="room_detector",
         output="screen",
         parameters=[autonomy_params],
+        remappings=[
+            ("/tf", "/r100_0140/tf"),
+            ("/tf_static", "/r100_0140/tf_static"),
+        ],
         condition=vlm_condition,
     )
 
@@ -188,6 +202,11 @@ def generate_launch_description():
                 "depth_topic": PythonExpression([
                     "'/r100_0140/sensors/camera_0/depth/image' if '", profile, "' == 'debug' else ''"
                 ]),
+                "auto_raw_camera_fallback": ParameterValue(
+                    PythonExpression(["'", profile, "' == 'debug'"]),
+                    value_type=bool,
+                ),
+                "raw_fallback_after_s": 4.0,
                 "enable_depth_feed": ParameterValue(
                     PythonExpression(["'", profile, "' in ['mission', 'debug']"]),
                     value_type=bool,
@@ -249,9 +268,9 @@ def generate_launch_description():
             watchdog,
             mux,
             TimerAction(period=1.0, actions=[slam]),
-            TimerAction(period=3.0, actions=[nav2]),
-            TimerAction(period=4.0, actions=[rgbd_odometry, vslam_fusion]),
-            TimerAction(period=6.0, actions=[mission, frontier, room_detector]),
-            TimerAction(period=8.0, actions=[dashboard]),
+            TimerAction(period=8.0, actions=[nav2]),
+            TimerAction(period=10.0, actions=[dashboard]),
+            TimerAction(period=12.0, actions=[rgbd_odometry, vslam_fusion]),
+            TimerAction(period=18.0, actions=[mission, frontier, room_detector]),
         ]
     )

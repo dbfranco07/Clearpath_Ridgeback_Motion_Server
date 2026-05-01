@@ -57,8 +57,10 @@ fi
 echo "=========================================="
 echo "Ridgeback R100 - Jetson Autonomy Dashboard"
 echo "=========================================="
+echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}"
 echo "FastDDS profile: ${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "Jetson IP: ${JETSON_IP:-unknown}  Ridgeback IP: ${RIDGEBACK_IP:-unknown}"
+echo "Workspace: $RIDGEBACK_WORKSPACE"
 
 # Navigate to workspace
 cd "$RIDGEBACK_WORKSPACE"
@@ -88,6 +90,61 @@ fi
 echo ""
 echo "[3/5] Sourcing workspace..."
 source install/setup.bash
+
+topic_publishers() {
+    local topic="$1"
+    timeout 4 ros2 topic info "$topic" 2>/dev/null | awk '/Publisher count:/ { print $3; exit }' || true
+}
+
+topic_status() {
+    local topic="$1"
+    local label="$2"
+    local count
+    count="$(topic_publishers "$topic")"
+    if [[ -n "$count" && "$count" != "0" ]]; then
+        echo "  OK   $label: $topic ($count publisher(s))"
+    else
+        echo "  WARN $label: $topic has no publishers visible yet"
+    fi
+}
+
+sample_stamp_age() {
+    local topic="$1"
+    timeout 6 ros2 topic echo "$topic" --once --field header.stamp 2>/dev/null | awk '
+        /sec:/ { sec=$2 }
+        /nanosec:/ { nsec=$2 }
+        END {
+            if (sec != "") {
+                cmd = "date +%s"
+                cmd | getline now
+                close(cmd)
+                printf "%.1f", now - sec - (nsec / 1000000000.0)
+            }
+        }'
+}
+
+echo ""
+echo "Jetson autonomy preflight:"
+echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-unset}"
+echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
+echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
+echo "  RIDGEBACK_PROFILE=${RIDGEBACK_PROFILE:-mission}"
+topic_status "/r100_0140/sensors/lidar2d_0/scan" "2D LiDAR"
+topic_status "/r100_0140/platform/odom/filtered" "Filtered odom"
+topic_status "/r100_0140/image/compressed" "Compressed RGB"
+topic_status "/r100_0140/image/depth_compressed" "Compressed depth"
+topic_status "/r100_0140/tf" "TF"
+
+scan_age="$(sample_stamp_age "/r100_0140/sensors/lidar2d_0/scan")"
+if [[ -n "$scan_age" ]]; then
+    echo "  LiDAR stamp age: ${scan_age}s"
+    if awk "BEGIN { exit !($scan_age > 2.0 || $scan_age < -2.0) }"; then
+        echo "  WARN LiDAR timestamps differ from Jetson wall clock by more than 2s."
+        echo "       Check chrony/NTP on both Ridgeback and Jetson before trusting SLAM/Nav2."
+    fi
+else
+    echo "  WARN Could not sample LiDAR timestamp for clock-sync check."
+fi
 
 # Kill any previous instance on port 8081
 echo ""

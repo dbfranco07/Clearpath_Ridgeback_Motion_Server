@@ -47,8 +47,10 @@ fi
 echo "=========================================="
 echo "Ridgeback R100 - Start Script"
 echo "=========================================="
+echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}"
 echo "FastDDS profile: ${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "Ridgeback IP: ${RIDGEBACK_IP:-unknown}  Jetson IP: ${JETSON_IP:-unknown}"
+echo "Workspace: $RIDGEBACK_WORKSPACE"
 
 # Navigate to workspace
 cd "$RIDGEBACK_WORKSPACE"
@@ -67,6 +69,29 @@ colcon build --packages-select ridgeback_image_motion
 echo ""
 echo "[3/4] Sourcing workspace..."
 source install/setup.bash
+
+topic_status() {
+    local topic="$1"
+    local label="$2"
+    local count
+    count="$(timeout 3 ros2 topic info "$topic" 2>/dev/null | awk '/Publisher count:/ { print $3; exit }' || true)"
+    if [[ -n "$count" && "$count" != "0" ]]; then
+        echo "  OK   $label: $topic ($count publisher(s))"
+    else
+        echo "  WARN $label: $topic has no publishers visible yet"
+    fi
+}
+
+echo ""
+echo "Ridgeback platform diagnostics:"
+echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-unset}"
+echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
+echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
+topic_status "/r100_0140/sensors/camera_0/color/image" "RGB raw camera"
+topic_status "/r100_0140/sensors/camera_0/depth/image" "Depth raw camera"
+topic_status "/r100_0140/sensors/lidar2d_0/scan" "2D LiDAR"
+topic_status "/r100_0140/platform/odom/filtered" "Filtered odom"
+echo "  This script intentionally starts only motion_server.py and image_publisher.py."
 
 # Cleanup function
 cleanup() {
