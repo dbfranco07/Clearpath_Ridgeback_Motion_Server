@@ -203,5 +203,7 @@ echo "[5/5] Starting Jetson autonomy stack..."
 echo "=========================================="
 echo "Open in browser: http://$(hostname -I | awk '{print $1}'):8081"
 echo "Profile: ${RIDGEBACK_PROFILE:-mission}"
+echo "Manual teleop while Jetson stack is running:"
+echo "  ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/cmd_vel_teleop"
 echo "=========================================="
 ros2 launch ridgeback_image_motion autonomy.launch.py host:=0.0.0.0 port:=8081 profile:=${RIDGEBACK_PROFILE:-mission}
