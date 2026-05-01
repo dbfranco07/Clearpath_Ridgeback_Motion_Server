@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 import threading
 import urllib.request
@@ -49,6 +50,11 @@ class SafetyController(Node):
         self.declare_parameter("check_vlm_network", True)
         self.declare_parameter("vlm_check_period_s", 5.0)
         self.declare_parameter("vlm_http_timeout_s", 1.5)
+        # Forward sector half-angle (radians) used for obstacle stop. Beams
+        # whose bearing falls outside [-half, +half] of robot forward (scan
+        # angle 0 on a chassis-mounted Hokuyo) are ignored, so a wall to the
+        # side or behind the robot cannot trigger a stop on its own.
+        self.declare_parameter("forward_sector_half_angle_rad", math.pi / 3.0)
 
         qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
@@ -80,8 +86,14 @@ class SafetyController(Node):
         self.get_logger().info("safety_controller ready")
 
     def _lidar_cb(self, msg: LaserScan) -> None:
-        finite = [value for value in msg.ranges if msg.range_min <= value <= msg.range_max]
-        self.closest_obstacle_m = min(finite) if finite else 99.0
+        half = float(self.get_parameter("forward_sector_half_angle_rad").value)
+        closest = 99.0
+        angle = msg.angle_min
+        for value in msg.ranges:
+            if msg.range_min <= value <= msg.range_max and abs(angle) <= half and value < closest:
+                closest = value
+            angle += msg.angle_increment
+        self.closest_obstacle_m = closest
         self.last_lidar_time = time.time()
 
     def _odom_cb(self, _: Odometry) -> None:

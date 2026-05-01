@@ -1174,8 +1174,12 @@ class DashboardNode(Node):
         self.last_browser_heartbeat_time = time.time()
 
     def _publish_operator_heartbeat(self) -> None:
-        if self.last_browser_heartbeat_time and time.time() - self.last_browser_heartbeat_time <= 5.0:
-            self.operator_heartbeat_pub.publish(Bool(data=True))
+        # Network-survival heartbeat: as long as the dashboard process is
+        # alive on the Jetson, the autonomy stack is by definition reachable.
+        # Browser activity is tracked separately via last_browser_heartbeat_time
+        # for the status panel + auto-stop-on-blur UX, but the watchdog must
+        # not fire whenever the operator hides the tab.
+        self.operator_heartbeat_pub.publish(Bool(data=True))
 
     def _enable_raw_camera_fallbacks(self) -> None:
         if time.time() - self.started_at < self.raw_fallback_after_s:

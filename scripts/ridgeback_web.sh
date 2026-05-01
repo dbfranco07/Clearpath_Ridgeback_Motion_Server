@@ -145,15 +145,20 @@ wait_for_publishers() {
 
 sample_stamp_age() {
     local topic="$1"
+    # Anchor sec: at the start of the line (after optional whitespace) so it
+    # does not also capture the nanosec: line — the previous regex /sec:/
+    # matched both, leaving sec holding the nanosec value (~10^8) and the
+    # reported age off by ~30 years.
     timeout 6 ros2 topic echo "$topic" --once --field header.stamp 2>/dev/null | awk '
-        /sec:/ { sec=$2 }
-        /nanosec:/ { nsec=$2 }
+        /^[[:space:]]*sec:/ { sec=$2 }
+        /^[[:space:]]*nanosec:/ { nsec=$2 }
         END {
             if (sec != "") {
                 cmd = "date +%s"
                 cmd | getline now
                 close(cmd)
-                printf "%.1f", now - sec - (nsec / 1000000000.0)
+                if (nsec == "") nsec = 0
+                printf "%.3f", now - sec - (nsec / 1000000000.0)
             }
         }'
 }

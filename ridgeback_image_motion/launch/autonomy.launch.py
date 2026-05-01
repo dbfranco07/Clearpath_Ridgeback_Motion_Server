@@ -99,7 +99,7 @@ def generate_launch_description():
         output="screen",
         parameters=[{
             "heartbeat_timeout": 4.0,
-            "init_grace_period": 12.0,
+            "init_grace_period": 20.0,
             "cmd_vel_topic": "/cmd_vel_safety",
             "require_initial_heartbeat": True,
         }],
