@@ -12,6 +12,25 @@ export ROS_DOMAIN_ID=0
 export RMW_FASTRTPS_USE_SHM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_ridgeback.xml"
 
+detect_local_ip() {
+    hostname -I | tr ' ' '\n' | awk '
+        /^[0-9]+\./ && $1 !~ /^127\./ && $1 != "192.168.131.1" { print; exit }
+    '
+}
+
+resolve_ipv4() {
+    local host="$1"
+    if [[ -z "$host" ]]; then
+        return 1
+    fi
+    getent ahostsv4 "$host" 2>/dev/null | awk '{ print $1; exit }'
+}
+
+RIDGEBACK_IP="${RIDGEBACK_IP:-$(detect_local_ip)}"
+if [[ -z "${JETSON_IP:-}" ]]; then
+    JETSON_IP="$(resolve_ipv4 "${JETSON_HOST:-jetson-ridgeback.local}")"
+fi
+
 if [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
     unset FASTRTPS_DEFAULT_PROFILES_FILE
 elif [[ -n "${RIDGEBACK_IP:-}" && -n "${JETSON_IP:-}" ]]; then
@@ -19,12 +38,17 @@ elif [[ -n "${RIDGEBACK_IP:-}" && -n "${JETSON_IP:-}" ]]; then
     python3 "$RIDGEBACK_WORKSPACE/scripts/generate_fastrtps_profile.py" \
         --local-ip "$RIDGEBACK_IP" \
         --peer-ip "$JETSON_IP" \
+        --peer-ip "192.168.131.1" \
         --output "$FASTRTPS_DEFAULT_PROFILES_FILE" >/dev/null
+else
+    echo "WARN: using static FastDDS profile; could not infer RIDGEBACK_IP/JETSON_IP"
 fi
 
 echo "=========================================="
 echo "Ridgeback R100 - Start Script"
 echo "=========================================="
+echo "FastDDS profile: ${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
+echo "Ridgeback IP: ${RIDGEBACK_IP:-unknown}  Jetson IP: ${JETSON_IP:-unknown}"
 
 # Navigate to workspace
 cd "$RIDGEBACK_WORKSPACE"
