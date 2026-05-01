@@ -24,10 +24,12 @@ class ImagePublisher(Node):
         self.declare_parameter('compressed_topic', '/r100_0140/image/compressed')
         self.declare_parameter('depth_image_topic', '/r100_0140/sensors/camera_0/depth/image')
         self.declare_parameter('depth_compressed_topic', '/r100_0140/image/depth_compressed')
-        self.declare_parameter('jpeg_quality', 75)
-        self.declare_parameter('max_fps', 15.0)
-        self.declare_parameter('depth_max_fps', 2.0)
-        self.declare_parameter('depth_png_compression', 1)
+        self.declare_parameter('jpeg_quality', 65)
+        self.declare_parameter('max_fps', 10.0)
+        self.declare_parameter('depth_max_fps', 1.0)
+        self.declare_parameter('depth_png_compression', 3)
+        self.declare_parameter('max_width', 640)
+        self.declare_parameter('depth_max_width', 320)
 
         image_topic = self.get_parameter('image_topic').value
         compressed_topic = self.get_parameter('compressed_topic').value
@@ -37,6 +39,8 @@ class ImagePublisher(Node):
         max_fps = self.get_parameter('max_fps').value
         depth_max_fps = self.get_parameter('depth_max_fps').value
         self.depth_png_compression = int(self.get_parameter('depth_png_compression').value)
+        self.max_width = int(self.get_parameter('max_width').value)
+        self.depth_max_width = int(self.get_parameter('depth_max_width').value)
 
         self.bridge = CvBridge()
         self.min_interval = 1.0 / max(0.1, float(max_fps))
@@ -77,15 +81,29 @@ class ImagePublisher(Node):
         self.get_logger().info('Image Publisher started')
         self.get_logger().info(f'  Subscribing to: {image_topic}')
         self.get_logger().info(f'  Publishing to: {compressed_topic}')
-        self.get_logger().info(f'  JPEG quality: {self.jpeg_quality}, Max FPS: {max_fps}')
+        self.get_logger().info(
+            f'  JPEG quality: {self.jpeg_quality}, Max FPS: {max_fps}, Max width: {self.max_width}'
+        )
         if self.depth_pub is not None:
             self.get_logger().info(f'  Depth subscribing to: {depth_image_topic}')
             self.get_logger().info(f'  Depth publishing to: {depth_compressed_topic}')
             self.get_logger().info(
-                f'  Depth PNG compression: {self.depth_png_compression}, Max FPS: {depth_max_fps}'
+                f'  Depth PNG compression: {self.depth_png_compression}, '
+                f'Max FPS: {depth_max_fps}, Max width: {self.depth_max_width}'
             )
         else:
             self.get_logger().warn('Depth republisher disabled because depth topics are empty')
+
+    @staticmethod
+    def _resize_to_max_width(image: np.ndarray, max_width: int, interpolation: int) -> np.ndarray:
+        if max_width <= 0 or image.ndim < 2:
+            return image
+        height, width = image.shape[:2]
+        if width <= max_width:
+            return image
+        scale = float(max_width) / float(width)
+        new_height = max(1, int(round(height * scale)))
+        return cv2.resize(image, (int(max_width), new_height), interpolation=interpolation)
 
     def image_callback(self, msg):
         # Rate limit
@@ -96,10 +114,14 @@ class ImagePublisher(Node):
 
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+            cv_image = self._resize_to_max_width(cv_image, self.max_width, cv2.INTER_AREA)
 
             # Compress to JPEG
             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality]
-            _, compressed = cv2.imencode('.jpg', cv_image, encode_param)
+            success, compressed = cv2.imencode('.jpg', cv_image, encode_param)
+            if not success:
+                self.get_logger().warn('RGB JPEG compression failed; dropping frame')
+                return
 
             # Create CompressedImage message
             comp_msg = CompressedImage()
@@ -133,23 +155,27 @@ class ImagePublisher(Node):
                 depth = np.clip(depth * 1000.0, 0, 65535).astype(np.uint16)
             elif depth.dtype != np.uint16:
                 depth = np.clip(depth, 0, 65535).astype(np.uint16)
+            depth = self._resize_to_max_width(depth, self.depth_max_width, cv2.INTER_NEAREST)
 
             success, buf = cv2.imencode(
                 '.png',
                 depth,
                 [int(cv2.IMWRITE_PNG_COMPRESSION), max(0, min(9, self.depth_png_compression))],
             )
-            if success:
-                out = CompressedImage()
-                out.header = msg.header
-                out.format = '16UC1; png'
-                out.data = buf.tobytes()
-                self.depth_pub.publish(out)
-                self.depth_frame_count += 1
-                if self.depth_frame_count % 20 == 0:
-                    self.get_logger().info(
-                        f'Published {self.depth_frame_count} compressed depth frames'
-                    )
+            if not success:
+                self.get_logger().warn('Depth PNG compression failed; dropping frame')
+                return
+
+            out = CompressedImage()
+            out.header = msg.header
+            out.format = '16UC1; png'
+            out.data = buf.tobytes()
+            self.depth_pub.publish(out)
+            self.depth_frame_count += 1
+            if self.depth_frame_count % 20 == 0:
+                self.get_logger().info(
+                    f'Published {self.depth_frame_count} compressed depth frames'
+                )
         except Exception as e:
             self.get_logger().error(f'Depth conversion error: {e}')
 

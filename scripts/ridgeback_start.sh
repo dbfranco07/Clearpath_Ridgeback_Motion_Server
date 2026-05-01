@@ -14,6 +14,13 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export RMW_FASTRTPS_USE_SHM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_ridgeback.xml"
 
+RIDGEBACK_JPEG_QUALITY="${RIDGEBACK_JPEG_QUALITY:-65}"
+RIDGEBACK_RGB_MAX_FPS="${RIDGEBACK_RGB_MAX_FPS:-10}"
+RIDGEBACK_RGB_MAX_WIDTH="${RIDGEBACK_RGB_MAX_WIDTH:-640}"
+RIDGEBACK_DEPTH_MAX_FPS="${RIDGEBACK_DEPTH_MAX_FPS:-1}"
+RIDGEBACK_DEPTH_MAX_WIDTH="${RIDGEBACK_DEPTH_MAX_WIDTH:-320}"
+RIDGEBACK_DEPTH_PNG_COMPRESSION="${RIDGEBACK_DEPTH_PNG_COMPRESSION:-3}"
+
 detect_local_ip() {
     hostname -I | tr ' ' '\n' | awk '
         /^[0-9]+\./ && $1 !~ /^127\./ && $1 != "192.168.131.1" { print; exit }
@@ -91,6 +98,8 @@ echo "  ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY:-unset}"
 echo "  RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-unset}"
 echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
+echo "  Image compression: rgb=${RIDGEBACK_RGB_MAX_FPS}fps q=${RIDGEBACK_JPEG_QUALITY} width=${RIDGEBACK_RGB_MAX_WIDTH}"
+echo "  Depth compression: depth=${RIDGEBACK_DEPTH_MAX_FPS}fps png=${RIDGEBACK_DEPTH_PNG_COMPRESSION} width=${RIDGEBACK_DEPTH_MAX_WIDTH}"
 topic_status "/r100_0140/sensors/camera_0/color/image" "RGB raw camera"
 topic_status "/r100_0140/sensors/camera_0/depth/image" "Depth raw camera"
 topic_status "/r100_0140/sensors/lidar2d_0/scan" "2D LiDAR"
@@ -127,7 +136,14 @@ MOTION_PID=$!
 sleep 1
 
 echo "Starting image publisher..."
-ros2 run ridgeback_image_motion image_publisher.py >"$IMAGE_LOG" 2>&1 &
+ros2 run ridgeback_image_motion image_publisher.py --ros-args \
+    -p jpeg_quality:="$RIDGEBACK_JPEG_QUALITY" \
+    -p max_fps:="$RIDGEBACK_RGB_MAX_FPS" \
+    -p max_width:="$RIDGEBACK_RGB_MAX_WIDTH" \
+    -p depth_max_fps:="$RIDGEBACK_DEPTH_MAX_FPS" \
+    -p depth_max_width:="$RIDGEBACK_DEPTH_MAX_WIDTH" \
+    -p depth_png_compression:="$RIDGEBACK_DEPTH_PNG_COMPRESSION" \
+    >"$IMAGE_LOG" 2>&1 &
 IMAGE_PID=$!
 
 # Give nodes a moment to crash if they're going to crash on import.

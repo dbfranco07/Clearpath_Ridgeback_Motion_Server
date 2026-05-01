@@ -1,6 +1,6 @@
 #!/bin/bash
-# Ridgeback R100 - Web Controller Start Script
-# Pulls latest code, builds, and runs web_controller
+# Ridgeback R100 - Jetson Autonomy Dashboard Start Script
+# Pulls latest code, builds, and runs the Jetson autonomy launch stack
 
 set -e
 
@@ -23,7 +23,7 @@ Environment overrides:
   RIDGEBACK_LAUNCH_NAV2     auto|true|false (default: auto)
   RIDGEBACK_LAUNCH_VLM      auto|true|false (default: auto)
   RIDGEBACK_LAUNCH_DASHBOARD auto|true|false (default: auto)
-  RIDGEBACK_LAUNCH_VSLAM    true|false (default: false)
+  RIDGEBACK_LAUNCH_VSLAM    true|false (default: false; keep false until Ethernet/raw RGB-D validation)
 EOF
 }
 

@@ -961,11 +961,12 @@ The dashboard page embeds JavaScript that polls these endpoints every 200-500ms 
 **Why this exists:** The RealSense camera publishes raw images at ~30 FPS. Each 640×480 RGB frame is ~900 KB. At 30 FPS, that is ~27 MB/s — far too much for WiFi. This node:
 
 1. Subscribes to raw images from the RealSense
-2. Rate-limits to 15 FPS
-3. Compresses each frame to JPEG (quality 75) — ~50 KB per frame
-4. Publishes on `/r100_0140/image/compressed`
+2. Rate-limits mission RGB to 10 FPS by default
+3. Downscales RGB to 640 px max width and compresses each frame to JPEG quality 65 by default
+4. Downscales depth to 320 px max width and publishes low-rate PNG depth at 1 FPS by default
+5. Publishes on `/r100_0140/image/compressed` and `/r100_0140/image/depth_compressed`
 
-Result: bandwidth drops from ~27 MB/s to ~0.75 MB/s, which WiFi can handle.
+Result: bandwidth drops from raw RGB-D levels to a small compressed stream that is much safer over WiFi or shared lab networks.
 
 ---
 
@@ -1034,7 +1035,15 @@ curl http://10.158.36.90:8000/v1/models
 
 # 2. Check if images are arriving
 ros2 topic hz /r100_0140/image/compressed
-# Should be ~15 Hz
+# Expected mission default after ridgeback_start.sh: ~10 Hz
+
+# Confirm compressed depth is intentionally low-rate for dashboard diagnostics
+ros2 topic hz /r100_0140/image/depth_compressed
+# Expected mission default after ridgeback_start.sh: ~1 Hz
+
+# Keep VSLAM disabled for the LiDAR-first demo until Ethernet and raw RGB-D bandwidth are verified
+echo "$RIDGEBACK_LAUNCH_VSLAM"
+# Expected: false or unset
 
 # 3. Check VLM node is alive
 ros2 node list | grep vlm

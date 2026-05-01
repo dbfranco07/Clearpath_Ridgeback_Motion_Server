@@ -1,6 +1,6 @@
-# 🤖 Clearpath Ridgeback R100 — Motion Server & Web Controller
+# 🤖 Clearpath Ridgeback R100 — Motion Server & Autonomy Dashboard
 
-A ROS2 Humble package for the **Clearpath Ridgeback R100** omnidirectional robot featuring a motion service server, compressed image publisher, and a web-based teleop dashboard.
+A ROS2 Humble package for the **Clearpath Ridgeback R100** omnidirectional robot featuring a compressed RGB-D publisher, Jetson-hosted autonomy stack, LiDAR SLAM, Nav2, VLM room detection, and a web-based dashboard.
 
 > 🔄 Adapted from the [TurtleBot3 AI361-MEX2](https://github.com/SuperMadee/AI361-MEX2) project for holonomic (omnidirectional) control.
 
@@ -13,9 +13,9 @@ A ROS2 Humble package for the **Clearpath Ridgeback R100** omnidirectional robot
 | 🎯 `srv/Motion.srv` | Custom ROS2 service — supports `linear`, `lateral` (strafe), and `angular` velocity |
 | 🏎️ `ridgeback_image_motion/motion_server.py` | Receives service calls → publishes to `/r100_0140/cmd_vel` |
 | 📷 `ridgeback_image_motion/image_publisher.py` | Subscribes to RealSense raw images → re-publishes as compressed JPEG |
-| 🌐 `ridgeback_image_motion/web_controller.py` | FastAPI web dashboard with MJPEG streaming, LiDAR map, omnidirectional teleop, and live status |
+| 🌐 `ridgeback_image_motion/web_dashboard.py` | FastAPI autonomy dashboard with MJPEG streaming, SLAM map, mission controls, and live status |
 | 🚀 `scripts/ridgeback_start.sh` | Builds & runs motion_server + image_publisher |
-| 🖥️ `scripts/ridgeback_web.sh` | Builds & runs the web controller |
+| 🖥️ `scripts/ridgeback_web.sh` | Builds & runs the Jetson autonomy dashboard stack |
 
 ---
 
@@ -70,7 +70,7 @@ A ROS2 Humble package for the **Clearpath Ridgeback R100** omnidirectional robot
 
 ## 🚀 How to Run
 
-This system uses **two machines** — the Ridgeback's onboard PC runs the motion server and image publisher, while the Jetson runs the web controller. Both must be on the same network and use the same `ROS_DOMAIN_ID`.
+This system uses **two machines** — the Ridgeback's onboard PC runs the image publisher and motion fallback service, while the Jetson runs the web dashboard, safety, SLAM, Nav2, frontier exploration, mission orchestration, and VLM calls. Both must be on the same network and use the same `ROS_DOMAIN_ID`.
 
 ### 📋 Prerequisites: Cloning the Repository
 
@@ -133,7 +133,7 @@ bash ~/ridgeback/scripts/ridgeback_start.sh
 
 ---
 
-### 🖥️ Step 2: Start the Jetson (web controller)
+### 🖥️ Step 2: Start the Jetson (autonomy dashboard)
 
 **Terminal 3** — On the Jetson:
 ```bash
@@ -145,12 +145,12 @@ export RMW_FASTRTPS_USE_SHM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE=~/ridgeback/config/fastrtps_jetson.xml
 colcon build --packages-select ridgeback_image_motion
 source install/setup.bash
-ros2 run ridgeback_image_motion web_controller.py
+ros2 launch ridgeback_image_motion autonomy.launch.py
 ```
 
-> 💡 The FastRTPS profiles tell DDS to connect directly via unicast (Jetson → Ridgeback WiFi IP, Ridgeback → Jetson WiFi IP), since multicast may be blocked on the network.
+> 💡 The FastRTPS profiles tell DDS to connect directly via unicast between the Jetson and Ridgeback, since multicast may be blocked on shared networks.
 
-Or use the web controller script:
+Or use the Jetson autonomy dashboard script:
 ```bash
 bash ~/ridgeback/scripts/ridgeback_web.sh
 ```
@@ -167,6 +167,18 @@ bash ~/ridgeback/scripts/ridgeback_web.sh
 This starts:
 - `autonomy.launch.py` on the Jetson — safety, watchdog, cmd_vel mux, SLAM, Nav2, frontier exploration, room detection, mission orchestration, and the dashboard
 
+LiDAR SLAM is the default mapping path. Keep `RIDGEBACK_LAUNCH_VSLAM=false`
+until the base autonomy stack is stable and you have verified that
+`ip route get 192.168.131.1` uses a wired interface, not `wlan0`.
+
+To verify the Jetson is using Ethernet to reach the Ridgeback:
+
+```bash
+ip -br addr
+ip route get 192.168.131.1
+ping -c 3 192.168.131.1
+```
+
 ---
 
 ### 🌐 Step 3: Open the Dashboard
@@ -174,7 +186,7 @@ This starts:
 Open a browser on any device connected to the same network:
 
 ```
-http://<jetson-ip>:8080
+http://<jetson-ip>:8081
 ```
 
 You should see:
@@ -280,6 +292,7 @@ The PS4 controller works automatically via `clearpath-robot.service` — no extr
 /r100_0140/platform/odom/filtered           → EKF-filtered odometry
 /r100_0140/sensors/camera_0/color/image     → RealSense raw RGB
 /r100_0140/image/compressed                 → Compressed JPEG (published by image_publisher)
+/r100_0140/image/depth_compressed           → Compressed depth PNG (published by image_publisher)
 /r100_0140/sensors/lidar2d_0/scan           → Front LiDAR scan (LaserScan, 25Hz)
 ```
 
@@ -308,10 +321,10 @@ These are the custom nodes that bridge the **Ridgeback** and the **Jetson contro
 
 | Node | Runs On | Role |
 |---|---|---|
-| `/image_publisher` | Ridgeback | Subscribes to raw RealSense images (`/r100_0140/sensors/camera_0/color/image`) and re-publishes as JPEG CompressedImage (`/r100_0140/image/compressed`) at up to 15 FPS |
-| `/motion_server` | Ridgeback | Provides the `motion_service` ROS2 service — receives holonomic motion commands (`linear`, `lateral`, `angular`) and publishes Twist to `/r100_0140/cmd_vel` |
+| `/image_publisher` | Ridgeback | Subscribes to raw RealSense RGB-D topics and republishes compressed RGB/depth topics with bandwidth-safe defaults |
+| `/motion_server` | Ridgeback | Provides the legacy `motion_service` fallback — direct `/r100_0140/cmd_vel` commands should not be the normal autonomy path |
 | `/launch_ros_1219` | Ridgeback | ROS2 launch daemon process that started the custom nodes above |
-| Web Controller *(runs as FastAPI, not a ROS2 node)* | Jetson | Subscribes to compressed images, odometry, and LiDAR — calls `motion_service` on the Ridgeback — serves the web UI |
+| `/ridgeback_dashboard` | Jetson | FastAPI dashboard node that subscribes to compressed images, odometry, LiDAR, map, mission, and safety status, then publishes teleop through `/cmd_vel_teleop` |
 
 ### 🏎️ Drive & Control Nodes
 
@@ -379,23 +392,21 @@ These are the custom nodes that bridge the **Ridgeback** and the **Jetson contro
 │              │        ROS2 DDS Network         │         │
 │              │       (Domain ID = 0)           │         │
 │              └─────────────────────────────────┘         │
-│                                        ▲                 │
-│  /motion_server ◄── motion_service ────┘                 │
-│       │                                                  │
-│       ▼                                                  │
-│  /cmd_vel ──► twist_mux ──► velocity_ctrl ──► motors     │
+│                                                          │
+│  /r100_0140/cmd_vel ──► twist_mux                     │
+│                         └──► velocity_ctrl ──► motors  │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
                            │
                     ROS2 DDS (Domain ID 0)
                            │
 ┌──────────────────────────┴───────────────────────────────┐
-│               JETSON / WEB CONTROLLER                    │
+│               JETSON / AUTONOMY DASHBOARD                │
 │                                                          │
-│  web_controller.py (FastAPI)                             │
+│  web_dashboard.py (FastAPI + ROS node)                   │
 │    ├── subscribes: CompressedImage, Odometry, LaserScan  │
-│    ├── calls: motion_service (client)                    │
-│    └── serves: Web UI at :8080 (MJPEG + teleop)          │
+│    ├── publishes: /cmd_vel_teleop + mission commands     │
+│    └── serves: Web UI at :8081 (MJPEG + teleop)          │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -408,13 +419,13 @@ The system runs on **two computers** that communicate over WiFi using **ROS2 DDS
 1. The **RealSense D435** camera captures raw frames
 2. The `/intel_realsense` driver node publishes them as `sensor_msgs/Image`
 3. `/image_publisher` subscribes, compresses each frame to JPEG, and publishes as `CompressedImage` — this reduces bandwidth for WiFi streaming
-4. The **web controller** on the Jetson subscribes to the compressed images and streams them as MJPEG video to the browser
+4. The **web dashboard** on the Jetson subscribes to the compressed images and streams them as MJPEG video to the browser
 
 **Motion Pipeline (Browser → Jetson → Ridgeback → Wheels):**
 1. User presses a key (e.g. `W` for forward) on the web dashboard
-2. The **web controller** sends a `motion_service` request over ROS2 to the Ridgeback
-3. `/motion_server` receives the request with `linear`, `lateral`, and `angular` values and publishes a `Twist` message to `/cmd_vel`
-4. `twist_mux` selects the highest-priority velocity source (web controller vs. PS4 joystick vs. autonomy)
+2. The **web dashboard** publishes a `Twist` to `/cmd_vel_teleop`
+3. The Jetson `cmd_vel_mux` selects safety, Nav2, or teleop and clamps the command
+4. The mux publishes the selected command to `/r100_0140/cmd_vel`
 5. `velocity_ctrl` converts the Twist into individual wheel speeds
 6. **PUMA motor drivers** spin the 4 omnidirectional wheels
 
@@ -430,6 +441,7 @@ The system runs on **two computers** that communicate over WiFi using **ROS2 DDS
 - cv_bridge
 - FastAPI + Uvicorn (`pip install fastapi uvicorn`)
 - NumPy
+- OpenAI Python client for OpenAI-compatible VLM endpoints
 
 ---
 
