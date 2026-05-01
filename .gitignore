@@ -5,8 +5,21 @@ test.ipynb
 .venv/
 .claude/
 
-# Ignore OnIt local clone
-onit/
+# Ignore most of OnIt
+onit/*
+
+# But track our OnIt integration files
+!onit/src/
+!onit/src/configs/
+!onit/src/configs/ridgeback.yaml
+!onit/src/mcp/
+!onit/src/mcp/servers/
+!onit/src/mcp/servers/configs/
+!onit/src/mcp/servers/configs/default.yaml
+!onit/src/mcp/servers/tasks/
+!onit/src/mcp/servers/tasks/ridgeback/
+!onit/src/mcp/servers/tasks/ridgeback/__init__.py
+!onit/src/mcp/servers/tasks/ridgeback/mcp_server.py
 
 # Ignore ROS2 artifacts
 build/
