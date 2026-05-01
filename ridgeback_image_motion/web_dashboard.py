@@ -1065,6 +1065,10 @@ class DashboardNode(Node):
             "depth_raw": 0,
             "depth_rendered": 0,
             "depth_errors": 0,
+            "odom": 0,
+            "lidar": 0,
+            "battery": 0,
+            "map": 0,
         }
         self.last_depth_error = ""
 
@@ -1072,9 +1076,12 @@ class DashboardNode(Node):
         self.last_odom_time = 0.0
         self.lidar = {"closest_m": 99.0, "range_count": 0,
                       "ranges": [], "angle_min": 0.0, "angle_increment": 0.0, "range_max": 10.0}
+        self.last_lidar_time = 0.0
         self.battery = {"voltage": 0.0, "pct": 0.0}
+        self.last_battery_time = 0.0
         self.map_payload = {"image_bytes": None, "width": 0, "height": 0, "resolution": 0.0, "meta": "Waiting for map", "stamp": ""}
         self.last_map_render_time = 0.0
+        self.last_map_time = 0.0
 
         self.logs: list[dict[str, str]] = []
         self.chat_history: list[dict[str, str]] = []
@@ -1246,6 +1253,7 @@ class DashboardNode(Node):
             self.get_logger().error(f"Raw image cb error: {exc}")
 
     def _odom_cb(self, msg: Odometry) -> None:
+        self.callback_counts["odom"] += 1
         self.last_odom_time = time.time()
         try:
             now = self.get_clock().now()
@@ -1316,6 +1324,8 @@ class DashboardNode(Node):
             self.get_logger().error(f"Raw depth cb error: {exc}")
 
     def _lidar_cb(self, msg: LaserScan) -> None:
+        self.callback_counts["lidar"] += 1
+        self.last_lidar_time = time.time()
         finite_ranges = [value for value in msg.ranges if 0.05 < value < float("inf")]
         self.lidar["closest_m"] = min(finite_ranges) if finite_ranges else 99.0
         self.lidar["range_count"] = len(finite_ranges)
@@ -1325,6 +1335,8 @@ class DashboardNode(Node):
         self.lidar["range_max"] = msg.range_max
 
     def _battery_cb(self, msg: BatteryState) -> None:
+        self.callback_counts["battery"] += 1
+        self.last_battery_time = time.time()
         self.battery["voltage"] = msg.voltage
         self.battery["pct"] = msg.percentage * 100.0 if 0.0 <= msg.percentage <= 1.0 else msg.percentage
 
@@ -1342,6 +1354,8 @@ class DashboardNode(Node):
 
     def _map_cb(self, msg: OccupancyGrid) -> None:
         try:
+            self.callback_counts["map"] += 1
+            self.last_map_time = time.time()
             now = time.time()
             if now - self.last_map_render_time < 1.0 / self.map_render_hz:
                 return
@@ -1498,10 +1512,15 @@ class DashboardNode(Node):
 
         camera_alive = (now - self.last_frame_time) < 5.0 if self.last_frame_time > 0 else False
         depth_alive = (now - self.last_depth_time) < 5.0 if self.last_depth_time > 0 else False
+        odom_alive = (now - self.last_odom_time) < 5.0 if self.last_odom_time > 0 else False
+        lidar_alive = (now - self.last_lidar_time) < 5.0 if self.last_lidar_time > 0 else False
+        battery_alive = (now - self.last_battery_time) < 10.0 if self.last_battery_time > 0 else False
         camera_age_ms = (now - self.last_frame_time) * 1000.0 if self.last_frame_time > 0 else 0.0
         odom_age_ms = (now - self.last_odom_time) * 1000.0 if self.last_odom_time > 0 else 0.0
+        lidar_age_ms = (now - self.last_lidar_time) * 1000.0 if self.last_lidar_time > 0 else 0.0
+        battery_age_ms = (now - self.last_battery_time) * 1000.0 if self.last_battery_time > 0 else 0.0
         map_ready = int(map_payload["width"]) > 0
-        connected = camera_alive or depth_alive or map_ready or int(self.lidar["range_count"]) > 0
+        connected = camera_alive or depth_alive or odom_alive or lidar_alive or battery_alive or map_ready
         heartbeat_age = now - self.last_browser_heartbeat_time if self.last_browser_heartbeat_time else 999.0
 
         return {
@@ -1514,9 +1533,14 @@ class DashboardNode(Node):
             "feeds": {
                 "camera_alive": camera_alive,
                 "depth_alive": depth_alive,
+                "odom_alive": odom_alive,
+                "lidar_alive": lidar_alive,
+                "battery_alive": battery_alive,
                 "map_ready": map_ready,
                 "camera_age_ms": camera_age_ms,
                 "odom_age_ms": odom_age_ms,
+                "lidar_age_ms": lidar_age_ms,
+                "battery_age_ms": battery_age_ms,
             },
             "safety": self.safety_status or self._safety_payload(),
             "map": {
@@ -1661,14 +1685,18 @@ def create_app(node: DashboardNode) -> FastAPI:
             "topics": node.subscription_topics,
             "subscriptions": sorted(node._dashboard_subscriptions.keys()),
             "callbacks": dict(node.callback_counts),
-        "fallback": {
-          "enabled": bool(node.auto_raw_camera_fallback),
-          "after_s": float(node.raw_fallback_after_s),
-          "attempted": dict(node._fallback_attempted),
-        },
+            "fallback": {
+                "enabled": bool(node.auto_raw_camera_fallback),
+                "after_s": float(node.raw_fallback_after_s),
+                "attempted": dict(node._fallback_attempted),
+            },
             "last_error": node.last_depth_error,
             "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
             "depth_age_s": round(now - node.last_depth_time, 2) if node.last_depth_time > 0 else -1.0,
+            "odom_age_s": round(now - node.last_odom_time, 2) if node.last_odom_time > 0 else -1.0,
+            "lidar_age_s": round(now - node.last_lidar_time, 2) if node.last_lidar_time > 0 else -1.0,
+            "battery_age_s": round(now - node.last_battery_time, 2) if node.last_battery_time > 0 else -1.0,
+            "map_age_s": round(now - node.last_map_time, 2) if node.last_map_time > 0 else -1.0,
             "has_rgb_frame": node.latest_frame_copy() is not None,
             "has_depth_frame": node.depth_frame is not None,
             "publishers": {
@@ -1680,6 +1708,10 @@ def create_app(node: DashboardNode) -> FastAPI:
                     node.subscription_topics.get("depth_raw", ""),
                     node.subscription_topics.get("fallback_raw_image", ""),
                     node.subscription_topics.get("fallback_depth_raw", ""),
+                    node.subscription_topics.get("odom", ""),
+                    node.subscription_topics.get("lidar", ""),
+                    node.subscription_topics.get("battery", ""),
+                    node.subscription_topics.get("map", ""),
                 )
                 if topic
             },

@@ -9,7 +9,7 @@ mission_orchestrator:
     stop_topic: /cmd_vel_nav
     navigate_action: navigate_to_pose
     map_frame: map
-    base_frame: base_link
+    base_frame: r100_0140/base_link
     room_min_confidence: 0.55
     start_tolerance_m: 0.45
 
@@ -21,7 +21,7 @@ room_detector:
     detections_topic: /ridgeback/semantic/room_detections
     vlm_status_topic: /ridgeback/vlm/status
     map_frame: map
-    base_frame: base_link
+    base_frame: r100_0140/base_link
     detect_period_s: 7.0
     min_confidence: 0.55
     max_tokens: 240
@@ -38,7 +38,7 @@ frontier_explorer:
     status_topic: /ridgeback/exploration/status
     navigate_action: navigate_to_pose
     map_frame: map
-    base_frame: base_link
+    base_frame: r100_0140/base_link
     min_frontier_size_cells: 8
     occupied_inflation_cells: 8
     goal_check_period_s: 2.0
