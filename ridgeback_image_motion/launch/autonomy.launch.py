@@ -197,7 +197,7 @@ def generate_launch_description():
                 "host": host,
                 "port": port,
                 "raw_image_topic": PythonExpression([
-                    "'/r100_0140/sensors/camera_0/color/image' if '", profile, "' == 'debug' else ''"
+                    "'' if '", profile, "' == 'teleop' else '/r100_0140/sensors/camera_0/color/image'"
                 ]),
                 "depth_topic": PythonExpression([
                     "'/r100_0140/sensors/camera_0/depth/image' if '", profile, "' == 'debug' else ''"

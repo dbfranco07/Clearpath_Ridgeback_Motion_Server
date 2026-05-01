@@ -959,6 +959,7 @@ class DashboardNode(Node):
         self.declare_parameter("depth_topic", "")
         self.declare_parameter("enable_depth_feed", True)
         self.declare_parameter("rgb_stream_hz", 8.0)
+        self.declare_parameter("raw_rgb_render_hz", 8.0)
         self.declare_parameter("depth_render_hz", 4.0)
         self.declare_parameter("map_render_hz", 1.0)
         self.declare_parameter("map_target_long_side", 1000)
@@ -1000,6 +1001,7 @@ class DashboardNode(Node):
         depth_topic = str(self.get_parameter("depth_topic").value).strip()
         self.enable_depth_feed = bool(self.get_parameter("enable_depth_feed").value)
         self.rgb_stream_hz = max(1.0, float(self.get_parameter("rgb_stream_hz").value))
+        self.raw_rgb_render_hz = max(1.0, float(self.get_parameter("raw_rgb_render_hz").value))
         self.depth_render_hz = max(0.5, float(self.get_parameter("depth_render_hz").value))
         self.map_render_hz = max(0.1, float(self.get_parameter("map_render_hz").value))
         self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
@@ -1060,6 +1062,8 @@ class DashboardNode(Node):
         self.latest_frame_stamp = ""
         self.frame_lock = threading.Lock()
         self.last_frame_time = 0.0
+        self.last_raw_rgb_render_time = 0.0
+        self.rgb_frame_source = ""
 
         # Depth camera
         self._bridge = CvBridge()
@@ -1251,10 +1255,15 @@ class DashboardNode(Node):
         with self.frame_lock:
             self.latest_frame = bytes(msg.data)
             self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
+            self.rgb_frame_source = "compressed"
         self.last_frame_time = time.time()
 
     def _raw_image_cb(self, msg: Image) -> None:
         self.callback_counts["raw_image"] += 1
+        now_wall = time.time()
+        if now_wall - self.last_raw_rgb_render_time < 1.0 / self.raw_rgb_render_hz:
+            return
+        self.last_raw_rgb_render_time = now_wall
         try:
             now = self.get_clock().now()
             stamp = rclpy.time.Time.from_msg(msg.header.stamp)
@@ -1270,7 +1279,8 @@ class DashboardNode(Node):
             with self.frame_lock:
                 self.latest_frame = buf.tobytes()
                 self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
-            self.last_frame_time = time.time()
+                self.rgb_frame_source = "raw"
+            self.last_frame_time = now_wall
         except Exception as exc:
             self.get_logger().error(f"Raw image cb error: {exc}")
 
@@ -1576,6 +1586,7 @@ class DashboardNode(Node):
                 "odom_age_ms": odom_age_ms,
                 "lidar_age_ms": lidar_age_ms,
                 "battery_age_ms": battery_age_ms,
+                "camera_source": self.rgb_frame_source,
             },
             "safety": self.safety_status or self._safety_payload(),
             "map": {
@@ -1729,6 +1740,7 @@ def create_app(node: DashboardNode) -> FastAPI:
             },
             "last_error": node.last_depth_error,
             "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
+            "camera_source": node.rgb_frame_source,
             "depth_age_s": round(now - node.last_depth_time, 2) if node.last_depth_time > 0 else -1.0,
             "odom_age_s": round(now - node.last_odom_time, 2) if node.last_odom_time > 0 else -1.0,
             "lidar_age_s": round(now - node.last_lidar_time, 2) if node.last_lidar_time > 0 else -1.0,
