@@ -9,6 +9,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIDGEBACK_WORKSPACE="${RIDGEBACK_WORKSPACE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 export ROS_DOMAIN_ID=0
+export ROS_LOCALHOST_ONLY=0
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export RMW_FASTRTPS_USE_SHM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_ridgeback.xml"
 
@@ -85,6 +87,8 @@ topic_status() {
 echo ""
 echo "Ridgeback platform diagnostics:"
 echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-unset}"
+echo "  ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY:-unset}"
+echo "  RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-unset}"
 echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 topic_status "/r100_0140/sensors/camera_0/color/image" "RGB raw camera"
