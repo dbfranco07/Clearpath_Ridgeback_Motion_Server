@@ -959,7 +959,8 @@ class DashboardNode(Node):
         self.declare_parameter("depth_topic", "")
         self.declare_parameter("enable_depth_feed", True)
         self.declare_parameter("rgb_stream_hz", 8.0)
-        self.declare_parameter("raw_rgb_render_hz", 8.0)
+        self.declare_parameter("raw_rgb_render_hz", 3.0)
+        self.declare_parameter("compressed_rgb_grace_s", 2.0)
         self.declare_parameter("depth_render_hz", 4.0)
         self.declare_parameter("map_render_hz", 1.0)
         self.declare_parameter("map_target_long_side", 1000)
@@ -1002,6 +1003,7 @@ class DashboardNode(Node):
         self.enable_depth_feed = bool(self.get_parameter("enable_depth_feed").value)
         self.rgb_stream_hz = max(1.0, float(self.get_parameter("rgb_stream_hz").value))
         self.raw_rgb_render_hz = max(1.0, float(self.get_parameter("raw_rgb_render_hz").value))
+        self.compressed_rgb_grace_s = max(0.5, float(self.get_parameter("compressed_rgb_grace_s").value))
         self.depth_render_hz = max(0.5, float(self.get_parameter("depth_render_hz").value))
         self.map_render_hz = max(0.1, float(self.get_parameter("map_render_hz").value))
         self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
@@ -1062,6 +1064,7 @@ class DashboardNode(Node):
         self.latest_frame_stamp = ""
         self.frame_lock = threading.Lock()
         self.last_frame_time = 0.0
+        self.last_compressed_frame_time = 0.0
         self.last_raw_rgb_render_time = 0.0
         self.rgb_frame_source = ""
 
@@ -1256,11 +1259,15 @@ class DashboardNode(Node):
             self.latest_frame = bytes(msg.data)
             self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
             self.rgb_frame_source = "compressed"
-        self.last_frame_time = time.time()
+        now_wall = time.time()
+        self.last_compressed_frame_time = now_wall
+        self.last_frame_time = now_wall
 
     def _raw_image_cb(self, msg: Image) -> None:
         self.callback_counts["raw_image"] += 1
         now_wall = time.time()
+        if now_wall - self.last_compressed_frame_time <= self.compressed_rgb_grace_s:
+            return
         if now_wall - self.last_raw_rgb_render_time < 1.0 / self.raw_rgb_render_hz:
             return
         self.last_raw_rgb_render_time = now_wall
@@ -1740,6 +1747,7 @@ def create_app(node: DashboardNode) -> FastAPI:
             },
             "last_error": node.last_depth_error,
             "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
+            "compressed_camera_age_s": round(now - node.last_compressed_frame_time, 2) if node.last_compressed_frame_time > 0 else -1.0,
             "camera_source": node.rgb_frame_source,
             "depth_age_s": round(now - node.last_depth_time, 2) if node.last_depth_time > 0 else -1.0,
             "odom_age_s": round(now - node.last_odom_time, 2) if node.last_odom_time > 0 else -1.0,
