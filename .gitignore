@@ -6,8 +6,7 @@ test.ipynb
 .claude/
 
 # Ignore OnIt local clone
-onit/*
-!onit/requirements.txt
+onit/
 
 # Ignore ROS2 artifacts
 build/
