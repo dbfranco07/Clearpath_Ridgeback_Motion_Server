@@ -203,7 +203,7 @@ def generate_launch_description():
                     "'/r100_0140/sensors/camera_0/depth/image' if '", profile, "' == 'debug' else ''"
                 ]),
                 "auto_raw_camera_fallback": ParameterValue(
-                    PythonExpression(["'", profile, "' == 'debug'"]),
+                    PythonExpression(["'", profile, "' in ['mission', 'debug']"]),
                     value_type=bool,
                 ),
                 "raw_fallback_after_s": 8.0,

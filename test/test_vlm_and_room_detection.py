@@ -27,6 +27,17 @@ def test_room_detector_throttles_vlm_calls_by_time_and_motion() -> None:
     assert "self._movement_gate_passed()" in detector
 
 
+def test_room_detector_subscribes_to_primary_and_fallback_camera_topics() -> None:
+    params = read_repo_file("config", "autonomy_params.yaml")
+    detector = read_repo_file("ridgeback_image_motion", "room_detector.py")
+    assert "fallback_image_topic: /r100_0140/sensors/camera_0/color/compressed" in params
+    assert "self.image_subscriptions" in detector
+    assert "fallback_image_topic" in detector
+    assert "lambda msg, source=source, topic=topic" in detector
+    assert "frame_source" in detector
+    assert "frame_topic" in detector
+
+
 def test_vlm_endpoint_config_defaults_to_remote_and_normalizes_url() -> None:
     vlm = read_repo_file("ridgeback_image_motion", "vlm_client.py")
     env = read_repo_file("ridgeback_image_motion", ".env")

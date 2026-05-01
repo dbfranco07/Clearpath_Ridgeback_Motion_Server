@@ -984,6 +984,7 @@ class DashboardNode(Node):
         self.declare_parameter("teleop_repeat_hz", 20.0)
         self.declare_parameter("auto_raw_camera_fallback", True)
         self.declare_parameter("raw_fallback_after_s", 8.0)
+        self.declare_parameter("fallback_compressed_image_topic", "/r100_0140/sensors/camera_0/color/compressed")
         self.declare_parameter("fallback_raw_image_topic", "/r100_0140/sensors/camera_0/color/image")
         self.declare_parameter("fallback_depth_topic", "/r100_0140/sensors/camera_0/depth/image")
 
@@ -1009,10 +1010,12 @@ class DashboardNode(Node):
         self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
         self.auto_raw_camera_fallback = bool(self.get_parameter("auto_raw_camera_fallback").value)
         self.raw_fallback_after_s = max(2.0, float(self.get_parameter("raw_fallback_after_s").value))
+        self.fallback_compressed_image_topic = str(self.get_parameter("fallback_compressed_image_topic").value).strip()
         self.fallback_raw_image_topic = str(self.get_parameter("fallback_raw_image_topic").value).strip()
         self.fallback_depth_topic = str(self.get_parameter("fallback_depth_topic").value).strip()
         self.started_at = time.time()
         self._fallback_attempted = {
+            "image_fallback": False,
             "raw_image": False,
             "depth_raw": False,
         }
@@ -1023,6 +1026,7 @@ class DashboardNode(Node):
             "raw_image": raw_image_topic,
             "depth_compressed": depth_compressed_topic if self.enable_depth_feed else "",
             "depth_raw": depth_topic if self.enable_depth_feed else "",
+            "fallback_compressed_image": self.fallback_compressed_image_topic if self.auto_raw_camera_fallback else "",
             "fallback_raw_image": self.fallback_raw_image_topic if self.auto_raw_camera_fallback else "",
             "fallback_depth_raw": self.fallback_depth_topic if (self.auto_raw_camera_fallback and self.enable_depth_feed) else "",
             "odom": str(self.get_parameter("odom_topic").value),
@@ -1032,13 +1036,33 @@ class DashboardNode(Node):
         }
 
         if image_topic:
-            self._dashboard_subscriptions["image"] = self.create_subscription(CompressedImage, image_topic, self._image_cb, compressed_qos)
+            self._dashboard_subscriptions["image"] = self.create_subscription(
+                CompressedImage,
+                image_topic,
+                lambda msg, topic=image_topic: self._image_cb(msg, "compressed", topic),
+                compressed_qos,
+            )
         if raw_image_topic:
-            self._dashboard_subscriptions["raw_image"] = self.create_subscription(Image, raw_image_topic, self._raw_image_cb, sensor_qos)
+            self._dashboard_subscriptions["raw_image"] = self.create_subscription(
+                Image,
+                raw_image_topic,
+                lambda msg, topic=raw_image_topic: self._raw_image_cb(msg, "raw", topic),
+                sensor_qos,
+            )
         if self.enable_depth_feed and depth_compressed_topic:
-            self._dashboard_subscriptions["depth_compressed"] = self.create_subscription(CompressedImage, depth_compressed_topic, self._depth_compressed_cb, compressed_qos)
+            self._dashboard_subscriptions["depth_compressed"] = self.create_subscription(
+                CompressedImage,
+                depth_compressed_topic,
+                lambda msg, topic=depth_compressed_topic: self._depth_compressed_cb(msg, "depth_compressed", topic),
+                compressed_qos,
+            )
         if self.enable_depth_feed and depth_topic:
-            self._dashboard_subscriptions["depth_raw"] = self.create_subscription(Image, depth_topic, self._depth_cb, sensor_qos)
+            self._dashboard_subscriptions["depth_raw"] = self.create_subscription(
+                Image,
+                depth_topic,
+                lambda msg, topic=depth_topic: self._depth_cb(msg, "depth_raw", topic),
+                sensor_qos,
+            )
         self._dashboard_subscriptions["odom"] = self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self._dashboard_subscriptions["lidar"] = self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
         self._dashboard_subscriptions["battery"] = self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
@@ -1067,6 +1091,8 @@ class DashboardNode(Node):
         self.last_compressed_frame_time = 0.0
         self.last_raw_rgb_render_time = 0.0
         self.rgb_frame_source = ""
+        self.rgb_frame_topic = ""
+        self.last_rgb_stale_reason = "no_rgb_frame"
 
         # Depth camera
         self._bridge = CvBridge()
@@ -1077,8 +1103,12 @@ class DashboardNode(Node):
         self.last_depth_render_time = 0.0
         self.depth_compressed_frame: bytes | None = None
         self.depth_compressed_format = ""
+        self.depth_frame_source = ""
+        self.depth_frame_topic = ""
+        self.last_depth_stale_reason = "no_depth_frame"
         self.callback_counts = {
             "image": 0,
+            "image_fallback": 0,
             "raw_image": 0,
             "depth_compressed": 0,
             "depth_raw": 0,
@@ -1138,12 +1168,13 @@ class DashboardNode(Node):
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
         self.get_logger().info(
-          "Dashboard topics: compressed=%s raw=%s depth_compressed=%s depth_raw=%s fallback_raw=%s fallback_depth=%s cmd_vel=%s"
+          "Dashboard topics: compressed=%s raw=%s depth_compressed=%s depth_raw=%s fallback_compressed=%s fallback_raw=%s fallback_depth=%s cmd_vel=%s"
             % (
                 image_topic or "disabled",
                 raw_image_topic or "disabled",
                 depth_compressed_topic if self.enable_depth_feed else "disabled",
                 depth_topic if self.enable_depth_feed else "disabled",
+              self.fallback_compressed_image_topic if self.auto_raw_camera_fallback else "disabled",
               self.fallback_raw_image_topic if self.auto_raw_camera_fallback else "disabled",
               self.fallback_depth_topic if (self.auto_raw_camera_fallback and self.enable_depth_feed) else "disabled",
                 self.get_parameter("cmd_vel_topic").value,
@@ -1203,14 +1234,59 @@ class DashboardNode(Node):
         # not fire whenever the operator hides the tab.
         self.operator_heartbeat_pub.publish(Bool(data=True))
 
+    def _rgb_stale_reason(self, now: float | None = None) -> str:
+        now = time.time() if now is None else now
+        if self.last_frame_time <= 0.0:
+            return "no_rgb_callbacks"
+        age = now - self.last_frame_time
+        if age > self.raw_fallback_after_s:
+            return f"rgb_stale_{age:.1f}s"
+        return ""
+
+    def _depth_stale_reason(self, now: float | None = None) -> str:
+        if not self.enable_depth_feed:
+            return "depth_disabled"
+        now = time.time() if now is None else now
+        if self.last_depth_time <= 0.0:
+            return "no_depth_callbacks"
+        age = now - self.last_depth_time
+        if age > self.raw_fallback_after_s:
+            return f"depth_stale_{age:.1f}s"
+        return ""
+
     def _enable_raw_camera_fallbacks(self) -> None:
         now = time.time()
         if now - self.started_at < self.raw_fallback_after_s:
             return
 
-        camera_stale = self.last_frame_time <= 0.0 or (now - self.last_frame_time) > self.raw_fallback_after_s
+        self.last_rgb_stale_reason = self._rgb_stale_reason(now)
+        self.last_depth_stale_reason = self._depth_stale_reason(now)
+        camera_stale = bool(self.last_rgb_stale_reason)
+        compressed_fallback_was_attempted = self._fallback_attempted["image_fallback"]
         if (
             camera_stale
+            and "image_fallback" not in self._dashboard_subscriptions
+            and not self._fallback_attempted["image_fallback"]
+        ):
+            topic = self.fallback_compressed_image_topic
+            if topic:
+                self._fallback_attempted["image_fallback"] = True
+                try:
+                    self._dashboard_subscriptions["image_fallback"] = self.create_subscription(
+                        CompressedImage,
+                        topic,
+                        lambda msg, topic=topic: self._image_cb(msg, "compressed_fallback", topic),
+                        self._compressed_qos,
+                    )
+                    self.subscription_topics["fallback_compressed_image"] = topic
+                    self.add_log("camera", f"RGB compressed fallback enabled: {topic}")
+                    self.get_logger().warn(f"Enabled RGB compressed fallback subscription on {topic}")
+                except Exception as exc:
+                    self.add_log("camera", f"RGB compressed fallback subscribe failed: {exc}")
+
+        if (
+            camera_stale
+            and compressed_fallback_was_attempted
             and "raw_image" not in self._dashboard_subscriptions
             and not self._fallback_attempted["raw_image"]
         ):
@@ -1221,7 +1297,7 @@ class DashboardNode(Node):
                     self._dashboard_subscriptions["raw_image"] = self.create_subscription(
                         Image,
                         topic,
-                        self._raw_image_cb,
+                        lambda msg, topic=topic: self._raw_image_cb(msg, "raw_fallback", topic),
                         self._sensor_qos,
                     )
                     self.subscription_topics["raw_image"] = topic
@@ -1233,7 +1309,7 @@ class DashboardNode(Node):
         if not self.enable_depth_feed:
             return
 
-        depth_stale = self.last_depth_time <= 0.0 or (now - self.last_depth_time) > self.raw_fallback_after_s
+        depth_stale = bool(self.last_depth_stale_reason and self.last_depth_stale_reason != "depth_disabled")
         if (
             depth_stale
             and "depth_raw" not in self._dashboard_subscriptions
@@ -1246,7 +1322,7 @@ class DashboardNode(Node):
                     self._dashboard_subscriptions["depth_raw"] = self.create_subscription(
                         Image,
                         topic,
-                        self._depth_cb,
+                        lambda msg, topic=topic: self._depth_cb(msg, "depth_raw_fallback", topic),
                         self._sensor_qos,
                     )
                     self.subscription_topics["depth_raw"] = topic
@@ -1255,8 +1331,10 @@ class DashboardNode(Node):
                 except Exception as exc:
                     self.add_log("camera", f"Depth fallback subscribe failed: {exc}")
 
-    def _image_cb(self, msg: CompressedImage) -> None:
+    def _image_cb(self, msg: CompressedImage, source: str = "compressed", topic: str = "") -> None:
         self.callback_counts["image"] += 1
+        if source == "compressed_fallback":
+            self.callback_counts["image_fallback"] += 1
         try:
             now = self.get_clock().now()
             stamp = rclpy.time.Time.from_msg(msg.header.stamp)
@@ -1266,12 +1344,14 @@ class DashboardNode(Node):
         with self.frame_lock:
             self.latest_frame = bytes(msg.data)
             self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
-            self.rgb_frame_source = "compressed"
+            self.rgb_frame_source = source
+            self.rgb_frame_topic = topic
         now_wall = time.time()
         self.last_compressed_frame_time = now_wall
         self.last_frame_time = now_wall
+        self.last_rgb_stale_reason = ""
 
-    def _raw_image_cb(self, msg: Image) -> None:
+    def _raw_image_cb(self, msg: Image, source: str = "raw", topic: str = "") -> None:
         self.callback_counts["raw_image"] += 1
         now_wall = time.time()
         if now_wall - self.last_compressed_frame_time <= self.compressed_rgb_grace_s:
@@ -1294,8 +1374,10 @@ class DashboardNode(Node):
             with self.frame_lock:
                 self.latest_frame = buf.tobytes()
                 self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
-                self.rgb_frame_source = "raw"
+                self.rgb_frame_source = source
+                self.rgb_frame_topic = topic
             self.last_frame_time = now_wall
+            self.last_rgb_stale_reason = ""
         except Exception as exc:
             self.get_logger().error(f"Raw image cb error: {exc}")
 
@@ -1315,7 +1397,7 @@ class DashboardNode(Node):
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         self.odom["yaw"] = math.degrees(math.atan2(siny_cosp, cosy_cosp))
 
-    def _store_depth_visualization(self, depth: np.ndarray, encoding: str) -> None:
+    def _store_depth_visualization(self, depth: np.ndarray, encoding: str, source: str = "", topic: str = "") -> None:
         try:
             depth_mm = np.asarray(depth, dtype=np.float32)
             if np.issubdtype(np.asarray(depth).dtype, np.floating) or "32F" in encoding:
@@ -1329,6 +1411,9 @@ class DashboardNode(Node):
                 with self.depth_lock:
                     self.depth_frame = buf.tobytes()
                 self.last_depth_time = time.time()
+                self.depth_frame_source = source
+                self.depth_frame_topic = topic
+                self.last_depth_stale_reason = ""
                 self.callback_counts["depth_rendered"] += 1
                 self.depth_event.set()
         except Exception as exc:
@@ -1336,9 +1421,12 @@ class DashboardNode(Node):
             self.last_depth_error = str(exc)
             self.get_logger().error(f"Depth visualization error: {exc}")
 
-    def _depth_compressed_cb(self, msg: CompressedImage) -> None:
+    def _depth_compressed_cb(self, msg: CompressedImage, source: str = "depth_compressed", topic: str = "") -> None:
         self.callback_counts["depth_compressed"] += 1
         self.last_depth_time = time.time()
+        self.depth_frame_source = source
+        self.depth_frame_topic = topic
+        self.last_depth_stale_reason = ""
         if self.last_depth_time - self.last_depth_render_time < 1.0 / self.depth_render_hz:
             return
         self.last_depth_render_time = self.last_depth_time
@@ -1346,7 +1434,7 @@ class DashboardNode(Node):
             encoded = np.frombuffer(bytes(msg.data), dtype=np.uint8)
             depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
             if depth is not None:
-                self._store_depth_visualization(depth, msg.format)
+                self._store_depth_visualization(depth, msg.format, source, topic)
             else:
                 self.callback_counts["depth_errors"] += 1
                 self.last_depth_error = "cv2.imdecode returned None"
@@ -1355,16 +1443,19 @@ class DashboardNode(Node):
             self.last_depth_error = str(exc)
             self.get_logger().error(f"Compressed depth render error: {exc}")
 
-    def _depth_cb(self, msg: Image) -> None:
+    def _depth_cb(self, msg: Image, source: str = "depth_raw", topic: str = "") -> None:
         self.callback_counts["depth_raw"] += 1
         now = time.time()
         self.last_depth_time = now
+        self.depth_frame_source = source
+        self.depth_frame_topic = topic
+        self.last_depth_stale_reason = ""
         if now - self.last_depth_render_time < 1.0 / self.depth_render_hz:
             return
         self.last_depth_render_time = now
         try:
             depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-            self._store_depth_visualization(depth, msg.encoding)
+            self._store_depth_visualization(depth, msg.encoding, source, topic)
         except Exception as exc:
             self.callback_counts["depth_errors"] += 1
             self.last_depth_error = str(exc)
@@ -1602,6 +1693,11 @@ class DashboardNode(Node):
                 "lidar_age_ms": lidar_age_ms,
                 "battery_age_ms": battery_age_ms,
                 "camera_source": self.rgb_frame_source,
+                "camera_topic": self.rgb_frame_topic,
+                "camera_stale_reason": self.last_rgb_stale_reason or self._rgb_stale_reason(now),
+                "depth_source": self.depth_frame_source,
+                "depth_topic": self.depth_frame_topic,
+                "depth_stale_reason": self.last_depth_stale_reason or self._depth_stale_reason(now),
             },
             "safety": self.safety_status or self._safety_payload(),
             "map": {
@@ -1775,7 +1871,12 @@ def create_app(node: DashboardNode) -> FastAPI:
             "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
             "compressed_camera_age_s": round(now - node.last_compressed_frame_time, 2) if node.last_compressed_frame_time > 0 else -1.0,
             "camera_source": node.rgb_frame_source,
+            "camera_topic": node.rgb_frame_topic,
+            "camera_stale_reason": node.last_rgb_stale_reason or node._rgb_stale_reason(now),
             "depth_age_s": round(now - node.last_depth_time, 2) if node.last_depth_time > 0 else -1.0,
+            "depth_source": node.depth_frame_source,
+            "depth_topic": node.depth_frame_topic,
+            "depth_stale_reason": node.last_depth_stale_reason or node._depth_stale_reason(now),
             "odom_age_s": round(now - node.last_odom_time, 2) if node.last_odom_time > 0 else -1.0,
             "lidar_age_s": round(now - node.last_lidar_time, 2) if node.last_lidar_time > 0 else -1.0,
             "battery_age_s": round(now - node.last_battery_time, 2) if node.last_battery_time > 0 else -1.0,
@@ -1786,6 +1887,7 @@ def create_app(node: DashboardNode) -> FastAPI:
                 topic: node.count_publishers(topic)
                 for topic in (
                     node.subscription_topics.get("image", ""),
+                    node.subscription_topics.get("fallback_compressed_image", ""),
                     node.subscription_topics.get("depth_compressed", ""),
                     node.subscription_topics.get("raw_image", ""),
                     node.subscription_topics.get("depth_raw", ""),

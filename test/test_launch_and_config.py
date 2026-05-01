@@ -70,6 +70,33 @@ def test_protected_ridgeback_start_contract_remains_minimal() -> None:
     assert "slam" not in script.lower()
 
 
+def test_dashboard_camera_fallbacks_are_available_in_mission_profile() -> None:
+    launch = read_repo_file("ridgeback_image_motion", "launch", "autonomy.launch.py")
+    dashboard = read_repo_file("ridgeback_image_motion", "web_dashboard.py")
+    params = read_repo_file("config", "autonomy_params.yaml")
+
+    assert "auto_raw_camera_fallback" in launch
+    assert "' in ['mission', 'debug']" in launch
+    assert "fallback_compressed_image_topic" in dashboard
+    assert "/r100_0140/sensors/camera_0/color/compressed" in params
+    assert "/r100_0140/sensors/camera_0/color/image" in params
+    assert "/r100_0140/sensors/camera_0/depth/image" in params
+
+
+def test_dashboard_debug_reports_camera_fallback_state() -> None:
+    dashboard = read_repo_file("ridgeback_image_motion", "web_dashboard.py")
+    for token in (
+        "camera_stale_reason",
+        "depth_stale_reason",
+        "camera_topic",
+        "depth_topic",
+        "image_fallback",
+        "compressed_fallback",
+        "raw_fallback",
+    ):
+        assert token in dashboard
+
+
 def test_vslam_config_is_present_but_not_default_enabled() -> None:
     launch = read_repo_file("ridgeback_image_motion", "launch", "autonomy.launch.py")
     vslam = read_repo_file("config", "vslam_params.yaml")

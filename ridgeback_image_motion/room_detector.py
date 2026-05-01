@@ -43,6 +43,7 @@ class RoomDetector(Node):
         super().__init__("room_detector")
 
         self.declare_parameter("image_topic", "/r100_0140/image/compressed")
+        self.declare_parameter("fallback_image_topic", "/r100_0140/sensors/camera_0/color/compressed")
         self.declare_parameter("odom_topic", "/r100_0140/platform/odom/filtered")
         self.declare_parameter("mission_status_topic", "/ridgeback/mission/status")
         self.declare_parameter("detections_topic", "/ridgeback/semantic/room_detections")
@@ -60,7 +61,24 @@ class RoomDetector(Node):
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
-        self.create_subscription(CompressedImage, self.get_parameter("image_topic").value, self._image_cb, sensor_qos)
+        self.image_subscriptions = []
+        image_topics = [
+            ("primary", str(self.get_parameter("image_topic").value).strip()),
+            ("fallback", str(self.get_parameter("fallback_image_topic").value).strip()),
+        ]
+        seen_topics = set()
+        for source, topic in image_topics:
+            if not topic or topic in seen_topics:
+                continue
+            seen_topics.add(topic)
+            self.image_subscriptions.append(
+                self.create_subscription(
+                    CompressedImage,
+                    topic,
+                    lambda msg, source=source, topic=topic: self._image_cb(msg, source, topic),
+                    sensor_qos,
+                )
+            )
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
         self.detection_pub = self.create_publisher(String, self.get_parameter("detections_topic").value, reliable_qos)
@@ -71,6 +89,8 @@ class RoomDetector(Node):
         self.vlm_client, self.vlm_config = build_vlm_client()
         self.latest_frame: bytes | None = None
         self.latest_frame_stamp = ""
+        self.latest_frame_source = ""
+        self.latest_frame_topic = ""
         self.pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self.mission_state = "IDLE"
         self.target_room = ""
@@ -79,11 +99,16 @@ class RoomDetector(Node):
         self.last_vlm_pose: dict[str, float] | None = None
 
         self.create_timer(0.5, self._tick)
-        self.get_logger().info(f"room_detector ready: {self.vlm_config.base_url} model={self.vlm_config.model_name}")
+        self.get_logger().info(
+            f"room_detector ready: {self.vlm_config.base_url} model={self.vlm_config.model_name} "
+            f"image_topics={', '.join(topic for _, topic in image_topics if topic)}"
+        )
 
-    def _image_cb(self, msg: CompressedImage) -> None:
+    def _image_cb(self, msg: CompressedImage, source: str = "primary", topic: str = "") -> None:
         self.latest_frame = bytes(msg.data)
         self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
+        self.latest_frame_source = source
+        self.latest_frame_topic = topic
 
     def _odom_cb(self, msg: Odometry) -> None:
         self.pose["x"] = float(msg.pose.pose.position.x)
@@ -256,6 +281,9 @@ class RoomDetector(Node):
             "endpoint": self.vlm_config.base_url,
             "model": self.vlm_config.model_name,
             "detection_count": int(detection_count),
+            "frame_source": self.latest_frame_source,
+            "frame_topic": self.latest_frame_topic,
+            "frame_stamp": self.latest_frame_stamp,
         }
         self.status_pub.publish(String(data=json_dumps(payload)))
 
