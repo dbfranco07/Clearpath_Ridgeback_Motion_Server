@@ -7,6 +7,106 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIDGEBACK_WORKSPACE="${RIDGEBACK_WORKSPACE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") [options]
+
+Options:
+  --no-nav2                 Start the Jetson stack with Nav2 disabled
+  --nav2                    Force Nav2 on
+  --profile <profile>       Runtime profile: teleop, mapping, mission, debug
+  -h, --help                Show this help
+
+Environment overrides:
+  RIDGEBACK_PROFILE         Runtime profile (default: mission)
+  RIDGEBACK_LAUNCH_SLAM     auto|true|false (default: auto)
+  RIDGEBACK_LAUNCH_NAV2     auto|true|false (default: auto)
+  RIDGEBACK_LAUNCH_VLM      auto|true|false (default: auto)
+  RIDGEBACK_LAUNCH_DASHBOARD auto|true|false (default: auto)
+  RIDGEBACK_LAUNCH_VSLAM    true|false (default: false)
+EOF
+}
+
+RIDGEBACK_PROFILE="${RIDGEBACK_PROFILE:-mission}"
+RIDGEBACK_LAUNCH_SLAM="${RIDGEBACK_LAUNCH_SLAM:-auto}"
+RIDGEBACK_LAUNCH_NAV2="${RIDGEBACK_LAUNCH_NAV2:-auto}"
+RIDGEBACK_LAUNCH_VLM="${RIDGEBACK_LAUNCH_VLM:-auto}"
+RIDGEBACK_LAUNCH_DASHBOARD="${RIDGEBACK_LAUNCH_DASHBOARD:-auto}"
+RIDGEBACK_LAUNCH_VSLAM="${RIDGEBACK_LAUNCH_VSLAM:-false}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-nav2)
+            RIDGEBACK_LAUNCH_NAV2=false
+            shift
+            ;;
+        --nav2)
+            RIDGEBACK_LAUNCH_NAV2=true
+            shift
+            ;;
+        --profile)
+            if [[ -z "${2:-}" ]]; then
+                echo "ERROR: --profile requires one of: teleop, mapping, mission, debug" >&2
+                usage >&2
+                exit 2
+            fi
+            RIDGEBACK_PROFILE="$2"
+            shift 2
+            ;;
+        --profile=*)
+            RIDGEBACK_PROFILE="${1#*=}"
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown option: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+case "$RIDGEBACK_PROFILE" in
+    teleop|mapping|mission|debug) ;;
+    *)
+        echo "ERROR: invalid RIDGEBACK_PROFILE=$RIDGEBACK_PROFILE (expected teleop, mapping, mission, or debug)" >&2
+        exit 2
+        ;;
+esac
+
+validate_launch_toggle() {
+    local name="$1"
+    local value="$2"
+    case "$value" in
+        auto|true|false) ;;
+        *)
+            echo "ERROR: $name must be auto, true, or false (got: $value)" >&2
+            exit 2
+            ;;
+    esac
+}
+
+validate_bool_toggle() {
+    local name="$1"
+    local value="$2"
+    case "$value" in
+        true|false) ;;
+        *)
+            echo "ERROR: $name must be true or false (got: $value)" >&2
+            exit 2
+            ;;
+    esac
+}
+
+validate_launch_toggle RIDGEBACK_LAUNCH_SLAM "$RIDGEBACK_LAUNCH_SLAM"
+validate_launch_toggle RIDGEBACK_LAUNCH_NAV2 "$RIDGEBACK_LAUNCH_NAV2"
+validate_launch_toggle RIDGEBACK_LAUNCH_VLM "$RIDGEBACK_LAUNCH_VLM"
+validate_launch_toggle RIDGEBACK_LAUNCH_DASHBOARD "$RIDGEBACK_LAUNCH_DASHBOARD"
+validate_bool_toggle RIDGEBACK_LAUNCH_VSLAM "$RIDGEBACK_LAUNCH_VSLAM"
+
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
@@ -170,7 +270,12 @@ echo "  ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY:-unset}"
 echo "  RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-unset}"
 echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
-echo "  RIDGEBACK_PROFILE=${RIDGEBACK_PROFILE:-mission}"
+echo "  RIDGEBACK_PROFILE=$RIDGEBACK_PROFILE"
+echo "  RIDGEBACK_LAUNCH_SLAM=$RIDGEBACK_LAUNCH_SLAM"
+echo "  RIDGEBACK_LAUNCH_NAV2=$RIDGEBACK_LAUNCH_NAV2"
+echo "  RIDGEBACK_LAUNCH_VLM=$RIDGEBACK_LAUNCH_VLM"
+echo "  RIDGEBACK_LAUNCH_DASHBOARD=$RIDGEBACK_LAUNCH_DASHBOARD"
+echo "  RIDGEBACK_LAUNCH_VSLAM=$RIDGEBACK_LAUNCH_VSLAM"
 if ! wait_for_publishers; then
     echo "  WARN Ridgeback core ROS publishers are still not visible."
     echo "       Check that the Ridgeback terminal is already running:"
@@ -207,8 +312,17 @@ echo ""
 echo "[5/5] Starting Jetson autonomy stack..."
 echo "=========================================="
 echo "Open in browser: http://$(hostname -I | awk '{print $1}'):8081"
-echo "Profile: ${RIDGEBACK_PROFILE:-mission}"
+echo "Profile: $RIDGEBACK_PROFILE"
+echo "Launch: SLAM=$RIDGEBACK_LAUNCH_SLAM Nav2=$RIDGEBACK_LAUNCH_NAV2 VLM=$RIDGEBACK_LAUNCH_VLM Dashboard=$RIDGEBACK_LAUNCH_DASHBOARD vSLAM=$RIDGEBACK_LAUNCH_VSLAM"
 echo "Manual teleop while Jetson stack is running:"
 echo "  ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/cmd_vel_teleop"
 echo "=========================================="
-ros2 launch ridgeback_image_motion autonomy.launch.py host:=0.0.0.0 port:=8081 profile:=${RIDGEBACK_PROFILE:-mission}
+ros2 launch ridgeback_image_motion autonomy.launch.py \
+    host:=0.0.0.0 \
+    port:=8081 \
+    profile:="$RIDGEBACK_PROFILE" \
+    launch_slam:="$RIDGEBACK_LAUNCH_SLAM" \
+    launch_nav2:="$RIDGEBACK_LAUNCH_NAV2" \
+    launch_vlm:="$RIDGEBACK_LAUNCH_VLM" \
+    launch_dashboard:="$RIDGEBACK_LAUNCH_DASHBOARD" \
+    launch_vslam:="$RIDGEBACK_LAUNCH_VSLAM"

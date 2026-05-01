@@ -36,7 +36,29 @@ def test_nav2_and_slam_frame_topic_contracts_match_ridgeback() -> None:
 def test_ridgeback_web_script_launches_autonomy_stack() -> None:
     script = read_repo_file("scripts", "ridgeback_web.sh")
     assert "ros2 launch ridgeback_image_motion autonomy.launch.py" in script
-    assert "profile:=${RIDGEBACK_PROFILE:-mission}" in script
+    assert 'RIDGEBACK_PROFILE="${RIDGEBACK_PROFILE:-mission}"' in script
+    assert 'profile:="$RIDGEBACK_PROFILE"' in script
+
+
+def test_ridgeback_web_script_supports_nav2_off_mode() -> None:
+    script = read_repo_file("scripts", "ridgeback_web.sh")
+    assert "--no-nav2" in script
+    assert "RIDGEBACK_LAUNCH_NAV2=false" in script
+    assert 'RIDGEBACK_LAUNCH_NAV2="${RIDGEBACK_LAUNCH_NAV2:-auto}"' in script
+    assert 'launch_nav2:="$RIDGEBACK_LAUNCH_NAV2"' in script
+
+
+def test_ridgeback_web_script_exposes_effective_launch_settings() -> None:
+    script = read_repo_file("scripts", "ridgeback_web.sh")
+    for setting in (
+        "RIDGEBACK_LAUNCH_SLAM",
+        "RIDGEBACK_LAUNCH_NAV2",
+        "RIDGEBACK_LAUNCH_VLM",
+        "RIDGEBACK_LAUNCH_DASHBOARD",
+        "RIDGEBACK_LAUNCH_VSLAM",
+    ):
+        assert setting in script
+        assert f"echo \"  {setting}=$" in script
 
 
 def test_protected_ridgeback_start_contract_remains_minimal() -> None:
