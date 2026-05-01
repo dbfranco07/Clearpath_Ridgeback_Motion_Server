@@ -21,6 +21,15 @@ RIDGEBACK_DEPTH_MAX_FPS="${RIDGEBACK_DEPTH_MAX_FPS:-1}"
 RIDGEBACK_DEPTH_MAX_WIDTH="${RIDGEBACK_DEPTH_MAX_WIDTH:-320}"
 RIDGEBACK_DEPTH_PNG_COMPRESSION="${RIDGEBACK_DEPTH_PNG_COMPRESSION:-3}"
 
+as_ros_double() {
+    local value="$1"
+    if [[ "$value" =~ ^-?[0-9]+$ ]]; then
+        echo "${value}.0"
+    else
+        echo "$value"
+    fi
+}
+
 detect_local_ip() {
     hostname -I | tr ' ' '\n' | awk '
         /^[0-9]+\./ && $1 !~ /^127\./ && $1 != "192.168.131.1" { print; exit }
@@ -136,11 +145,13 @@ MOTION_PID=$!
 sleep 1
 
 echo "Starting image publisher..."
+RGB_MAX_FPS_PARAM="$(as_ros_double "$RIDGEBACK_RGB_MAX_FPS")"
+DEPTH_MAX_FPS_PARAM="$(as_ros_double "$RIDGEBACK_DEPTH_MAX_FPS")"
 ros2 run ridgeback_image_motion image_publisher.py --ros-args \
     -p jpeg_quality:="$RIDGEBACK_JPEG_QUALITY" \
-    -p max_fps:="$RIDGEBACK_RGB_MAX_FPS" \
+    -p max_fps:="$RGB_MAX_FPS_PARAM" \
     -p max_width:="$RIDGEBACK_RGB_MAX_WIDTH" \
-    -p depth_max_fps:="$RIDGEBACK_DEPTH_MAX_FPS" \
+    -p depth_max_fps:="$DEPTH_MAX_FPS_PARAM" \
     -p depth_max_width:="$RIDGEBACK_DEPTH_MAX_WIDTH" \
     -p depth_png_compression:="$RIDGEBACK_DEPTH_PNG_COMPRESSION" \
     >"$IMAGE_LOG" 2>&1 &
