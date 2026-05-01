@@ -25,10 +25,11 @@ def test_nav2_and_slam_frame_topic_contracts_match_ridgeback() -> None:
     nav2 = read_repo_file("config", "nav2_params.yaml")
     slam = read_repo_file("config", "slam_params.yaml")
     for text in (nav2, slam):
-        assert "r100_0140/base_link" in text
+        assert "base_link" in text
         assert "/r100_0140/sensors/lidar2d_0/scan" in text
     assert "global_frame: map" in nav2
     assert "odom_frame: odom" in slam
+    assert "base_frame: base_link" in slam
     assert "scan_topic: /r100_0140/sensors/lidar2d_0/scan" in slam
 
 

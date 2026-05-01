@@ -144,7 +144,7 @@ def generate_launch_description():
         name="rtabmap_rgbd_odometry",
         output="screen",
         parameters=[{
-            "frame_id": "r100_0140/base_link",
+            "frame_id": "base_link",
             "odom_frame_id": "rtabmap_odom",
             "publish_tf": False,
             "approx_sync": True,

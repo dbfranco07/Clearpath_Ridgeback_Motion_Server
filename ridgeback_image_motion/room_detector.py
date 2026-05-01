@@ -48,7 +48,7 @@ class RoomDetector(Node):
         self.declare_parameter("detections_topic", "/ridgeback/semantic/room_detections")
         self.declare_parameter("vlm_status_topic", "/ridgeback/vlm/status")
         self.declare_parameter("map_frame", "map")
-        self.declare_parameter("base_frame", "r100_0140/base_link")
+        self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("detect_period_s", 3.0)
         self.declare_parameter("min_confidence", 0.55)
         self.declare_parameter("max_tokens", 240)
