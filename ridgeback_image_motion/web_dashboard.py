@@ -978,6 +978,8 @@ class DashboardNode(Node):
         self.declare_parameter("teleop_lateral_speed", 0.28)
         self.declare_parameter("teleop_angular_speed", 0.85)
         self.declare_parameter("teleop_command_max_age_s", 0.75)
+        self.declare_parameter("teleop_repeat_hold_s", 0.60)
+        self.declare_parameter("teleop_repeat_hz", 20.0)
         self.declare_parameter("auto_raw_camera_fallback", True)
         self.declare_parameter("raw_fallback_after_s", 8.0)
         self.declare_parameter("fallback_raw_image_topic", "/r100_0140/sensors/camera_0/color/image")
@@ -1051,6 +1053,8 @@ class DashboardNode(Node):
         self.teleop_linear_speed = float(self.get_parameter("teleop_linear_speed").value)
         self.teleop_lateral_speed = float(self.get_parameter("teleop_lateral_speed").value)
         self.teleop_angular_speed = float(self.get_parameter("teleop_angular_speed").value)
+        self.teleop_repeat_hold_s = max(0.10, float(self.get_parameter("teleop_repeat_hold_s").value))
+        self.teleop_repeat_hz = max(5.0, float(self.get_parameter("teleop_repeat_hz").value))
 
         self.latest_frame: bytes | None = None
         self.latest_frame_stamp = ""
@@ -1109,13 +1113,16 @@ class DashboardNode(Node):
         self.vlm_client, self.vlm_config = build_vlm_client()
         self.teleop_status = "idle"
         self.last_teleop = {"linear": 0.0, "lateral": 0.0, "angular": 0.0, "source": "none"}
+        self.repeat_teleop_until = 0.0
+        self.repeat_teleop_twist = Twist()
         self.last_browser_heartbeat_time = 0.0
         self.safety_warning_m = 0.80
         self.safety_danger_m = 0.45
 
-        self.create_timer(0.2, self._publish_operator_heartbeat)
+        self.heartbeat_timer = self.create_timer(0.2, self._publish_operator_heartbeat)
+        self.teleop_repeat_timer = self.create_timer(1.0 / self.teleop_repeat_hz, self._repeat_teleop_command)
         if self.auto_raw_camera_fallback:
-            self.create_timer(2.0, self._enable_raw_camera_fallbacks)
+            self.raw_fallback_timer = self.create_timer(2.0, self._enable_raw_camera_fallbacks)
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
         self.get_logger().info(
@@ -1193,7 +1200,7 @@ class DashboardNode(Node):
             and not self._fallback_attempted["raw_image"]
         ):
             topic = self.fallback_raw_image_topic
-            if topic and self.count_publishers(topic) > 0:
+            if topic:
                 self._fallback_attempted["raw_image"] = True
                 try:
                     self._dashboard_subscriptions["raw_image"] = self.create_subscription(
@@ -1218,7 +1225,7 @@ class DashboardNode(Node):
             and not self._fallback_attempted["depth_raw"]
         ):
             topic = self.fallback_depth_topic
-            if topic and self.count_publishers(topic) > 0:
+            if topic:
                 self._fallback_attempted["depth_raw"] = True
                 try:
                     self._dashboard_subscriptions["depth_raw"] = self.create_subscription(
@@ -1470,6 +1477,18 @@ class DashboardNode(Node):
         twist.linear.y = float(lateral)
         twist.angular.z = float(angular)
         self.cmd_vel_pub.publish(twist)
+        if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6:
+            self.repeat_teleop_twist = twist
+            self.repeat_teleop_until = time.time() + self.teleop_repeat_hold_s
+        else:
+            self.repeat_teleop_until = 0.0
+            self.repeat_teleop_twist = Twist()
+            self.cmd_vel_pub.publish(Twist())
+
+    def _repeat_teleop_command(self) -> None:
+        if time.time() > self.repeat_teleop_until:
+            return
+        self.cmd_vel_pub.publish(self.repeat_teleop_twist)
 
     def video_stream(self):
         interval = 1.0 / self.rgb_stream_hz
@@ -1596,6 +1615,8 @@ class DashboardNode(Node):
                 "status": self.teleop_status,
                 "last": self.last_teleop,
                 "mux": self.mux_status,
+                "cmd_vel_topic": str(self.get_parameter("cmd_vel_topic").value),
+                "cmd_vel_subscribers": self.count_subscribers(str(self.get_parameter("cmd_vel_topic").value)),
                 "operator_heartbeat": {
                     "age_s": heartbeat_age,
                     "active": heartbeat_age <= 5.0,
@@ -1730,6 +1751,10 @@ def create_app(node: DashboardNode) -> FastAPI:
                     node.subscription_topics.get("map", ""),
                 )
                 if topic
+            },
+            "subscribers": {
+                "/cmd_vel_teleop": node.count_subscribers("/cmd_vel_teleop"),
+                "/pc_heartbeat": node.count_subscribers("/pc_heartbeat"),
             },
         })
 
