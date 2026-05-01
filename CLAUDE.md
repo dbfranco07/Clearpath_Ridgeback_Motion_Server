@@ -380,10 +380,6 @@ However in Orin, we will run ridgeback_web.sh which starts the web app. Orin mus
 
 Can you help suggest also how to perform this?
 
-Also, any code under the folder ridgeback_autonomy is to be disregared and we should be independent from it.
-
-Constraint is to make sure to do no touch the image_publisher.py and motion_server.py and the ridgeback_start.sh script.
-
 Alias in ridgeback
 alias goridge='bash ~/ridgeback99/scripts/ridgeback_start.sh'
 
