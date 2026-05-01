@@ -22,6 +22,8 @@ class ImagePublisher(Node):
         # Parameters
         self.declare_parameter('image_topic', '/r100_0140/sensors/camera_0/color/image')
         self.declare_parameter('compressed_topic', '/r100_0140/image/compressed')
+        self.declare_parameter('depth_image_topic', '/r100_0140/sensors/camera_0/depth/image')
+        self.declare_parameter('depth_compressed_topic', '/r100_0140/image/depth_compressed')
         self.declare_parameter('jpeg_quality', 75)
         self.declare_parameter('max_fps', 15.0)
         self.declare_parameter('depth_max_fps', 2.0)
@@ -29,15 +31,20 @@ class ImagePublisher(Node):
 
         image_topic = self.get_parameter('image_topic').value
         compressed_topic = self.get_parameter('compressed_topic').value
+        depth_image_topic = self.get_parameter('depth_image_topic').value
+        depth_compressed_topic = self.get_parameter('depth_compressed_topic').value
         self.jpeg_quality = self.get_parameter('jpeg_quality').value
         max_fps = self.get_parameter('max_fps').value
         depth_max_fps = self.get_parameter('depth_max_fps').value
         self.depth_png_compression = int(self.get_parameter('depth_png_compression').value)
 
         self.bridge = CvBridge()
-        self.min_interval = 1.0 / max_fps
+        self.min_interval = 1.0 / max(0.1, float(max_fps))
         self.depth_min_interval = 1.0 / max(0.1, float(depth_max_fps))
         self.last_publish_time = 0.0
+        self.last_depth_publish_time = 0.0
+        self.frame_count = 0
+        self.depth_frame_count = 0
 
         # Sensor QoS: BEST_EFFORT matches RealSense raw publishers (sub side)
         # and avoids reliable-retransmit failures over WiFi for the compressed
@@ -50,27 +57,35 @@ class ImagePublisher(Node):
 
         self.publisher_ = self.create_publisher(CompressedImage, compressed_topic, sensor_qos)
 
-        self.subscription = self.create_subscription(
+        self.image_subscription = self.create_subscription(
             Image, image_topic, self.image_callback, sensor_qos
         )
 
-        self.depth_pub = self.create_publisher(
-            CompressedImage, '/r100_0140/image/depth_compressed', sensor_qos
-        )
-        self.create_subscription(
-            Image,
-            '/r100_0140/sensors/camera_0/depth/image',
-            self._depth_cb,
-            sensor_qos
-        )
-
-        self.frame_count = 0
-        self.last_depth_publish_time = 0.0
+        self.depth_pub = None
+        self.depth_subscription = None
+        if depth_image_topic and depth_compressed_topic:
+            self.depth_pub = self.create_publisher(
+                CompressedImage, depth_compressed_topic, sensor_qos
+            )
+            self.depth_subscription = self.create_subscription(
+                Image,
+                depth_image_topic,
+                self._depth_cb,
+                sensor_qos
+            )
 
         self.get_logger().info('Image Publisher started')
         self.get_logger().info(f'  Subscribing to: {image_topic}')
         self.get_logger().info(f'  Publishing to: {compressed_topic}')
         self.get_logger().info(f'  JPEG quality: {self.jpeg_quality}, Max FPS: {max_fps}')
+        if self.depth_pub is not None:
+            self.get_logger().info(f'  Depth subscribing to: {depth_image_topic}')
+            self.get_logger().info(f'  Depth publishing to: {depth_compressed_topic}')
+            self.get_logger().info(
+                f'  Depth PNG compression: {self.depth_png_compression}, Max FPS: {depth_max_fps}'
+            )
+        else:
+            self.get_logger().warn('Depth republisher disabled because depth topics are empty')
 
     def image_callback(self, msg):
         # Rate limit
@@ -102,13 +117,23 @@ class ImagePublisher(Node):
             self.get_logger().error(f'Image conversion error: {e}')
 
     def _depth_cb(self, msg: Image):
+        if self.depth_pub is None:
+            return
+
         now = self.get_clock().now().nanoseconds / 1e9
         if now - self.last_depth_publish_time < self.depth_min_interval:
             return
         self.last_depth_publish_time = now
 
         try:
-            depth = self.bridge.imgmsg_to_cv2(msg, 'passthrough')  # uint16
+            depth = self.bridge.imgmsg_to_cv2(msg, 'passthrough')
+            depth = np.asarray(depth)
+            if np.issubdtype(depth.dtype, np.floating):
+                depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+                depth = np.clip(depth * 1000.0, 0, 65535).astype(np.uint16)
+            elif depth.dtype != np.uint16:
+                depth = np.clip(depth, 0, 65535).astype(np.uint16)
+
             success, buf = cv2.imencode(
                 '.png',
                 depth,
@@ -120,6 +145,11 @@ class ImagePublisher(Node):
                 out.format = '16UC1; png'
                 out.data = buf.tobytes()
                 self.depth_pub.publish(out)
+                self.depth_frame_count += 1
+                if self.depth_frame_count % 20 == 0:
+                    self.get_logger().info(
+                        f'Published {self.depth_frame_count} compressed depth frames'
+                    )
         except Exception as e:
             self.get_logger().error(f'Depth conversion error: {e}')
 

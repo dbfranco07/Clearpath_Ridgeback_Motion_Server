@@ -1182,11 +1182,13 @@ class DashboardNode(Node):
         self.operator_heartbeat_pub.publish(Bool(data=True))
 
     def _enable_raw_camera_fallbacks(self) -> None:
-        if time.time() - self.started_at < self.raw_fallback_after_s:
+        now = time.time()
+        if now - self.started_at < self.raw_fallback_after_s:
             return
 
+        camera_stale = self.last_frame_time <= 0.0 or (now - self.last_frame_time) > self.raw_fallback_after_s
         if (
-            self.last_frame_time <= 0.0
+            camera_stale
             and "raw_image" not in self._dashboard_subscriptions
             and not self._fallback_attempted["raw_image"]
         ):
@@ -1209,8 +1211,9 @@ class DashboardNode(Node):
         if not self.enable_depth_feed:
             return
 
+        depth_stale = self.last_depth_time <= 0.0 or (now - self.last_depth_time) > self.raw_fallback_after_s
         if (
-            self.depth_frame is None
+            depth_stale
             and "depth_raw" not in self._dashboard_subscriptions
             and not self._fallback_attempted["depth_raw"]
         ):
