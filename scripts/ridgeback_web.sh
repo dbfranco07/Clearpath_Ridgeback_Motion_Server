@@ -6,6 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIDGEBACK_WORKSPACE="${RIDGEBACK_WORKSPACE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+source "$SCRIPT_DIR/ridgeback_clock_check.sh"
 
 usage() {
     cat <<EOF
@@ -28,6 +29,7 @@ Environment overrides:
   RIDGEBACK_REQUIRE_WIRED   true|false (default: true when RIDGEBACK_PREFER_WIRED=true)
   RIDGEBACK_CONFIGURE_WIRED true|false (default: true)
   RIDGEBACK_WIRED_IFACE     Ethernet interface or auto (default: auto)
+  RIDGEBACK_SKIP_CLOCK_CHECK 1 to bypass the host clock preflight
   JETSON_WIRED_CIDR         Jetson wired CIDR (default: 192.168.131.50/24)
   RIDGEBACK_WIRED_IP        Ridgeback wired bridge IP (default: 192.168.131.1)
 EOF
@@ -267,6 +269,8 @@ echo "Workspace: $RIDGEBACK_WORKSPACE"
 
 # Navigate to workspace
 cd "$RIDGEBACK_WORKSPACE"
+
+ridgeback_check_clock_for_build "$RIDGEBACK_WORKSPACE"
 
 # Pull latest changes
 echo ""

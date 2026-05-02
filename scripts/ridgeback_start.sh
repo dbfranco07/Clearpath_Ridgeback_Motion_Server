@@ -7,6 +7,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RIDGEBACK_WORKSPACE="${RIDGEBACK_WORKSPACE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+source "$SCRIPT_DIR/ridgeback_clock_check.sh"
 
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
@@ -129,6 +130,8 @@ echo "Workspace: $RIDGEBACK_WORKSPACE"
 
 # Navigate to workspace
 cd "$RIDGEBACK_WORKSPACE"
+
+ridgeback_check_clock_for_build "$RIDGEBACK_WORKSPACE"
 
 # Pull latest changes
 echo ""
