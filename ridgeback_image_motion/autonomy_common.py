@@ -34,6 +34,8 @@ def parse_intent_and_room(text: str) -> dict[str, str]:
         intent = "STOP"
     elif room and re.search(r"\b(go|navigate|head|move|find|reach|visit)\b", lowered):
         intent = "GO_TO_ROOM"
+    elif re.search(r"\b(explore|look around|wander|survey|scan the area|map the area|build (?:a |the )?map)\b", lowered):
+        intent = "EXPLORE"
     elif re.search(r"\b(return|go back|come back|home|start)\b", lowered):
         intent = "RETURN_TO_START"
     elif room:

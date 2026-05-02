@@ -435,7 +435,7 @@ PAGE_HTML = """<!DOCTYPE html>
       <div class="pane" id="pane-prompt" style="display:none">
         <div id="chat-hist" class="chat-hist"></div>
         <div class="chat-row">
-          <input id="chat-input" type="text" placeholder='"what do you see" or "go to room 202 and return"'>
+          <input id="chat-input" type="text" placeholder='"explore", "go to room 202 and return", or "what do you see"'>
           <button class="btn btn-go" onclick="sendChat()">SEND</button>
         </div>
       </div>
@@ -971,6 +971,7 @@ class DashboardNode(Node):
         self.declare_parameter("motion_service", "motion_service")
         self.declare_parameter("cmd_vel_topic", "/cmd_vel_teleop")
         self.declare_parameter("mission_command_topic", "/ridgeback/mission/command")
+        self.declare_parameter("exploration_command_topic", "/ridgeback/exploration/command")
         self.declare_parameter("operator_heartbeat_topic", "/pc_heartbeat")
         self.declare_parameter("mission_status_topic", "/ridgeback/mission/status")
         self.declare_parameter("safety_status_topic", "/ridgeback/safety/status")
@@ -1073,6 +1074,7 @@ class DashboardNode(Node):
         self._dashboard_subscriptions["mux_status"] = self.create_subscription(String, self.get_parameter("mux_status_topic").value, self._mux_status_cb, reliable_qos)
         self.cmd_vel_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, sensor_qos)
         self.mission_command_pub = self.create_publisher(String, self.get_parameter("mission_command_topic").value, reliable_qos)
+        self.exploration_command_pub = self.create_publisher(String, self.get_parameter("exploration_command_topic").value, reliable_qos)
         self.operator_heartbeat_pub = self.create_publisher(
             Bool, self.get_parameter("operator_heartbeat_topic").value, reliable_qos
         )
@@ -2013,8 +2015,8 @@ def create_app(node: DashboardNode) -> FastAPI:
                 reply = str(raw_reply or "")
             thinking = extract_reasoning_trace(response)
             latency_ms = (time.time() - started_at) * 1000.0
-            event_kind = "mission" if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP"} else "prompt"
-            if event_kind == "mission":
+            event_kind = "mission" if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP", "EXPLORE"} else "prompt"
+            if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP"}:
                 node.mission_command_pub.publish(
                     String(
                         data=json_dumps(
@@ -2027,6 +2029,18 @@ def create_app(node: DashboardNode) -> FastAPI:
                             }
                         )
                     )
+                )
+            if parsed["intent"] == "EXPLORE":
+                node.exploration_command_pub.publish(
+                    String(data=json_dumps({"action": "start", "target_room": "", "source": "chat"}))
+                )
+                reply = (
+                    "Starting VLM-driven exploration. I'll pick frontiers from the camera view "
+                    "and drive there while SLAM builds the map. Say 'stop' to halt."
+                )
+            elif parsed["intent"] == "STOP":
+                node.exploration_command_pub.publish(
+                    String(data=json_dumps({"action": "stop", "source": "chat"}))
                 )
 
             node.add_chat("assistant", reply)

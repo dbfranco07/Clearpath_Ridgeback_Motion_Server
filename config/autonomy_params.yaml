@@ -112,6 +112,7 @@ ridgeback_dashboard:
     map_topic: /map
     cmd_vel_topic: /cmd_vel_teleop
     mission_command_topic: /ridgeback/mission/command
+    exploration_command_topic: /ridgeback/exploration/command
     operator_heartbeat_topic: /pc_heartbeat
     mission_status_topic: /ridgeback/mission/status
     safety_status_topic: /ridgeback/safety/status
