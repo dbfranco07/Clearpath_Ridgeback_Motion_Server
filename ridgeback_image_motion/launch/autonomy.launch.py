@@ -25,6 +25,7 @@ def generate_launch_description():
     launch_slam = LaunchConfiguration("launch_slam")
     launch_nav2 = LaunchConfiguration("launch_nav2")
     launch_vlm = LaunchConfiguration("launch_vlm")
+    launch_exploration = LaunchConfiguration("launch_exploration")
     launch_vslam = LaunchConfiguration("launch_vslam")
     launch_dashboard = LaunchConfiguration("launch_dashboard")
     vslam_rgb_topic = LaunchConfiguration("vslam_rgb_topic")
@@ -35,6 +36,7 @@ def generate_launch_description():
     slam_condition = profile_condition(profile, launch_slam, ["mapping", "mission", "debug"])
     nav2_condition = profile_condition(profile, launch_nav2, ["mission", "debug"])
     vlm_condition = profile_condition(profile, launch_vlm, ["mission", "debug"])
+    exploration_condition = profile_condition(profile, launch_exploration, ["mapping", "mission", "debug"])
     vslam_condition = IfCondition(PythonExpression(["'", launch_vslam, "' == 'true'"]))
     dashboard_condition = profile_condition(profile, launch_dashboard, ["teleop", "mapping", "mission", "debug"])
     mission_condition = IfCondition(PythonExpression(["'", profile, "' in ['mission', 'debug']"]))
@@ -136,7 +138,7 @@ def generate_launch_description():
             ("/tf", "/r100_0140/tf"),
             ("/tf_static", "/r100_0140/tf_static"),
         ],
-        condition=mission_condition,
+        condition=exploration_condition,
     )
 
     room_detector = Node(
@@ -234,6 +236,11 @@ def generate_launch_description():
             DeclareLaunchArgument("launch_slam", default_value="auto"),
             DeclareLaunchArgument("launch_nav2", default_value="auto"),
             DeclareLaunchArgument("launch_vlm", default_value="auto"),
+            DeclareLaunchArgument(
+                "launch_exploration",
+                default_value="auto",
+                description="Frontier explorer node. Auto-enabled in mapping/mission/debug.",
+            ),
             DeclareLaunchArgument(
                 "launch_vslam",
                 default_value="false",

@@ -44,6 +44,13 @@ frontier_explorer:
     occupied_inflation_cells: 8
     goal_check_period_s: 2.0
     goal_reached_pause_s: 1.0
+    selection_mode: vlm
+    vlm_top_n: 4
+    vlm_call_timeout_s: 2.0
+    vlm_min_replan_interval_s: 4.0
+    vlm_max_image_age_s: 2.0
+    image_topic: /r100_0140/image/compressed
+    fallback_image_topic: /r100_0140/sensors/camera_0/color/compressed
 
 safety_controller:
   ros__parameters:
