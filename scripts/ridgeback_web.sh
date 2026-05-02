@@ -427,6 +427,194 @@ if [[ "${RIDGEBACK_SKIP_STALE_CLEANUP:-0}" != "1" ]]; then
 fi
 sleep 1
 
+component_enabled() {
+    # component_enabled <toggle_value> <current_profile> <profile1> [<profile2> ...]
+    # Returns 0 (true) if toggle is "true" or (toggle is "auto" and profile is in list).
+    local toggle="$1" cur_profile="$2"
+    shift 2
+    if [[ "$toggle" == "true" ]]; then return 0; fi
+    if [[ "$toggle" == "false" ]]; then return 1; fi
+    for p in "$@"; do
+        if [[ "$cur_profile" == "$p" ]]; then return 0; fi
+    done
+    return 1
+}
+
+postflight_jetson() {
+    local wait_s="${RIDGEBACK_POSTFLIGHT_WAIT_S:-35}"
+    sleep "$wait_s"
+
+    local nodes services actions errs=0 warns=0
+    nodes="$(timeout 5 ros2 node list 2>/dev/null || true)"
+    services="$(timeout 5 ros2 service list 2>/dev/null || true)"
+
+    echo ""
+    echo "=========================================="
+    echo "[POSTFLIGHT] Jetson autonomy (after ${wait_s}s)"
+    echo "  profile=$RIDGEBACK_PROFILE slam=$RIDGEBACK_LAUNCH_SLAM nav2=$RIDGEBACK_LAUNCH_NAV2 vlm=$RIDGEBACK_LAUNCH_VLM"
+    echo "=========================================="
+
+    require_node() {
+        local node="$1" tag="$2"
+        if echo "$nodes" | grep -qx "$node"; then
+            echo "  OK   node $node ($tag)"
+        else
+            echo "  FAIL node $node MISSING ($tag)" >&2
+            errs=$((errs + 1))
+        fi
+    }
+
+    require_topic_pub() {
+        local topic="$1" tag="$2"
+        local pub_count
+        pub_count="$(timeout 3 ros2 topic info "$topic" 2>/dev/null | awk '/Publisher count:/ { print $3; exit }')"
+        if [[ -n "$pub_count" && "$pub_count" != "0" ]]; then
+            echo "  OK   topic $topic has $pub_count publisher(s) ($tag)"
+        else
+            echo "  FAIL topic $topic has NO publishers ($tag)" >&2
+            errs=$((errs + 1))
+        fi
+    }
+
+    require_lifecycle_active() {
+        local node="$1"
+        local state
+        state="$(timeout 4 ros2 lifecycle get "$node" 2>/dev/null | head -n 1)"
+        case "$state" in
+            "active "*)
+                echo "  OK   $node lifecycle=active"
+                ;;
+            "")
+                echo "  FAIL $node lifecycle UNREACHABLE (node missing or unmanaged)" >&2
+                errs=$((errs + 1))
+                ;;
+            *)
+                echo "  FAIL $node lifecycle=${state} (expected active)" >&2
+                errs=$((errs + 1))
+                ;;
+        esac
+    }
+
+    # --- Always-required core ---
+    require_node /safety_controller "core"
+    require_node /cmd_vel_mux "core"
+    require_node /jetson_watchdog "core"
+
+    # --- Dashboard ---
+    if component_enabled "$RIDGEBACK_LAUNCH_DASHBOARD" "$RIDGEBACK_PROFILE" teleop mapping mission debug; then
+        require_node /ridgeback_dashboard "dashboard"
+    fi
+
+    # --- SLAM ---
+    if component_enabled "$RIDGEBACK_LAUNCH_SLAM" "$RIDGEBACK_PROFILE" mapping mission debug; then
+        require_node /slam_toolbox "slam"
+        require_topic_pub /map "slam"
+    fi
+
+    # --- Frontier explorer (auto in mapping/mission/debug) ---
+    if component_enabled "${RIDGEBACK_LAUNCH_EXPLORATION:-auto}" "$RIDGEBACK_PROFILE" mapping mission debug; then
+        require_node /frontier_explorer "exploration"
+        require_topic_pub /ridgeback/exploration/status "exploration"
+    fi
+
+    # --- Mission orchestrator + VLM room detector (mission/debug only) ---
+    if [[ "$RIDGEBACK_PROFILE" == "mission" || "$RIDGEBACK_PROFILE" == "debug" ]]; then
+        require_node /mission_orchestrator "mission"
+    fi
+    if component_enabled "$RIDGEBACK_LAUNCH_VLM" "$RIDGEBACK_PROFILE" mission debug; then
+        require_node /room_detector "vlm"
+    fi
+
+    # --- Nav2: nodes must EXIST and be in lifecycle state 'active' ---
+    if component_enabled "$RIDGEBACK_LAUNCH_NAV2" "$RIDGEBACK_PROFILE" mission debug; then
+        local nav2_nodes=(
+            /bt_navigator
+            /controller_server
+            /planner_server
+            /smoother_server
+            /behavior_server
+            /velocity_smoother
+            /waypoint_follower
+            /lifecycle_manager_navigation
+        )
+        for node in "${nav2_nodes[@]}"; do
+            require_node "$node" "nav2"
+        done
+
+        # Lifecycle states: every managed node must be active or BT will not plan/execute.
+        local nav2_lifecycle=(
+            /bt_navigator
+            /controller_server
+            /planner_server
+            /smoother_server
+            /behavior_server
+            /velocity_smoother
+            /waypoint_follower
+        )
+        for node in "${nav2_lifecycle[@]}"; do
+            if echo "$nodes" | grep -qx "$node"; then
+                require_lifecycle_active "$node"
+            fi
+        done
+
+        # The /navigate_to_pose action MUST have at least 1 server, otherwise frontier_explorer
+        # cannot send goals (last_error: nav2_unavailable).
+        local action_server_count
+        action_server_count="$(timeout 4 ros2 action info /navigate_to_pose 2>/dev/null | awk '/Action servers:/ { print $3; exit }')"
+        if [[ -n "$action_server_count" && "$action_server_count" != "0" ]]; then
+            echo "  OK   /navigate_to_pose action has $action_server_count server(s)"
+        else
+            echo "  FAIL /navigate_to_pose has NO action server (Nav2 not active)" >&2
+            errs=$((errs + 1))
+        fi
+    fi
+
+    # --- VLM endpoint (best-effort warning, not fatal) ---
+    if component_enabled "$RIDGEBACK_LAUNCH_VLM" "$RIDGEBACK_PROFILE" mission debug; then
+        local vlm_endpoint vlm_port vlm_url status_code
+        vlm_endpoint="$(grep -E '^VLM_ENDPOINT=' "$RIDGEBACK_ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+        vlm_port="$(grep -E '^VLM_PORT=' "$RIDGEBACK_ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
+        vlm_endpoint="${vlm_endpoint:-http://202.92.159.240}"
+        vlm_port="${vlm_port:-8000}"
+        case "$vlm_endpoint" in
+            http://*|https://*) vlm_url="${vlm_endpoint%/}:${vlm_port}/v1/models" ;;
+            *)                  vlm_url="http://${vlm_endpoint}:${vlm_port}/v1/models" ;;
+        esac
+        status_code="$(timeout 3 curl -s -o /dev/null -w '%{http_code}' "$vlm_url" 2>/dev/null || echo 000)"
+        if [[ "$status_code" == "200" ]]; then
+            echo "  OK   VLM endpoint reachable: $vlm_url"
+        else
+            echo "  WARN VLM endpoint $vlm_url returned HTTP $status_code (frontier_explorer will fall back to distance ranking)"
+            warns=$((warns + 1))
+        fi
+    fi
+
+    echo "------------------------------------------"
+    if (( errs == 0 )); then
+        if (( warns > 0 )); then
+            echo "[POSTFLIGHT] PASS with ${warns} warning(s) — robot can run, but check warnings above."
+        else
+            echo "[POSTFLIGHT] PASS — autonomy stack is healthy. Try 'explore' in the dashboard chat."
+        fi
+    else
+        echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above." >&2
+        echo "  Most common fixes:" >&2
+        echo "    - Nav2 lifecycle still 'unconfigured' → autostart failed; activate manually:" >&2
+        echo "        for n in controller_server planner_server smoother_server behavior_server bt_navigator waypoint_follower velocity_smoother; do" >&2
+        echo "          ros2 lifecycle set /\$n configure; ros2 lifecycle set /\$n activate; done" >&2
+        echo "    - A Nav2 node missing entirely → check launch log for [\$nodename] errors and rerun goridge." >&2
+        echo "    - SLAM /map missing → confirm Ridgeback ridgeback_start.sh is running and LiDAR is publishing." >&2
+    fi
+    echo "=========================================="
+}
+
+postflight_cleanup() {
+    if [[ -n "${POSTFLIGHT_PID:-}" ]]; then
+        kill "$POSTFLIGHT_PID" 2>/dev/null || true
+    fi
+}
+trap postflight_cleanup EXIT
+
 # Run
 echo ""
 echo "[5/5] Starting Jetson autonomy stack..."
@@ -437,6 +625,10 @@ echo "Launch: SLAM=$RIDGEBACK_LAUNCH_SLAM Nav2=$RIDGEBACK_LAUNCH_NAV2 VLM=$RIDGE
 echo "Manual teleop while Jetson stack is running:"
 echo "  ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/cmd_vel_teleop"
 echo "=========================================="
+
+postflight_jetson &
+POSTFLIGHT_PID=$!
+
 ros2 launch ridgeback_image_motion autonomy.launch.py \
     host:=0.0.0.0 \
     port:=8081 \

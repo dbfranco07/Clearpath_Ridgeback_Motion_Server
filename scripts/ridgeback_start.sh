@@ -188,9 +188,80 @@ cleanup() {
     if [ ! -z "${TAIL_PID:-}" ]; then
         kill $TAIL_PID 2>/dev/null || true
     fi
+    if [ ! -z "${POSTFLIGHT_PID:-}" ]; then
+        kill $POSTFLIGHT_PID 2>/dev/null || true
+    fi
     exit 0
 }
 trap cleanup SIGINT SIGTERM
+
+# Postflight: confirm motion + image are publishing the expected topics.
+# Runs in background ~6s after services start so we don't block the foreground tail.
+postflight_ridgeback() {
+    local wait_s="${RIDGEBACK_POSTFLIGHT_WAIT_S:-6}"
+    sleep "$wait_s"
+
+    echo ""
+    echo "=========================================="
+    echo "[POSTFLIGHT] Ridgeback (after ${wait_s}s)"
+    echo "=========================================="
+
+    local required_nodes=( /motion_server /image_publisher )
+    local required_pubs=(
+        "/r100_0140/image/compressed"
+        "/r100_0140/image/depth_compressed"
+        "/r100_0140/sensors/lidar2d_0/scan"
+        "/r100_0140/platform/odom/filtered"
+    )
+    local required_services=( /motion_service )
+
+    local errs=0
+    local nodes
+    nodes="$(timeout 4 ros2 node list 2>/dev/null || true)"
+
+    for node in "${required_nodes[@]}"; do
+        if echo "$nodes" | grep -qx "$node"; then
+            echo "  OK   node $node running"
+        else
+            echo "  FAIL node $node NOT running" >&2
+            errs=$((errs + 1))
+        fi
+    done
+
+    local services
+    services="$(timeout 4 ros2 service list 2>/dev/null || true)"
+    for svc in "${required_services[@]}"; do
+        if echo "$services" | grep -qx "$svc"; then
+            echo "  OK   service $svc available"
+        else
+            echo "  FAIL service $svc NOT available" >&2
+            errs=$((errs + 1))
+        fi
+    done
+
+    for topic in "${required_pubs[@]}"; do
+        local pub_count
+        pub_count="$(timeout 3 ros2 topic info "$topic" 2>/dev/null | awk '/Publisher count:/ { print $3; exit }')"
+        if [[ -n "$pub_count" && "$pub_count" != "0" ]]; then
+            echo "  OK   topic $topic ($pub_count publisher(s))"
+        else
+            echo "  FAIL topic $topic has NO publishers" >&2
+            errs=$((errs + 1))
+        fi
+    done
+
+    echo "------------------------------------------"
+    if (( errs == 0 )); then
+        echo "[POSTFLIGHT] PASS — Ridgeback is ready for the Jetson stack."
+    else
+        echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above. Investigate the missing items before running 'goridge' on the Jetson." >&2
+        echo "  Hints:" >&2
+        echo "    - LiDAR/odom missing: check 'sudo systemctl status clearpath-platform' and 'clearpath-sensors'." >&2
+        echo "    - image/compressed missing: image_publisher may have failed to open the RealSense (check $IMAGE_LOG)." >&2
+        echo "    - motion_service missing: motion_server may have failed (check $MOTION_LOG)." >&2
+    fi
+    echo "=========================================="
+}
 
 # Run motion server in background, teeing output for post-mortem
 echo ""
@@ -250,5 +321,9 @@ echo "=========================================="
 tail -n +1 -F "$MOTION_LOG" "$IMAGE_LOG" &
 TAIL_PID=$!
 
+postflight_ridgeback &
+POSTFLIGHT_PID=$!
+
 wait "$MOTION_PID" "$IMAGE_PID"
 kill "$TAIL_PID" 2>/dev/null || true
+kill "$POSTFLIGHT_PID" 2>/dev/null || true
