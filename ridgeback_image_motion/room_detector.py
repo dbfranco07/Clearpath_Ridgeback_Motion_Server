@@ -10,12 +10,15 @@ import re
 import time
 from typing import Any
 
+import cv2
+import numpy as np
 import rclpy
 import tf2_ros
+from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 try:
@@ -42,8 +45,7 @@ class RoomDetector(Node):
     def __init__(self) -> None:
         super().__init__("room_detector")
 
-        self.declare_parameter("image_topic", "/r100_0140/image/compressed")
-        self.declare_parameter("fallback_image_topic", "/r100_0140/sensors/camera_0/color/compressed")
+        self.declare_parameter("image_topic", "/r100_0140/sensors/camera_0/color/image_raw")
         self.declare_parameter("odom_topic", "/r100_0140/platform/odom/filtered")
         self.declare_parameter("mission_status_topic", "/ridgeback/mission/status")
         self.declare_parameter("detections_topic", "/ridgeback/semantic/room_detections")
@@ -61,24 +63,13 @@ class RoomDetector(Node):
         sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
-        self.image_subscriptions = []
-        image_topics = [
-            ("primary", str(self.get_parameter("image_topic").value).strip()),
-            ("fallback", str(self.get_parameter("fallback_image_topic").value).strip()),
-        ]
-        seen_topics = set()
-        for source, topic in image_topics:
-            if not topic or topic in seen_topics:
-                continue
-            seen_topics.add(topic)
-            self.image_subscriptions.append(
-                self.create_subscription(
-                    CompressedImage,
-                    topic,
-                    lambda msg, source=source, topic=topic: self._image_cb(msg, source, topic),
-                    sensor_qos,
-                )
-            )
+        image_topic = str(self.get_parameter("image_topic").value).strip()
+        self.image_subscription = self.create_subscription(
+            Image,
+            image_topic,
+            lambda msg, topic=image_topic: self._image_cb(msg, "raw", topic),
+            sensor_qos,
+        )
         self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
         self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
         self.detection_pub = self.create_publisher(String, self.get_parameter("detections_topic").value, reliable_qos)
@@ -87,6 +78,7 @@ class RoomDetector(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         self.vlm_client, self.vlm_config = build_vlm_client()
+        self._cv_bridge = CvBridge()
         self.latest_frame: bytes | None = None
         self.latest_frame_stamp = ""
         self.latest_frame_source = ""
@@ -101,11 +93,19 @@ class RoomDetector(Node):
         self.create_timer(0.5, self._tick)
         self.get_logger().info(
             f"room_detector ready: {self.vlm_config.base_url} model={self.vlm_config.model_name} "
-            f"image_topics={', '.join(topic for _, topic in image_topics if topic)}"
+            f"image_topic={image_topic}"
         )
 
-    def _image_cb(self, msg: CompressedImage, source: str = "primary", topic: str = "") -> None:
-        self.latest_frame = bytes(msg.data)
+    def _image_cb(self, msg: Image, source: str = "raw", topic: str = "") -> None:
+        try:
+            frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+        except Exception as exc:
+            self.get_logger().warn(f"image conversion failed: {exc}")
+            return
+        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if not ok:
+            return
+        self.latest_frame = encoded.tobytes()
         self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
         self.latest_frame_source = source
         self.latest_frame_topic = topic

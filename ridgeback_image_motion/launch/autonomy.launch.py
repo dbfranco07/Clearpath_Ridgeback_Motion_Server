@@ -28,6 +28,8 @@ def generate_launch_description():
     launch_exploration = LaunchConfiguration("launch_exploration")
     launch_vslam = LaunchConfiguration("launch_vslam")
     launch_dashboard = LaunchConfiguration("launch_dashboard")
+    launch_camera = LaunchConfiguration("launch_camera")
+    camera_serial_no = LaunchConfiguration("camera_serial_no")
     vslam_rgb_topic = LaunchConfiguration("vslam_rgb_topic")
     vslam_depth_topic = LaunchConfiguration("vslam_depth_topic")
     vslam_camera_info_topic = LaunchConfiguration("vslam_camera_info_topic")
@@ -39,6 +41,7 @@ def generate_launch_description():
     exploration_condition = profile_condition(profile, launch_exploration, ["mapping", "mission", "debug"])
     vslam_condition = IfCondition(PythonExpression(["'", launch_vslam, "' == 'true'"]))
     dashboard_condition = profile_condition(profile, launch_dashboard, ["teleop", "mapping", "mission", "debug"])
+    camera_condition = profile_condition(profile, launch_camera, ["mapping", "mission", "debug"])
     mission_condition = IfCondition(PythonExpression(["'", profile, "' in ['mission', 'debug']"]))
 
     pkg_share = FindPackageShare("ridgeback_image_motion")
@@ -49,6 +52,14 @@ def generate_launch_description():
 
     nav2_launch = PathJoinSubstitution(
         [get_package_share_directory("nav2_bringup"), "launch", "navigation_launch.py"]
+    )
+
+    realsense_launch = PathJoinSubstitution([pkg_share, "realsense.launch.py"])
+
+    camera = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(realsense_launch),
+        launch_arguments={"serial_no": camera_serial_no}.items(),
+        condition=camera_condition,
     )
 
     slam = Node(
@@ -198,19 +209,10 @@ def generate_launch_description():
             {
                 "host": host,
                 "port": port,
-                "raw_image_topic": PythonExpression([
-                    "'/r100_0140/sensors/camera_0/color/image' if '", profile, "' == 'debug' else ''"
-                ]),
-                "depth_topic": PythonExpression([
-                    "'/r100_0140/sensors/camera_0/depth/image' if '", profile, "' == 'debug' else ''"
-                ]),
-                "auto_raw_camera_fallback": ParameterValue(
-                    PythonExpression(["'", profile, "' in ['mission', 'debug']"]),
-                    value_type=bool,
-                ),
-                "raw_fallback_after_s": 8.0,
+                "raw_image_topic": "/r100_0140/sensors/camera_0/color/image_raw",
+                "depth_topic": "/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw",
                 "enable_depth_feed": ParameterValue(
-                    PythonExpression(["'", profile, "' in ['mission', 'debug']"]),
+                    PythonExpression(["'", profile, "' in ['mission', 'debug', 'mapping']"]),
                     value_type=bool,
                 ),
                 "rgb_stream_hz": PythonExpression([
@@ -248,13 +250,13 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "vslam_rgb_topic",
-                default_value="/r100_0140/sensors/camera_0/color/image",
+                default_value="/r100_0140/sensors/camera_0/color/image_raw",
                 description="RGB image topic for RTAB-Map RGB-D odometry.",
             ),
             DeclareLaunchArgument(
                 "vslam_depth_topic",
-                default_value="/r100_0140/sensors/camera_0/depth/image",
-                description="Depth image topic for RTAB-Map. Prefer an aligned-depth-to-color topic if available.",
+                default_value="/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw",
+                description="Aligned depth image topic for RTAB-Map (same frame as color).",
             ),
             DeclareLaunchArgument(
                 "vslam_camera_info_topic",
@@ -267,13 +269,24 @@ def generate_launch_description():
                 description="Filtered odometry output from the optional vSLAM EKF.",
             ),
             DeclareLaunchArgument("launch_dashboard", default_value="auto"),
+            DeclareLaunchArgument(
+                "launch_camera",
+                default_value="auto",
+                description="RealSense D435 driver on the Jetson. Auto-on in mapping/mission/debug.",
+            ),
+            DeclareLaunchArgument(
+                "camera_serial_no",
+                default_value="317222071726",
+                description="RealSense serial. Matches CLAUDE.md inventory.",
+            ),
             LogInfo(msg=["Starting Ridgeback Jetson autonomy stack profile=", profile]),
             LogInfo(
-                msg="Profiles: teleop=safety/mux/dashboard, mapping=+SLAM, mission=+Nav2/exploration/VLM, debug=full stack with raw fallbacks"
+                msg="Profiles: teleop=safety/mux/dashboard, mapping=+SLAM/camera, mission=+Nav2/exploration/VLM, debug=full stack"
             ),
             safety,
             watchdog,
             mux,
+            camera,
             TimerAction(period=1.0, actions=[slam]),
             TimerAction(period=8.0, actions=[nav2]),
             TimerAction(period=10.0, actions=[dashboard]),

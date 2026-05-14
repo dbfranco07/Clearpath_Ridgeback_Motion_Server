@@ -92,8 +92,8 @@ services:
           --ros-args \
           --remap /lidar:=/r100_0140/sensors/lidar2d_0/scan \
           --remap /imu:=/r100_0140/sensors/imu_0/data \
-          --remap /camera/image:=/r100_0140/sensors/camera_0/color/image \
-          --remap /camera/depth:=/r100_0140/sensors/camera_0/depth/image \
+          --remap /camera/image:=/r100_0140/sensors/camera_0/color/image_raw \
+          --remap /camera/depth:=/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw \
           --remap /odom:=/r100_0140/platform/odom/filtered
       "
 

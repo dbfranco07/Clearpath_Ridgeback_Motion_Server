@@ -1,6 +1,8 @@
 #!/bin/bash
 # Ridgeback R100 Start Script
-# Builds package and runs motion_server + image_publisher
+# Builds package and runs motion_server. The RealSense camera is now wired
+# directly to the Jetson and driven by realsense2_camera there; the Ridgeback
+# stack no longer needs image_publisher.
 # (clearpath-robot.service handles platform bringup)
 
 set -e
@@ -15,25 +17,10 @@ export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export RMW_FASTRTPS_USE_SHM=0
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_ridgeback.xml"
 
-RIDGEBACK_JPEG_QUALITY="${RIDGEBACK_JPEG_QUALITY:-65}"
-RIDGEBACK_RGB_MAX_FPS="${RIDGEBACK_RGB_MAX_FPS:-10}"
-RIDGEBACK_RGB_MAX_WIDTH="${RIDGEBACK_RGB_MAX_WIDTH:-640}"
-RIDGEBACK_DEPTH_MAX_FPS="${RIDGEBACK_DEPTH_MAX_FPS:-1}"
-RIDGEBACK_DEPTH_MAX_WIDTH="${RIDGEBACK_DEPTH_MAX_WIDTH:-320}"
-RIDGEBACK_DEPTH_PNG_COMPRESSION="${RIDGEBACK_DEPTH_PNG_COMPRESSION:-3}"
 RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
 RIDGEBACK_REQUIRE_WIRED="${RIDGEBACK_REQUIRE_WIRED:-$RIDGEBACK_PREFER_WIRED}"
 RIDGEBACK_WIRED_IP="${RIDGEBACK_WIRED_IP:-192.168.131.1}"
 JETSON_WIRED_IP="${JETSON_WIRED_IP:-192.168.131.50}"
-
-as_ros_double() {
-    local value="$1"
-    if [[ "$value" =~ ^-?[0-9]+$ ]]; then
-        echo "${value}.0"
-    else
-        echo "$value"
-    fi
-}
 
 is_true() {
     [[ "$1" == "true" ]]
@@ -167,13 +154,10 @@ echo "  ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY:-unset}"
 echo "  RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-unset}"
 echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
-echo "  Image compression: rgb=${RIDGEBACK_RGB_MAX_FPS}fps q=${RIDGEBACK_JPEG_QUALITY} width=${RIDGEBACK_RGB_MAX_WIDTH}"
-echo "  Depth compression: depth=${RIDGEBACK_DEPTH_MAX_FPS}fps png=${RIDGEBACK_DEPTH_PNG_COMPRESSION} width=${RIDGEBACK_DEPTH_MAX_WIDTH}"
-topic_status "/r100_0140/sensors/camera_0/color/image" "RGB raw camera"
-topic_status "/r100_0140/sensors/camera_0/depth/image" "Depth raw camera"
 topic_status "/r100_0140/sensors/lidar2d_0/scan" "2D LiDAR"
 topic_status "/r100_0140/platform/odom/filtered" "Filtered odom"
-echo "  This script intentionally starts only motion_server.py and image_publisher.py."
+echo "  This script intentionally starts only motion_server.py."
+echo "  RealSense RGB-D now publishes from the Jetson under /r100_0140/sensors/camera_0/*."
 
 # Cleanup function
 cleanup() {
@@ -181,9 +165,6 @@ cleanup() {
     echo "Shutting down..."
     if [ ! -z "${MOTION_PID:-}" ]; then
         kill $MOTION_PID 2>/dev/null || true
-    fi
-    if [ ! -z "${IMAGE_PID:-}" ]; then
-        kill $IMAGE_PID 2>/dev/null || true
     fi
     if [ ! -z "${TAIL_PID:-}" ]; then
         kill $TAIL_PID 2>/dev/null || true
@@ -231,14 +212,6 @@ postflight_ridgeback() {
     }
 
     check_owned_node "motion_server"   "$MOTION_PID" "$MOTION_LOG" "Motion Service Server started"
-    check_owned_node "image_publisher" "$IMAGE_PID"  "$IMAGE_LOG"  "Image Publisher started"
-
-    # image_publisher periodically prints "Published N compressed frames" — proves it's publishing.
-    if grep -q "Published .* compressed frames" "$IMAGE_LOG" 2>/dev/null; then
-        echo "  OK   image_publisher producing compressed frames"
-    else
-        echo "  WARN image_publisher hasn't logged 'Published N compressed frames' yet (RealSense slow to start?)"
-    fi
 
     # External publishers from the clearpath-platform/clearpath-sensors services
     # — these use the system DDS config so ros2 cli can see them.
@@ -264,7 +237,6 @@ postflight_ridgeback() {
         echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above. Investigate before running 'goridge' on the Jetson." >&2
         echo "  Hints:" >&2
         echo "    - LiDAR/odom missing: 'sudo systemctl status clearpath-platform clearpath-sensors'." >&2
-        echo "    - image_publisher dead: check $IMAGE_LOG for RealSense init errors (USB / serial 317222071726)." >&2
         echo "    - motion_server dead: check $MOTION_LOG for import or topic-publisher failures." >&2
     fi
     echo "=========================================="
@@ -276,26 +248,10 @@ echo "[4/4] Starting services..."
 echo "=========================================="
 echo "Starting motion server..."
 MOTION_LOG=/tmp/ridgeback_motion.log
-IMAGE_LOG=/tmp/ridgeback_image.log
 ros2 run ridgeback_image_motion motion_server.py >"$MOTION_LOG" 2>&1 &
 MOTION_PID=$!
 
-sleep 1
-
-echo "Starting image publisher..."
-RGB_MAX_FPS_PARAM="$(as_ros_double "$RIDGEBACK_RGB_MAX_FPS")"
-DEPTH_MAX_FPS_PARAM="$(as_ros_double "$RIDGEBACK_DEPTH_MAX_FPS")"
-ros2 run ridgeback_image_motion image_publisher.py --ros-args \
-    -p jpeg_quality:="$RIDGEBACK_JPEG_QUALITY" \
-    -p max_fps:="$RGB_MAX_FPS_PARAM" \
-    -p max_width:="$RIDGEBACK_RGB_MAX_WIDTH" \
-    -p depth_max_fps:="$DEPTH_MAX_FPS_PARAM" \
-    -p depth_max_width:="$RIDGEBACK_DEPTH_MAX_WIDTH" \
-    -p depth_png_compression:="$RIDGEBACK_DEPTH_PNG_COMPRESSION" \
-    >"$IMAGE_LOG" 2>&1 &
-IMAGE_PID=$!
-
-# Give nodes a moment to crash if they're going to crash on import.
+# Give the node a moment to crash if it's going to crash on import.
 sleep 3
 
 check_alive() {
@@ -314,23 +270,21 @@ check_alive() {
 }
 
 check_alive "motion_server"   "$MOTION_PID" "$MOTION_LOG" "ros2 run ridgeback_image_motion motion_server.py"
-check_alive "image_publisher" "$IMAGE_PID"  "$IMAGE_LOG"  "ros2 run ridgeback_image_motion image_publisher.py"
 
 echo ""
 echo "=========================================="
 echo "All services running!"
 echo "  - Motion Server   (PID: $MOTION_PID, log: $MOTION_LOG)"
-echo "  - Image Publisher (PID: $IMAGE_PID, log: $IMAGE_LOG)"
 echo "Press Ctrl+C to stop all"
 echo "=========================================="
 
-# tail both logs into the foreground so the operator sees activity
-tail -n +1 -F "$MOTION_LOG" "$IMAGE_LOG" &
+# tail the log into the foreground so the operator sees activity
+tail -n +1 -F "$MOTION_LOG" &
 TAIL_PID=$!
 
 postflight_ridgeback &
 POSTFLIGHT_PID=$!
 
-wait "$MOTION_PID" "$IMAGE_PID"
+wait "$MOTION_PID"
 kill "$TAIL_PID" 2>/dev/null || true
 kill "$POSTFLIGHT_PID" 2>/dev/null || true

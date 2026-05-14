@@ -20,7 +20,7 @@ from nav_msgs.msg import OccupancyGrid, Odometry
 from pydantic import BaseModel
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import BatteryState, CompressedImage, Image, LaserScan
+from sensor_msgs.msg import BatteryState, Image, LaserScan
 from std_msgs.msg import Bool, String
 from cv_bridge import CvBridge
 import uvicorn
@@ -956,14 +956,11 @@ class DashboardNode(Node):
 
         self.declare_parameter("port", 8081)
         self.declare_parameter("host", "0.0.0.0")
-        self.declare_parameter("image_topic", "/r100_0140/image/compressed")
-        self.declare_parameter("raw_image_topic", "")
-        self.declare_parameter("depth_compressed_topic", "/r100_0140/image/depth_compressed")
-        self.declare_parameter("depth_topic", "")
+        self.declare_parameter("raw_image_topic", "/r100_0140/sensors/camera_0/color/image_raw")
+        self.declare_parameter("depth_topic", "/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw")
         self.declare_parameter("enable_depth_feed", True)
         self.declare_parameter("rgb_stream_hz", 8.0)
-        self.declare_parameter("raw_rgb_render_hz", 3.0)
-        self.declare_parameter("compressed_rgb_grace_s", 2.0)
+        self.declare_parameter("raw_rgb_render_hz", 8.0)
         self.declare_parameter("depth_render_hz", 4.0)
         self.declare_parameter("map_render_hz", 1.0)
         self.declare_parameter("map_target_long_side", 1000)
@@ -986,79 +983,38 @@ class DashboardNode(Node):
         self.declare_parameter("teleop_command_max_age_s", 0.75)
         self.declare_parameter("teleop_repeat_hold_s", 0.60)
         self.declare_parameter("teleop_repeat_hz", 20.0)
-        self.declare_parameter("auto_raw_camera_fallback", True)
-        self.declare_parameter("raw_fallback_after_s", 8.0)
-        self.declare_parameter("fallback_compressed_image_topic", "/r100_0140/sensors/camera_0/color/compressed")
-        self.declare_parameter("fallback_raw_image_topic", "/r100_0140/sensors/camera_0/color/image")
-        self.declare_parameter("fallback_depth_topic", "/r100_0140/sensors/camera_0/depth/image")
 
         self._sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
         sensor_qos = self._sensor_qos
-        # BEST_EFFORT matches the image_publisher republisher and avoids
-        # reliable-retransmit stalls over WiFi for the compressed RGB/depth feeds.
-        self._compressed_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
-        compressed_qos = self._compressed_qos
         map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
 
-        image_topic = str(self.get_parameter("image_topic").value).strip()
         raw_image_topic = str(self.get_parameter("raw_image_topic").value).strip()
-        depth_compressed_topic = str(self.get_parameter("depth_compressed_topic").value).strip()
         depth_topic = str(self.get_parameter("depth_topic").value).strip()
         self.enable_depth_feed = bool(self.get_parameter("enable_depth_feed").value)
         self.rgb_stream_hz = max(1.0, float(self.get_parameter("rgb_stream_hz").value))
         self.raw_rgb_render_hz = max(1.0, float(self.get_parameter("raw_rgb_render_hz").value))
-        self.compressed_rgb_grace_s = max(0.5, float(self.get_parameter("compressed_rgb_grace_s").value))
         self.depth_render_hz = max(0.5, float(self.get_parameter("depth_render_hz").value))
         self.map_render_hz = max(0.1, float(self.get_parameter("map_render_hz").value))
         self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
-        self.auto_raw_camera_fallback = bool(self.get_parameter("auto_raw_camera_fallback").value)
-        self.raw_fallback_after_s = max(2.0, float(self.get_parameter("raw_fallback_after_s").value))
-        self.fallback_compressed_image_topic = str(self.get_parameter("fallback_compressed_image_topic").value).strip()
-        self.fallback_raw_image_topic = str(self.get_parameter("fallback_raw_image_topic").value).strip()
-        self.fallback_depth_topic = str(self.get_parameter("fallback_depth_topic").value).strip()
         self.started_at = time.time()
-        self._fallback_attempted = {
-            "image_fallback": False,
-            "raw_image": False,
-            "depth_raw": False,
-        }
 
         self._dashboard_subscriptions = {}
         self.subscription_topics = {
-            "image": image_topic,
             "raw_image": raw_image_topic,
-            "depth_compressed": depth_compressed_topic if self.enable_depth_feed else "",
             "depth_raw": depth_topic if self.enable_depth_feed else "",
-            "fallback_compressed_image": self.fallback_compressed_image_topic if self.auto_raw_camera_fallback else "",
-            "fallback_raw_image": self.fallback_raw_image_topic if self.auto_raw_camera_fallback else "",
-            "fallback_depth_raw": self.fallback_depth_topic if (self.auto_raw_camera_fallback and self.enable_depth_feed) else "",
             "odom": str(self.get_parameter("odom_topic").value),
             "lidar": str(self.get_parameter("lidar_topic").value),
             "battery": str(self.get_parameter("battery_topic").value),
             "map": str(self.get_parameter("map_topic").value),
         }
 
-        if image_topic:
-            self._dashboard_subscriptions["image"] = self.create_subscription(
-                CompressedImage,
-                image_topic,
-                lambda msg, topic=image_topic: self._image_cb(msg, "compressed", topic),
-                compressed_qos,
-            )
         if raw_image_topic:
             self._dashboard_subscriptions["raw_image"] = self.create_subscription(
                 Image,
                 raw_image_topic,
                 lambda msg, topic=raw_image_topic: self._raw_image_cb(msg, "raw", topic),
                 sensor_qos,
-            )
-        if self.enable_depth_feed and depth_compressed_topic:
-            self._dashboard_subscriptions["depth_compressed"] = self.create_subscription(
-                CompressedImage,
-                depth_compressed_topic,
-                lambda msg, topic=depth_compressed_topic: self._depth_compressed_cb(msg, "depth_compressed", topic),
-                compressed_qos,
             )
         if self.enable_depth_feed and depth_topic:
             self._dashboard_subscriptions["depth_raw"] = self.create_subscription(
@@ -1093,7 +1049,6 @@ class DashboardNode(Node):
         self.latest_frame_stamp = ""
         self.frame_lock = threading.Lock()
         self.last_frame_time = 0.0
-        self.last_compressed_frame_time = 0.0
         self.last_raw_rgb_render_time = 0.0
         self.rgb_frame_source = ""
         self.rgb_frame_topic = ""
@@ -1106,16 +1061,11 @@ class DashboardNode(Node):
         self.depth_event = threading.Event()
         self.last_depth_time = 0.0
         self.last_depth_render_time = 0.0
-        self.depth_compressed_frame: bytes | None = None
-        self.depth_compressed_format = ""
         self.depth_frame_source = ""
         self.depth_frame_topic = ""
         self.last_depth_stale_reason = "no_depth_frame"
         self.callback_counts = {
-            "image": 0,
-            "image_fallback": 0,
             "raw_image": 0,
-            "depth_compressed": 0,
             "depth_raw": 0,
             "depth_rendered": 0,
             "depth_errors": 0,
@@ -1168,20 +1118,13 @@ class DashboardNode(Node):
         self.spin_tick_timer = self.create_timer(1.0, self._spin_tick)
         self.heartbeat_timer = self.create_timer(0.2, self._publish_operator_heartbeat)
         self.teleop_repeat_timer = self.create_timer(1.0 / self.teleop_repeat_hz, self._repeat_teleop_command)
-        if self.auto_raw_camera_fallback:
-            self.raw_fallback_timer = self.create_timer(2.0, self._enable_raw_camera_fallbacks)
 
         self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
         self.get_logger().info(
-          "Dashboard topics: compressed=%s raw=%s depth_compressed=%s depth_raw=%s fallback_compressed=%s fallback_raw=%s fallback_depth=%s cmd_vel=%s"
+            "Dashboard topics: raw=%s depth_raw=%s cmd_vel=%s"
             % (
-                image_topic or "disabled",
                 raw_image_topic or "disabled",
-                depth_compressed_topic if self.enable_depth_feed else "disabled",
                 depth_topic if self.enable_depth_feed else "disabled",
-              self.fallback_compressed_image_topic if self.auto_raw_camera_fallback else "disabled",
-              self.fallback_raw_image_topic if self.auto_raw_camera_fallback else "disabled",
-              self.fallback_depth_topic if (self.auto_raw_camera_fallback and self.enable_depth_feed) else "disabled",
                 self.get_parameter("cmd_vel_topic").value,
             )
         )
@@ -1244,7 +1187,7 @@ class DashboardNode(Node):
         if self.last_frame_time <= 0.0:
             return "no_rgb_callbacks"
         age = now - self.last_frame_time
-        if age > self.raw_fallback_after_s:
+        if age > 4.0:
             return f"rgb_stale_{age:.1f}s"
         return ""
 
@@ -1255,112 +1198,13 @@ class DashboardNode(Node):
         if self.last_depth_time <= 0.0:
             return "no_depth_callbacks"
         age = now - self.last_depth_time
-        if age > self.raw_fallback_after_s:
+        if age > 4.0:
             return f"depth_stale_{age:.1f}s"
         return ""
-
-    def _enable_raw_camera_fallbacks(self) -> None:
-        now = time.time()
-        if now - self.started_at < self.raw_fallback_after_s:
-            return
-
-        self.last_rgb_stale_reason = self._rgb_stale_reason(now)
-        self.last_depth_stale_reason = self._depth_stale_reason(now)
-        camera_stale = bool(self.last_rgb_stale_reason)
-        compressed_fallback_was_attempted = self._fallback_attempted["image_fallback"]
-        if (
-            camera_stale
-            and "image_fallback" not in self._dashboard_subscriptions
-            and not self._fallback_attempted["image_fallback"]
-        ):
-            topic = self.fallback_compressed_image_topic
-            if topic:
-                self._fallback_attempted["image_fallback"] = True
-                try:
-                    self._dashboard_subscriptions["image_fallback"] = self.create_subscription(
-                        CompressedImage,
-                        topic,
-                        lambda msg, topic=topic: self._image_cb(msg, "compressed_fallback", topic),
-                        self._compressed_qos,
-                    )
-                    self.subscription_topics["fallback_compressed_image"] = topic
-                    self.add_log("camera", f"RGB compressed fallback enabled: {topic}")
-                    self.get_logger().warn(f"Enabled RGB compressed fallback subscription on {topic}")
-                except Exception as exc:
-                    self.add_log("camera", f"RGB compressed fallback subscribe failed: {exc}")
-
-        if (
-            camera_stale
-            and compressed_fallback_was_attempted
-            and "raw_image" not in self._dashboard_subscriptions
-            and not self._fallback_attempted["raw_image"]
-        ):
-            topic = self.fallback_raw_image_topic
-            if topic:
-                self._fallback_attempted["raw_image"] = True
-                try:
-                    self._dashboard_subscriptions["raw_image"] = self.create_subscription(
-                        Image,
-                        topic,
-                        lambda msg, topic=topic: self._raw_image_cb(msg, "raw_fallback", topic),
-                        self._sensor_qos,
-                    )
-                    self.subscription_topics["raw_image"] = topic
-                    self.add_log("camera", f"RGB raw fallback enabled: {topic}")
-                    self.get_logger().warn(f"Enabled RGB raw fallback subscription on {topic}")
-                except Exception as exc:
-                    self.add_log("camera", f"RGB fallback subscribe failed: {exc}")
-
-        if not self.enable_depth_feed:
-            return
-
-        depth_stale = bool(self.last_depth_stale_reason and self.last_depth_stale_reason != "depth_disabled")
-        if (
-            depth_stale
-            and "depth_raw" not in self._dashboard_subscriptions
-            and not self._fallback_attempted["depth_raw"]
-        ):
-            topic = self.fallback_depth_topic
-            if topic:
-                self._fallback_attempted["depth_raw"] = True
-                try:
-                    self._dashboard_subscriptions["depth_raw"] = self.create_subscription(
-                        Image,
-                        topic,
-                        lambda msg, topic=topic: self._depth_cb(msg, "depth_raw_fallback", topic),
-                        self._sensor_qos,
-                    )
-                    self.subscription_topics["depth_raw"] = topic
-                    self.add_log("camera", f"Depth raw fallback enabled: {topic}")
-                    self.get_logger().warn(f"Enabled depth raw fallback subscription on {topic}")
-                except Exception as exc:
-                    self.add_log("camera", f"Depth fallback subscribe failed: {exc}")
-
-    def _image_cb(self, msg: CompressedImage, source: str = "compressed", topic: str = "") -> None:
-        self.callback_counts["image"] += 1
-        if source == "compressed_fallback":
-            self.callback_counts["image_fallback"] += 1
-        try:
-            now = self.get_clock().now()
-            stamp = rclpy.time.Time.from_msg(msg.header.stamp)
-            self.image_latency_ms = (now - stamp).nanoseconds / 1e6
-        except Exception:
-            pass
-        with self.frame_lock:
-            self.latest_frame = bytes(msg.data)
-            self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
-            self.rgb_frame_source = source
-            self.rgb_frame_topic = topic
-        now_wall = time.time()
-        self.last_compressed_frame_time = now_wall
-        self.last_frame_time = now_wall
-        self.last_rgb_stale_reason = ""
 
     def _raw_image_cb(self, msg: Image, source: str = "raw", topic: str = "") -> None:
         self.callback_counts["raw_image"] += 1
         now_wall = time.time()
-        if now_wall - self.last_compressed_frame_time <= self.compressed_rgb_grace_s:
-            return
         if now_wall - self.last_raw_rgb_render_time < 1.0 / self.raw_rgb_render_hz:
             return
         self.last_raw_rgb_render_time = now_wall
@@ -1425,28 +1269,6 @@ class DashboardNode(Node):
             self.callback_counts["depth_errors"] += 1
             self.last_depth_error = str(exc)
             self.get_logger().error(f"Depth visualization error: {exc}")
-
-    def _depth_compressed_cb(self, msg: CompressedImage, source: str = "depth_compressed", topic: str = "") -> None:
-        self.callback_counts["depth_compressed"] += 1
-        self.last_depth_time = time.time()
-        self.depth_frame_source = source
-        self.depth_frame_topic = topic
-        self.last_depth_stale_reason = ""
-        if self.last_depth_time - self.last_depth_render_time < 1.0 / self.depth_render_hz:
-            return
-        self.last_depth_render_time = self.last_depth_time
-        try:
-            encoded = np.frombuffer(bytes(msg.data), dtype=np.uint8)
-            depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
-            if depth is not None:
-                self._store_depth_visualization(depth, msg.format, source, topic)
-            else:
-                self.callback_counts["depth_errors"] += 1
-                self.last_depth_error = "cv2.imdecode returned None"
-        except Exception as exc:
-            self.callback_counts["depth_errors"] += 1
-            self.last_depth_error = str(exc)
-            self.get_logger().error(f"Compressed depth render error: {exc}")
 
     def _depth_cb(self, msg: Image, source: str = "depth_raw", topic: str = "") -> None:
         self.callback_counts["depth_raw"] += 1
@@ -1886,14 +1708,8 @@ def create_app(node: DashboardNode) -> FastAPI:
                 "tick_count": int(node.spin_tick_count),
                 "error": node.spin_error,
             },
-            "fallback": {
-                "enabled": bool(node.auto_raw_camera_fallback),
-                "after_s": float(node.raw_fallback_after_s),
-                "attempted": dict(node._fallback_attempted),
-            },
             "last_error": node.last_depth_error,
             "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
-            "compressed_camera_age_s": round(now - node.last_compressed_frame_time, 2) if node.last_compressed_frame_time > 0 else -1.0,
             "camera_source": node.rgb_frame_source,
             "camera_topic": node.rgb_frame_topic,
             "camera_stale_reason": node.last_rgb_stale_reason or node._rgb_stale_reason(now),
@@ -1910,13 +1726,8 @@ def create_app(node: DashboardNode) -> FastAPI:
             "publishers": {
                 topic: node.count_publishers(topic)
                 for topic in (
-                    node.subscription_topics.get("image", ""),
-                    node.subscription_topics.get("fallback_compressed_image", ""),
-                    node.subscription_topics.get("depth_compressed", ""),
                     node.subscription_topics.get("raw_image", ""),
                     node.subscription_topics.get("depth_raw", ""),
-                    node.subscription_topics.get("fallback_raw_image", ""),
-                    node.subscription_topics.get("fallback_depth_raw", ""),
                     node.subscription_topics.get("odom", ""),
                     node.subscription_topics.get("lidar", ""),
                     node.subscription_topics.get("battery", ""),
@@ -2068,12 +1879,27 @@ def create_app(node: DashboardNode) -> FastAPI:
                 )
                 reply = "Stopping now."
             elif parsed["intent"] == "EXPLORE":
-                node.exploration_command_pub.publish(
-                    String(data=json_dumps({"action": "start", "target_room": "", "source": "chat"}))
+                # Route EXPLORE through the mission orchestrator so the
+                # mission state machine activates: this flips room_detector
+                # into scanning mode (saves landmarks while wandering) and
+                # records the start position for return-to-home.
+                node.mission_command_pub.publish(
+                    String(
+                        data=json_dumps(
+                            {
+                                "command": request.message,
+                                "intent": parsed["intent"],
+                                "room": parsed["room"],
+                                "source": "chat",
+                                "timestamp": time.time(),
+                            }
+                        )
+                    )
                 )
                 reply = (
-                    "Starting VLM-driven exploration. I'll pick frontiers from the camera view "
-                    "and drive there while SLAM builds the map. Say 'stop' to halt."
+                    "Starting VLM-driven exploration. I'll pick frontiers from the camera view, "
+                    "save any room numbers I see, and drive there while SLAM builds the map. "
+                    "Say 'stop' to halt."
                 )
 
             latency_ms = (time.time() - started_at) * 1000.0

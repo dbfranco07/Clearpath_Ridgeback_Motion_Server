@@ -385,3 +385,12 @@ alias goridge='bash ~/ridgeback99/scripts/ridgeback_start.sh'
 
 Alias in jetson
 alias goridge='bash ~/ridgeback/scripts/ridgeback_web.sh'
+
+
+# to do because of camera change
+sudo apt install ros-humble-realsense2-camera (not needed)
+in ridgeback, edit /etc/clearpath/robot.yaml to set sensors.camera[0].launch_enabled: false
+
+in jetson
+sudo apt update
+sudo apt install ros-humble-realsense2-camera ros-humble-realsense2-description ros-humble-librealsense2*

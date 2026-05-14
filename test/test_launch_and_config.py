@@ -55,6 +55,7 @@ def test_ridgeback_web_script_exposes_effective_launch_settings() -> None:
         "RIDGEBACK_LAUNCH_NAV2",
         "RIDGEBACK_LAUNCH_VLM",
         "RIDGEBACK_LAUNCH_DASHBOARD",
+        "RIDGEBACK_LAUNCH_CAMERA",
         "RIDGEBACK_LAUNCH_VSLAM",
     ):
         assert setting in script
@@ -64,35 +65,34 @@ def test_ridgeback_web_script_exposes_effective_launch_settings() -> None:
 def test_protected_ridgeback_start_contract_remains_minimal() -> None:
     script = read_repo_file("scripts", "ridgeback_start.sh")
     assert "motion_server.py" in script
-    assert "image_publisher.py" in script
+    # RealSense moved to the Jetson; image_publisher must not be relaunched here.
+    assert "image_publisher.py" not in script
     assert "autonomy.launch.py" not in script
     assert "nav2" not in script.lower()
     assert "slam" not in script.lower()
 
 
-def test_dashboard_camera_fallbacks_are_available_in_mission_profile() -> None:
+def test_jetson_camera_topics_are_wired_through_autonomy_stack() -> None:
     launch = read_repo_file("ridgeback_image_motion", "launch", "autonomy.launch.py")
+    realsense = read_repo_file("ridgeback_image_motion", "launch", "realsense.launch.py")
     dashboard = read_repo_file("ridgeback_image_motion", "web_dashboard.py")
     params = read_repo_file("config", "autonomy_params.yaml")
 
-    assert "auto_raw_camera_fallback" in launch
-    assert "' in ['mission', 'debug']" in launch
-    assert "fallback_compressed_image_topic" in dashboard
-    assert "/r100_0140/sensors/camera_0/color/compressed" in params
-    assert "/r100_0140/sensors/camera_0/color/image" in params
-    assert "/r100_0140/sensors/camera_0/depth/image" in params
+    assert "realsense.launch.py" in launch
+    assert "launch_camera" in launch
+    assert "realsense2_camera_node" in realsense
+    assert "/r100_0140/sensors/camera_0/color/image_raw" in dashboard
+    assert "/r100_0140/sensors/camera_0/color/image_raw" in params
+    assert "/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw" in params
 
 
-def test_dashboard_debug_reports_camera_fallback_state() -> None:
+def test_dashboard_debug_reports_camera_stale_state() -> None:
     dashboard = read_repo_file("ridgeback_image_motion", "web_dashboard.py")
     for token in (
         "camera_stale_reason",
         "depth_stale_reason",
         "camera_topic",
         "depth_topic",
-        "image_fallback",
-        "compressed_fallback",
-        "raw_fallback",
     ):
         assert token in dashboard
 

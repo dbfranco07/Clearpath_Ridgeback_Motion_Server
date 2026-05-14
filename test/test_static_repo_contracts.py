@@ -42,11 +42,8 @@ def test_no_active_preloaded_map_references() -> None:
 
 def test_protected_ridgeback_side_files_are_not_autonomy_entrypoints() -> None:
     start = read_repo_file("scripts", "ridgeback_start.sh")
-    image_pub = read_repo_file("ridgeback_image_motion", "image_publisher.py")
     motion_server = read_repo_file("ridgeback_image_motion", "motion_server.py")
     assert "autonomy.launch.py" not in start
-    assert "nav2" not in image_pub.lower()
-    assert "slam" not in image_pub.lower()
     assert "nav2" not in motion_server.lower()
     assert "slam" not in motion_server.lower()
 
@@ -63,4 +60,5 @@ def test_scripts_document_jetson_and_ridgeback_split() -> None:
     start = read_repo_file("scripts", "ridgeback_start.sh")
     assert "Starting Jetson autonomy stack" in web
     assert "Starting motion server" in start
-    assert "Starting image publisher" in start
+    # RealSense now lives on the Jetson; the Ridgeback no longer publishes images.
+    assert "Starting image publisher" not in start

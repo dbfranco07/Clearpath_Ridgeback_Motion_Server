@@ -22,7 +22,6 @@ install(PROGRAMS
   ridgeback_image_motion/autonomy_common.py
   ridgeback_image_motion/cmd_vel_mux.py
   ridgeback_image_motion/frontier_explorer.py
-  ridgeback_image_motion/image_publisher.py
   ridgeback_image_motion/jetson_watchdog.py
   ridgeback_image_motion/mission_orchestrator.py
   ridgeback_image_motion/room_detector.py

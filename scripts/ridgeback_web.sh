@@ -40,6 +40,7 @@ RIDGEBACK_LAUNCH_SLAM="${RIDGEBACK_LAUNCH_SLAM:-auto}"
 RIDGEBACK_LAUNCH_NAV2="${RIDGEBACK_LAUNCH_NAV2:-auto}"
 RIDGEBACK_LAUNCH_VLM="${RIDGEBACK_LAUNCH_VLM:-auto}"
 RIDGEBACK_LAUNCH_DASHBOARD="${RIDGEBACK_LAUNCH_DASHBOARD:-auto}"
+RIDGEBACK_LAUNCH_CAMERA="${RIDGEBACK_LAUNCH_CAMERA:-auto}"
 RIDGEBACK_LAUNCH_VSLAM="${RIDGEBACK_LAUNCH_VSLAM:-false}"
 RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
 RIDGEBACK_REQUIRE_WIRED="${RIDGEBACK_REQUIRE_WIRED:-$RIDGEBACK_PREFER_WIRED}"
@@ -119,6 +120,7 @@ validate_launch_toggle RIDGEBACK_LAUNCH_SLAM "$RIDGEBACK_LAUNCH_SLAM"
 validate_launch_toggle RIDGEBACK_LAUNCH_NAV2 "$RIDGEBACK_LAUNCH_NAV2"
 validate_launch_toggle RIDGEBACK_LAUNCH_VLM "$RIDGEBACK_LAUNCH_VLM"
 validate_launch_toggle RIDGEBACK_LAUNCH_DASHBOARD "$RIDGEBACK_LAUNCH_DASHBOARD"
+validate_launch_toggle RIDGEBACK_LAUNCH_CAMERA "$RIDGEBACK_LAUNCH_CAMERA"
 validate_bool_toggle RIDGEBACK_LAUNCH_VSLAM "$RIDGEBACK_LAUNCH_VSLAM"
 validate_bool_toggle RIDGEBACK_PREFER_WIRED "$RIDGEBACK_PREFER_WIRED"
 validate_bool_toggle RIDGEBACK_REQUIRE_WIRED "$RIDGEBACK_REQUIRE_WIRED"
@@ -380,6 +382,7 @@ echo "  RIDGEBACK_LAUNCH_SLAM=$RIDGEBACK_LAUNCH_SLAM"
 echo "  RIDGEBACK_LAUNCH_NAV2=$RIDGEBACK_LAUNCH_NAV2"
 echo "  RIDGEBACK_LAUNCH_VLM=$RIDGEBACK_LAUNCH_VLM"
 echo "  RIDGEBACK_LAUNCH_DASHBOARD=$RIDGEBACK_LAUNCH_DASHBOARD"
+echo "  RIDGEBACK_LAUNCH_CAMERA=$RIDGEBACK_LAUNCH_CAMERA"
 echo "  RIDGEBACK_LAUNCH_VSLAM=$RIDGEBACK_LAUNCH_VSLAM"
 if ! wait_for_publishers; then
     echo "  WARN Ridgeback core ROS publishers are still not visible."
@@ -389,8 +392,8 @@ if ! wait_for_publishers; then
 fi
 topic_status "/r100_0140/sensors/lidar2d_0/scan" "2D LiDAR"
 topic_status "/r100_0140/platform/odom/filtered" "Filtered odom"
-topic_status "/r100_0140/image/compressed" "Compressed RGB"
-topic_status "/r100_0140/image/depth_compressed" "Compressed depth"
+topic_status "/r100_0140/sensors/camera_0/color/image_raw" "Jetson RealSense RGB"
+topic_status "/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw" "Jetson RealSense depth (aligned)"
 topic_status "/r100_0140/tf" "TF"
 
 scan_age="$(sample_stamp_age "/r100_0140/sensors/lidar2d_0/scan")"
@@ -499,6 +502,12 @@ postflight_jetson() {
     require_node /safety_controller "core"
     require_node /cmd_vel_mux "core"
     require_node /jetson_watchdog "core"
+
+    # --- Camera (realsense2_camera on Jetson) ---
+    if component_enabled "$RIDGEBACK_LAUNCH_CAMERA" "$RIDGEBACK_PROFILE" mapping mission debug; then
+        require_topic_pub "/r100_0140/sensors/camera_0/color/image_raw" "camera"
+        require_topic_pub "/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw" "camera"
+    fi
 
     # --- Dashboard ---
     if component_enabled "$RIDGEBACK_LAUNCH_DASHBOARD" "$RIDGEBACK_PROFILE" teleop mapping mission debug; then
@@ -637,4 +646,5 @@ ros2 launch ridgeback_image_motion autonomy.launch.py \
     launch_nav2:="$RIDGEBACK_LAUNCH_NAV2" \
     launch_vlm:="$RIDGEBACK_LAUNCH_VLM" \
     launch_dashboard:="$RIDGEBACK_LAUNCH_DASHBOARD" \
+    launch_camera:="$RIDGEBACK_LAUNCH_CAMERA" \
     launch_vslam:="$RIDGEBACK_LAUNCH_VSLAM"

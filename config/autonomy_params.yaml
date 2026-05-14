@@ -18,8 +18,7 @@ mission_orchestrator:
 
 room_detector:
   ros__parameters:
-    image_topic: /r100_0140/image/compressed
-    fallback_image_topic: /r100_0140/sensors/camera_0/color/compressed
+    image_topic: /r100_0140/sensors/camera_0/color/image_raw
     odom_topic: /r100_0140/platform/odom/filtered
     mission_status_topic: /ridgeback/mission/status
     detections_topic: /ridgeback/semantic/room_detections
@@ -52,8 +51,7 @@ frontier_explorer:
     vlm_call_timeout_s: 2.0
     vlm_min_replan_interval_s: 4.0
     vlm_max_image_age_s: 2.0
-    image_topic: /r100_0140/image/compressed
-    fallback_image_topic: /r100_0140/sensors/camera_0/color/compressed
+    image_topic: /r100_0140/sensors/camera_0/color/image_raw
 
 safety_controller:
   ros__parameters:
@@ -100,13 +98,8 @@ ridgeback_dashboard:
   ros__parameters:
     host: 0.0.0.0
     port: 8081
-    image_topic: /r100_0140/image/compressed
-    raw_image_topic: ""
-    depth_compressed_topic: /r100_0140/image/depth_compressed
-    depth_topic: ""
-    fallback_compressed_image_topic: /r100_0140/sensors/camera_0/color/compressed
-    fallback_raw_image_topic: /r100_0140/sensors/camera_0/color/image
-    fallback_depth_topic: /r100_0140/sensors/camera_0/depth/image
+    raw_image_topic: /r100_0140/sensors/camera_0/color/image_raw
+    depth_topic: /r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw
     enable_depth_feed: true
     depth_render_hz: 4.0
     map_render_hz: 1.0

@@ -150,6 +150,24 @@ class MissionOrchestrator(Node):
         if intent == "RETURN_TO_START":
             self._start_return(command)
             return
+        if intent == "EXPLORE":
+            self.command = command
+            self.intent = intent
+            self.target_room = ""
+            self.last_error = ""
+            self.last_detection = {}
+            self.mission_started_at = time.time()
+            self.memory.record_mission(command, "started", parsed, self.session_id)
+            if not self.start_saved:
+                # _tick will pick this up once odom/TF resolve and transition
+                # to EXPLORING via the same path the GO_TO_ROOM case uses.
+                self.state = "STARTING"
+                self.phase = "waiting_for_start_position"
+                return
+            self._start_exploration()
+            self.state = "EXPLORING"
+            self.phase = "open_exploration"
+            return
         if intent != "GO_TO_ROOM" or not room:
             self.last_error = "unsupported_command"
             self.command = command
@@ -239,6 +257,10 @@ class MissionOrchestrator(Node):
                         self._start_exploration()
                         self.state = "EXPLORING"
                         self.phase = "frontier_search"
+                elif self.intent == "EXPLORE":
+                    self._start_exploration()
+                    self.state = "EXPLORING"
+                    self.phase = "open_exploration"
                 else:
                     self.state = "IDLE"
                     self.phase = "ready"

@@ -8,17 +8,19 @@ import time
 from collections import deque
 from typing import Any
 
+import cv2
 import numpy as np
 import rclpy
 import tf2_ros
 from action_msgs.msg import GoalStatus
+from cv_bridge import CvBridge
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import Twist
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 try:
@@ -49,8 +51,7 @@ class FrontierExplorer(Node):
         self.declare_parameter("vlm_call_timeout_s", 2.0)
         self.declare_parameter("vlm_min_replan_interval_s", 4.0)
         self.declare_parameter("vlm_max_image_age_s", 2.0)
-        self.declare_parameter("image_topic", "/r100_0140/image/compressed")
-        self.declare_parameter("fallback_image_topic", "/r100_0140/sensors/camera_0/color/compressed")
+        self.declare_parameter("image_topic", "/r100_0140/sensors/camera_0/color/image_raw")
         # When SLAM has no map yet (or no frontiers exist around the tiny
         # initial free patch), publish a slow in-place rotation so SLAM grows
         # the map until real frontiers appear.
@@ -72,15 +73,10 @@ class FrontierExplorer(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
-        seen_topics = set()
-        for topic in (
-            str(self.get_parameter("image_topic").value).strip(),
-            str(self.get_parameter("fallback_image_topic").value).strip(),
-        ):
-            if not topic or topic in seen_topics:
-                continue
-            seen_topics.add(topic)
-            self.create_subscription(CompressedImage, topic, self._image_cb, image_qos)
+        self._cv_bridge = CvBridge()
+        image_topic = str(self.get_parameter("image_topic").value).strip()
+        if image_topic:
+            self.create_subscription(Image, image_topic, self._image_cb, image_qos)
 
         self.map_msg: OccupancyGrid | None = None
         self.map_data: np.ndarray | None = None
@@ -113,7 +109,13 @@ class FrontierExplorer(Node):
                 self.get_logger().warn(f"VLM client init failed; falling back to distance: {exc}")
                 self._vlm_client = None
 
-        self.create_timer(0.5, self._tick)
+        self.nav_server_ready = False
+        # Tick at 5 Hz so discovery-rotation Twists land inside the mux's
+        # 0.35 s teleop window; also keeps Nav2 result polling tight.
+        self.create_timer(0.2, self._tick)
+        # Independent republisher: while discovery is active, keep refreshing
+        # /cmd_vel_teleop at 10 Hz so the mux never times the slot out.
+        self.create_timer(0.1, self._republish_discovery)
         self.get_logger().info("frontier_explorer ready")
 
     def _map_cb(self, msg: OccupancyGrid) -> None:
@@ -127,8 +129,16 @@ class FrontierExplorer(Node):
         self.pose["y"] = float(msg.pose.pose.position.y)
         self.pose["yaw"] = float(quaternion_to_yaw_rad(msg.pose.pose.orientation))
 
-    def _image_cb(self, msg: CompressedImage) -> None:
-        self.latest_image_jpeg = bytes(msg.data)
+    def _image_cb(self, msg: Image) -> None:
+        try:
+            frame = self._cv_bridge.imgmsg_to_cv2(msg, "bgr8")
+        except Exception as exc:
+            self.get_logger().warn(f"image conversion failed: {exc}")
+            return
+        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        if not ok:
+            return
+        self.latest_image_jpeg = encoded.tobytes()
         self.latest_image_time = time.time()
 
     def _refresh_map_pose(self) -> None:
@@ -370,9 +380,14 @@ class FrontierExplorer(Node):
         return ox + (cx + 0.5) * res, oy + (cy + 0.5) * res
 
     def _send_goal(self, goal: dict[str, float]) -> None:
-        if not self.nav_client.wait_for_server(timeout_sec=0.1):
+        # Cold-boot Nav2 lifecycle activation can take several seconds; give it
+        # a generous wait the first time so the very first frontier goal isn't
+        # silently dropped. Subsequent goals just confirm the server is still up.
+        wait_s = 0.2 if self.nav_server_ready else 3.0
+        if not self.nav_client.wait_for_server(timeout_sec=wait_s):
             self.last_error = "nav2_unavailable"
             return
+        self.nav_server_ready = True
         msg = NavigateToPose.Goal()
         msg.pose.header.frame_id = "map"
         msg.pose.header.stamp = self.get_clock().now().to_msg()
@@ -415,11 +430,17 @@ class FrontierExplorer(Node):
             self.state = "FAILED"
             self.last_error = "no_safe_frontier_after_discovery"
             return
+        # The 10 Hz _republish_discovery timer drives the actual cmd publishes
+        # so the mux's teleop slot doesn't time out between ticks.
+        self.state = "DISCOVERING"
+        self.last_error = "no_frontier_rotating"
+
+    def _republish_discovery(self) -> None:
+        if not self.discovery_active:
+            return
         twist = Twist()
         twist.angular.z = float(self.get_parameter("discovery_rotation_rps").value)
         self.discovery_pub.publish(twist)
-        self.state = "DISCOVERING"
-        self.last_error = "no_frontier_rotating"
 
     def _stop_discovery(self) -> None:
         if self.discovery_active:
