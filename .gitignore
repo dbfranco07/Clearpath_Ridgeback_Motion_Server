@@ -4,3 +4,9 @@ test.ipynb
 
 .venv/
 .claude/
+
+# Ignore OnIt local clone
+onit/
+build/
+install/
+log/
