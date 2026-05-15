@@ -31,13 +31,13 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             "serial_no": serial_no,
             "camera_name": camera_name,
+            # USB 2 mode: RGB only at 640x480x6. Depth + sync + aligned-depth
+            # all require USB 3 bandwidth. Re-enable once on a USB 3 cable/port.
             "enable_color": True,
-            "enable_depth": True,
-            "enable_sync": True,
-            "align_depth.enable": True,
-            "rgb_camera.color_profile": "640x480x15",
-            "depth_module.depth_profile": "640x480x15",
-            "depth_module.infra_profile": "640x480x15",
+            "enable_depth": False,
+            "enable_sync": False,
+            "align_depth.enable": False,
+            "rgb_camera.color_profile": "640x480x6",
             "enable_infra1": False,
             "enable_infra2": False,
             "enable_gyro": False,

@@ -100,7 +100,7 @@ ridgeback_dashboard:
     port: 8081
     raw_image_topic: /r100_0140/sensors/camera_0/color/image_raw
     depth_topic: /r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw
-    enable_depth_feed: true
+    enable_depth_feed: false
     depth_render_hz: 4.0
     map_render_hz: 1.0
     map_target_long_side: 1000

@@ -504,9 +504,11 @@ postflight_jetson() {
     require_node /jetson_watchdog "core"
 
     # --- Camera (realsense2_camera on Jetson) ---
+    # Depth + aligned-depth need USB 3; postflight only requires color so the
+    # USB-2 fallback profile still passes. Aligned-depth check returns when
+    # the camera is on a USB 3 cable.
     if component_enabled "$RIDGEBACK_LAUNCH_CAMERA" "$RIDGEBACK_PROFILE" mapping mission debug; then
         require_topic_pub "/r100_0140/sensors/camera_0/color/image_raw" "camera"
-        require_topic_pub "/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw" "camera"
     fi
 
     # --- Dashboard ---
