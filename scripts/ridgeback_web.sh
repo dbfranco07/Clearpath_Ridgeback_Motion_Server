@@ -424,7 +424,8 @@ if [[ "${RIDGEBACK_SKIP_STALE_CLEANUP:-0}" != "1" ]]; then
         "ridgeback_image_motion/.*/frontier_explorer.py" \
         "ridgeback_image_motion/.*/cmd_vel_mux.py" \
         "ridgeback_image_motion/.*/safety_controller.py" \
-        "ridgeback_image_motion/.*/jetson_watchdog.py"; do
+        "ridgeback_image_motion/.*/jetson_watchdog.py" \
+        "realsense2_camera_node"; do
         pkill -f "$pattern" 2>/dev/null || true
     done
 fi
