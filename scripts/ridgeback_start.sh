@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/ridgeback_clock_check.sh"
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export RMW_FASTRTPS_USE_SHM=0
+export RMW_FASTRTPS_USE_SHM=1
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_ridgeback.xml"
 
 RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
