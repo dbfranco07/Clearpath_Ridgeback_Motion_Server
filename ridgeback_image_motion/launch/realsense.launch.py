@@ -15,6 +15,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -29,7 +30,10 @@ def generate_launch_description() -> LaunchDescription:
         namespace=camera_namespace,
         output="screen",
         parameters=[{
-            "serial_no": serial_no,
+            # realsense2_camera_node declares serial_no as a string; without
+            # the explicit ParameterValue wrap, all-numeric serials get coerced
+            # to int and the node refuses to start.
+            "serial_no": ParameterValue(serial_no, value_type=str),
             "camera_name": camera_name,
             # USB 2 mode: RGB only at 640x480x6. Depth + sync + aligned-depth
             # all require USB 3 bandwidth. Re-enable once on a USB 3 cable/port.
