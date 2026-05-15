@@ -6,7 +6,7 @@ mission_orchestrator:
     exploration_command_topic: /ridgeback/exploration/command
     safety_status_topic: /ridgeback/safety/status
     odom_topic: /r100_0140/platform/odom/filtered
-    stop_topic: /ridgeback/mission/stop_cmd
+    stop_topic: /cmd_vel_safety
     navigate_action: navigate_to_pose
     map_frame: map
     base_frame: base_link
@@ -85,7 +85,7 @@ cmd_vel_mux:
     safety_status_topic: /ridgeback/safety/status
     status_topic: /ridgeback/cmd_vel_mux/status
     nav_timeout_s: 0.75
-    teleop_timeout_s: 0.75
+    teleop_timeout_s: 0.50
     safety_timeout_s: 0.50
     max_linear_mps: 0.45
     max_lateral_mps: 0.35

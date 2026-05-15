@@ -78,12 +78,13 @@ class SafetyDecisionFilter:
         )
         mission_active = inputs.mission_state in ACTIVE_MISSION_STATES
 
-        reasons: list[str] = []
+        hard_reasons: list[str] = []
+        soft_reasons: list[str] = []
 
         if inputs.closest_obstacle_m < cfg.danger_distance_m:
             self._obstacle_latched = True
             self._stop_hold_until = max(self._stop_hold_until, now + cfg.stop_hold_s)
-            reasons.append(f"obstacle {inputs.closest_obstacle_m:.2f}m")
+            hard_reasons.append(f"obstacle {inputs.closest_obstacle_m:.2f}m")
 
         hold_remaining = max(0.0, self._stop_hold_until - now)
         if self._obstacle_latched:
@@ -91,42 +92,48 @@ class SafetyDecisionFilter:
             if can_release:
                 self._obstacle_latched = False
             else:
-                if not any(reason.startswith("obstacle ") for reason in reasons):
+                if not any(reason.startswith("obstacle ") for reason in hard_reasons):
                     if hold_remaining > 0.0:
-                        reasons.append("obstacle_hold")
+                        hard_reasons.append("obstacle_hold")
                     else:
-                        reasons.append(
+                        hard_reasons.append(
                             f"obstacle_clearance_below_release {inputs.closest_obstacle_m:.2f}m"
                         )
 
         if lidar_age > cfg.lidar_timeout_s:
-            reasons.append("stale_lidar")
+            hard_reasons.append("stale_lidar")
         if odom_age > cfg.odom_timeout_s:
-            reasons.append("stale_odom")
+            hard_reasons.append("stale_odom")
         if inputs.estop_active:
-            reasons.append("robot_estop")
+            hard_reasons.append("robot_estop")
+        # VLM availability is *informational* — a flaky DGX link should not
+        # paralyze the robot, since the local frontier explorer can fall back
+        # to distance ranking and exploration/return still works without VLM.
         if mission_active and not inputs.network_healthy:
-            reasons.append("vlm_network_lost")
+            soft_reasons.append("vlm_network_lost")
         if mission_active and vlm_age < cfg.vlm_timeout_s and not inputs.vlm_healthy:
-            reasons.append("vlm_unhealthy")
+            soft_reasons.append("vlm_unhealthy")
         if (
             cfg.require_operator_heartbeat
             and mission_active
             and heartbeat_age > cfg.operator_heartbeat_timeout_s
         ):
-            reasons.append("operator_heartbeat_lost")
+            hard_reasons.append("operator_heartbeat_lost")
 
-        risk = "OK"
-        if reasons:
+        if hard_reasons:
             risk = "DANGER"
-        elif inputs.closest_obstacle_m < cfg.warning_distance_m:
+        elif soft_reasons or inputs.closest_obstacle_m < cfg.warning_distance_m:
             risk = "WARNING"
+        else:
+            risk = "OK"
+
+        reasons = hard_reasons + soft_reasons
 
         return SafetyDecision(
-            is_safe=not reasons,
+            is_safe=not hard_reasons,
             risk_level=risk,
             reasons=reasons,
-            stop_recommended=bool(reasons),
+            stop_recommended=bool(hard_reasons),
             stop_latched=self._obstacle_latched,
             hold_remaining_s=hold_remaining,
             release_distance_m=cfg.danger_release_distance_m,

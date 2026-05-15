@@ -44,7 +44,7 @@ class MissionOrchestrator(Node):
         self.declare_parameter("exploration_command_topic", "/ridgeback/exploration/command")
         self.declare_parameter("safety_status_topic", "/ridgeback/safety/status")
         self.declare_parameter("odom_topic", "/r100_0140/platform/odom/filtered")
-        self.declare_parameter("stop_topic", "/cmd_vel_nav")
+        self.declare_parameter("stop_topic", "/cmd_vel_safety")
         self.declare_parameter("navigate_action", "navigate_to_pose")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "base_link")

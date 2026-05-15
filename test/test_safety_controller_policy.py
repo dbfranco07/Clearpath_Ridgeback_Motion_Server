@@ -42,18 +42,31 @@ def test_safe_inputs_are_safe() -> None:
     assert decision.risk_level == "OK"
 
 
-def test_stale_lidar_stale_odom_estop_and_network_are_unsafe() -> None:
+def test_hard_stop_reasons_flip_is_safe_false() -> None:
     cases = [
         ("stale_lidar", {"last_lidar_time": 0.0}),
         ("stale_odom", {"last_odom_time": 0.0}),
         ("robot_estop", {"estop_active": True}),
-        ("vlm_network_lost", {"network_healthy": False}),
-        ("vlm_unhealthy", {"vlm_healthy": False}),
         ("operator_heartbeat_lost", {"last_operator_heartbeat_time": 1.0}),
     ]
     for reason, overrides in cases:
         decision = make_filter().evaluate(safe_inputs(**overrides))
         assert not decision.is_safe
+        assert decision.risk_level == "DANGER"
+        assert reason in decision.reasons
+
+
+def test_vlm_problems_are_warning_not_stop() -> None:
+    # A flaky DGX link or unhealthy VLM should keep the robot moving; the
+    # frontier explorer falls back to distance ranking and exploration / return
+    # do not depend on the VLM being reachable.
+    for reason, overrides in (
+        ("vlm_network_lost", {"network_healthy": False}),
+        ("vlm_unhealthy", {"vlm_healthy": False}),
+    ):
+        decision = make_filter().evaluate(safe_inputs(**overrides))
+        assert decision.is_safe, f"{reason} should not block motion"
+        assert decision.risk_level == "WARNING"
         assert reason in decision.reasons
 
 
@@ -62,6 +75,7 @@ def test_vlm_network_loss_does_not_block_idle_state() -> None:
         safe_inputs(mission_state="IDLE", network_healthy=False, last_operator_heartbeat_time=0.0)
     )
     assert decision.is_safe
+    assert decision.risk_level == "OK"
 
 
 def test_obstacle_inside_danger_distance_latches_stop() -> None:
