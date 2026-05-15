@@ -88,6 +88,7 @@ class MissionOrchestrator(Node):
 
         self.pose = {"x": 0.0, "y": 0.0, "yaw": 0.0}
         self.have_pose = False
+        self.have_map_pose = False
         self.start_saved = False
         self.state = "STARTING"
         self.phase = "waiting_for_pose"
@@ -123,6 +124,7 @@ class MissionOrchestrator(Node):
             self.pose["y"] = float(transform.transform.translation.y)
             self.pose["yaw"] = float(quaternion_to_yaw_rad(transform.transform.rotation))
             self.have_pose = True
+            self.have_map_pose = True
         except Exception:
             pass
 
@@ -239,7 +241,7 @@ class MissionOrchestrator(Node):
 
     def _tick(self) -> None:
         self._refresh_map_pose()
-        if self.have_pose and not self.start_saved:
+        if self.have_map_pose and not self.start_saved:
             self.memory.store_start_position(self.session_id, self.pose["x"], self.pose["y"], self.pose["yaw"])
             self.start_saved = True
             if self.state == "STARTING":

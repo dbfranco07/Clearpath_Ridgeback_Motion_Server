@@ -10,16 +10,16 @@ slam_toolbox:
 
     # Online async SLAM starts from a blank map. Do not set map_file_name or
     # serialized_map_file_name here; preloaded maps are intentionally forbidden.
-    # Throttle to 5 Hz so the Jetson can keep up with TF lookups under load.
-    # transform_timeout was 0.2s; bumped to 1.0s because TF crosses the wired
-    # bridge from the Ridgeback and arrives with variable latency.
-    throttle_scans: 5
+    # The Jetson is CPU-bound and TF crosses the wired bridge from the
+    # Ridgeback, so be generous: process 1 scan in 10 (~2.5 Hz, ample for a
+    # slow exploration robot) and let TF arrive up to 3 s late before dropping.
+    throttle_scans: 10
     transform_publish_period: 0.1
     map_update_interval: 4.0
     resolution: 0.05
     max_laser_range: 10.0
     minimum_time_interval: 0.2
-    transform_timeout: 1.0
+    transform_timeout: 3.0
     tf_buffer_duration: 30.0
     stack_size_to_use: 40000000
     enable_interactive_mode: false

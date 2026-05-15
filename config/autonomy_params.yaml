@@ -6,7 +6,7 @@ mission_orchestrator:
     exploration_command_topic: /ridgeback/exploration/command
     safety_status_topic: /ridgeback/safety/status
     odom_topic: /r100_0140/platform/odom/filtered
-    stop_topic: /cmd_vel_nav
+    stop_topic: /ridgeback/mission/stop_cmd
     navigate_action: navigate_to_pose
     map_frame: map
     base_frame: base_link
@@ -120,3 +120,4 @@ ridgeback_dashboard:
     teleop_lateral_speed: 0.28
     teleop_angular_speed: 0.85
     teleop_command_max_age_s: 1.50
+
