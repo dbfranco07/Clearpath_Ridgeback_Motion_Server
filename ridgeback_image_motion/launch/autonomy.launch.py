@@ -110,12 +110,6 @@ def _setup(context, *args, **kwargs):
     enable_camera = _resolve_toggle(context, "enable_camera", cam_truth)
 
     common_params = [params_file, {"namespace": namespace}]
-    # Nodes that use tf2_ros.TransformListener need to read the namespaced TF
-    # tree (platform publishes on /r100_0140/tf).
-    tf_remappings = [
-        ("/tf", "/r100_0140/tf"),
-        ("/tf_static", "/r100_0140/tf_static"),
-    ]
 
     actions = [
         LogInfo(msg=[
@@ -234,7 +228,6 @@ def _setup(context, *args, **kwargs):
                 name="frontier_explorer",
                 output="screen",
                 parameters=common_params,
-                remappings=tf_remappings,
                 emulate_tty=True,
             ),
             Node(
@@ -243,7 +236,6 @@ def _setup(context, *args, **kwargs):
                 name="mission_orchestrator",
                 output="screen",
                 parameters=common_params,
-                remappings=tf_remappings,
                 emulate_tty=True,
             ),
             Node(
@@ -264,7 +256,6 @@ def _setup(context, *args, **kwargs):
                 name="vlm_client",
                 output="screen",
                 parameters=common_params,
-                remappings=tf_remappings,
                 emulate_tty=True,
             )
         )
