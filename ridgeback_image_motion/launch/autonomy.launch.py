@@ -111,7 +111,9 @@ def _setup(context, *args, **kwargs):
                     f"{slam_pkg}/launch/online_async_launch.py"
                 ),
                 launch_arguments={
-                    "use_sim_time": "false",
+                    # nav2/slam launch files build PythonExpression([... use_sim_time])
+                    # which evaluates the literal as Python — use capital True/False.
+                    "use_sim_time": "False",
                     "slam_params_file": slam_params,
                 }.items(),
             )
@@ -126,10 +128,10 @@ def _setup(context, *args, **kwargs):
                     f"{nav2_pkg}/launch/navigation_launch.py"
                 ),
                 launch_arguments={
-                    "use_sim_time": "false",
+                    "use_sim_time": "False",
                     "params_file": nav2_params,
-                    "autostart": "true",
-                    "use_composition": "true",
+                    "autostart": "True",
+                    "use_composition": "True",
                 }.items(),
             )
         )
