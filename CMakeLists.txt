@@ -28,6 +28,7 @@ install(PROGRAMS
   ridgeback_image_motion/vlm_client.py
   ridgeback_image_motion/spatial_memory.py
   ridgeback_image_motion/jetson_watchdog.py
+  ridgeback_image_motion/tf_bridge.py
   ridgeback_image_motion/web_dashboard.py
   DESTINATION lib/${PROJECT_NAME}
 )

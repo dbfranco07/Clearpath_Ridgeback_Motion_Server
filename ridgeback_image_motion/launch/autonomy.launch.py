@@ -163,28 +163,25 @@ def _setup(context, *args, **kwargs):
         )
 
     # The platform publishes TFs on /r100_0140/tf, but slam_toolbox/nav2 run
-    # at root and subscribe to /tf. SetRemap is post-Humble, so we bridge with
-    # topic_tools relays instead — re-publish the namespaced TF tree onto /tf
-    # so every TF listener sees it.
+    # at root and subscribe to /tf. Bridge with our own node that uses
+    # explicit QoS — topic_tools relay has races with /tf_static's
+    # transient_local durability that silently drop frames into SLAM.
     if enable_slam == "true" or enable_nav2 == "true":
-        actions.extend([
+        actions.append(
             Node(
-                package="topic_tools",
-                executable="relay",
-                name="tf_relay",
-                arguments=["/r100_0140/tf", "/tf"],
-                output="log",
-            ),
-            Node(
-                package="topic_tools",
-                executable="relay",
-                name="tf_static_relay",
-                arguments=["/r100_0140/tf_static", "/tf_static"],
-                # /tf_static uses transient_local; relay matches input QoS.
-                parameters=[{"qos_reliability": "reliable", "qos_durability": "transient_local"}],
-                output="log",
-            ),
-        ])
+                package="ridgeback_image_motion",
+                executable="tf_bridge.py",
+                name="tf_bridge",
+                output="screen",
+                parameters=[{
+                    "source_tf": f"/{namespace}/tf",
+                    "source_tf_static": f"/{namespace}/tf_static",
+                    "output_tf": "/tf",
+                    "output_tf_static": "/tf_static",
+                }],
+                emulate_tty=True,
+            )
+        )
 
     if enable_slam == "true":
         slam_pkg = FindPackageShare("slam_toolbox").perform(context)
@@ -204,21 +201,32 @@ def _setup(context, *args, **kwargs):
         )
 
     if enable_nav2 == "true":
-        nav2_pkg = FindPackageShare("nav2_bringup").perform(context)
-        nav2_params = PathJoinSubstitution([pkg, "config", "nav2_params.yaml"]).perform(context)
-        actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    f"{nav2_pkg}/launch/navigation_launch.py"
-                ),
-                launch_arguments={
-                    "use_sim_time": "False",
-                    "params_file": nav2_params,
-                    "autostart": "True",
-                    "use_composition": "True",
-                }.items(),
+        try:
+            nav2_pkg = FindPackageShare("nav2_bringup").perform(context)
+        except Exception as exc:
+            actions.append(
+                LogInfo(msg=[f"[autonomy] ERROR: nav2_bringup not found ({exc})"])
             )
-        )
+            nav2_pkg = ""
+        if nav2_pkg:
+            nav2_launch = f"{nav2_pkg}/launch/navigation_launch.py"
+            nav2_params = PathJoinSubstitution([pkg, "config", "nav2_params.yaml"]).perform(context)
+            actions.append(
+                LogInfo(msg=[f"[autonomy] including {nav2_launch}"])
+            )
+            actions.append(
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(nav2_launch),
+                    launch_arguments={
+                        "use_sim_time": "False",
+                        "params_file": nav2_params,
+                        "autostart": "True",
+                        # Composition silently failed — switch to separate
+                        # processes so any node-level error is visible.
+                        "use_composition": "False",
+                    }.items(),
+                )
+            )
 
     if enable_explorer == "true":
         actions.extend([
@@ -261,18 +269,32 @@ def _setup(context, *args, **kwargs):
         )
 
     if enable_camera == "true":
-        rs_pkg = FindPackageShare("realsense2_camera").perform(context)
         profile_label, rs_args = _realsense_launch_args(
             camera_namespace=f"/{namespace}/sensors",
             camera_name="camera_0",
         )
+        # Direct Node action instead of IncludeLaunchDescription(rs_launch.py).
+        # rs_launch.py greedily reads ALL parent LaunchConfigurations and
+        # passes them to the realsense node, producing pages of "Parameter
+        # 'host'/'enable_slam'/etc. is not supported" warnings. The direct
+        # form passes only the params we set.
+        rs_params = {
+            k: (v == "true") if v in ("true", "false") else v
+            for k, v in rs_args.items()
+            if k not in ("camera_namespace", "camera_name")
+        }
         actions.append(
             LogInfo(msg=[f"[autonomy] RealSense profile: {profile_label}"])
         )
         actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(f"{rs_pkg}/launch/rs_launch.py"),
-                launch_arguments=rs_args.items(),
+            Node(
+                package="realsense2_camera",
+                executable="realsense2_camera_node",
+                namespace=rs_args["camera_namespace"],
+                name=rs_args["camera_name"],
+                parameters=[rs_params],
+                output="screen",
+                emulate_tty=True,
             )
         )
 
