@@ -30,6 +30,60 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
+def _detect_realsense_usb_speed() -> str:
+    """Return '3' (USB3) or '2' (USB2) for an attached Intel D435.
+
+    Probes lsusb -t. If lsusb or the camera is absent, falls back to '2' so
+    the conservative profile is used (works on any speed but lower quality).
+    """
+    lsusb = shutil.which("lsusb")
+    if lsusb is None:
+        return "2"
+    try:
+        proc = subprocess.run([lsusb, "-t"], capture_output=True, text=True, timeout=2.0)
+    except Exception:
+        return "2"
+    target_line = ""
+    for line in proc.stdout.splitlines():
+        # The D435 advertises Intel 0x8086:0x0b07 (and similar variants).
+        if "Intel" in line or "8086:0b07" in line:
+            target_line = line
+            break
+    for marker, code in (("10000M", "3"), ("5000M", "3"), ("480M", "2")):
+        if marker in target_line:
+            return code
+    return "2"
+
+
+def _realsense_launch_args(camera_namespace: str, camera_name: str) -> tuple[str, dict[str, str]]:
+    """Pick rs_launch.py args for the detected USB speed.
+
+    Returns (profile_label, args_dict).
+    """
+    speed = _detect_realsense_usb_speed()
+    if speed == "3":
+        return "USB3 (640x480 RGB+depth @30)", {
+            "camera_namespace": camera_namespace,
+            "camera_name": camera_name,
+            "enable_color": "true",
+            "rgb_camera.color_profile": "640x480x30",
+            "enable_depth": "true",
+            "depth_module.depth_profile": "640x480x30",
+            "align_depth.enable": "true",
+            "enable_sync": "true",
+            "pointcloud.enable": "false",
+        }
+    return "USB2 (424x240 color-only @15)", {
+        "camera_namespace": camera_namespace,
+        "camera_name": camera_name,
+        "enable_color": "true",
+        "rgb_camera.color_profile": "424x240x15",
+        "enable_depth": "false",
+        "align_depth.enable": "false",
+        "pointcloud.enable": "false",
+    }
+
+
 def _resolve_toggle(context, name: str, profile_truth_map: dict[str, bool]) -> str:
     profile = LaunchConfiguration("profile").perform(context)
     explicit = LaunchConfiguration(name).perform(context)
@@ -48,11 +102,14 @@ def _setup(context, *args, **kwargs):
 
     full = {"full": True, "safety_only": False, "web_only": False}
     web = {"full": True, "safety_only": False, "web_only": True}
+    # Camera defaults to on in full and web_only (dashboard needs the feed).
+    cam_truth = {"full": True, "safety_only": False, "web_only": True}
     enable_slam = _resolve_toggle(context, "enable_slam", full)
     enable_nav2 = _resolve_toggle(context, "enable_nav2", full)
     enable_explorer = _resolve_toggle(context, "enable_explorer", full)
     enable_vlm = _resolve_toggle(context, "enable_vlm", full)
     enable_web = _resolve_toggle(context, "enable_web", web)
+    enable_camera = _resolve_toggle(context, "enable_camera", cam_truth)
 
     common_params = [params_file, {"namespace": namespace}]
     # Nodes that use tf2_ros.TransformListener need to read the namespaced TF
@@ -70,6 +127,7 @@ def _setup(context, *args, **kwargs):
             " explorer=", enable_explorer,
             " vlm=", enable_vlm,
             " web=", enable_web,
+            " camera=", enable_camera,
         ]),
 
         # Always-on: safety / mux / watchdog.
@@ -204,6 +262,22 @@ def _setup(context, *args, **kwargs):
             )
         )
 
+    if enable_camera == "true":
+        rs_pkg = FindPackageShare("realsense2_camera").perform(context)
+        profile_label, rs_args = _realsense_launch_args(
+            camera_namespace=f"/{namespace}/sensors",
+            camera_name="camera_0",
+        )
+        actions.append(
+            LogInfo(msg=[f"[autonomy] RealSense profile: {profile_label}"])
+        )
+        actions.append(
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(f"{rs_pkg}/launch/rs_launch.py"),
+                launch_arguments=rs_args.items(),
+            )
+        )
+
     return actions
 
 
@@ -225,5 +299,6 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("enable_explorer", default_value="auto"),
         DeclareLaunchArgument("enable_vlm", default_value="auto"),
         DeclareLaunchArgument("enable_web", default_value="auto"),
+        DeclareLaunchArgument("enable_camera", default_value="auto"),
         OpaqueFunction(function=_setup),
     ])
