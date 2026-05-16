@@ -1,9 +1,8 @@
 #!/bin/bash
 # Ridgeback R100 Start Script
-# Builds package and runs motion_server + RealSense camera. The RealSense
-# bringup auto-detects USB speed (USB3 -> 640x480 RGB+depth @30; USB2 ->
-# 424x240 color-only @15) so it works regardless of which USB-A cable is
-# plugged in. (clearpath-robot.service handles platform bringup.)
+# Builds package and runs motion_server only. The RealSense camera is
+# physically wired to the Jetson and brought up by ridgeback_web.sh
+# there. (clearpath-robot.service handles platform bringup.)
 
 set -e
 
@@ -147,48 +146,6 @@ topic_status() {
     fi
 }
 
-# Probe USB speed for the Intel D435 (vid:pid 8086:0b07). Returns 3 (USB3) or 2 (USB2).
-detect_rs_usb_speed() {
-    local row speed
-    row="$(lsusb -t 2>/dev/null | awk '/Intel|8086:0b07/ {print; exit}')"
-    if [[ -z "$row" ]]; then
-        # No D435 on the bus — bail later, but assume USB2 as the safe fallback.
-        echo 2
-        return
-    fi
-    speed="$(printf '%s' "$row" | grep -oE '(480M|5000M|10000M)' | head -n1)"
-    case "$speed" in
-        5000M|10000M) echo 3 ;;
-        *)            echo 2 ;;
-    esac
-}
-
-USB_SPEED="$(detect_rs_usb_speed)"
-RS_NS="/r100_0140/sensors/camera_0"
-if [[ "$USB_SPEED" == "3" ]]; then
-    RS_PROFILE="USB3 (640x480 RGB+depth @30)"
-    RS_ARGS=(
-        camera_namespace:=$RS_NS
-        enable_color:=true
-        rgb_camera.color_profile:=640x480x30
-        enable_depth:=true
-        depth_module.depth_profile:=640x480x30
-        align_depth.enable:=true
-        enable_sync:=true
-        pointcloud.enable:=false
-    )
-else
-    RS_PROFILE="USB2 (424x240 color-only @15)"
-    RS_ARGS=(
-        camera_namespace:=$RS_NS
-        enable_color:=true
-        rgb_camera.color_profile:=424x240x15
-        enable_depth:=false
-        align_depth.enable:=false
-        pointcloud.enable:=false
-    )
-fi
-
 echo ""
 echo "Ridgeback platform diagnostics:"
 echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-unset}"
@@ -196,7 +153,8 @@ echo "  ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY:-unset}"
 echo "  RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-unset}"
 echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
-echo "  RealSense USB speed: $USB_SPEED -> $RS_PROFILE"
+echo "  This script intentionally starts only motion_server.py."
+echo "  RealSense RGB-D is launched on the Jetson by ridgeback_web.sh."
 topic_status "/r100_0140/sensors/lidar2d_0/scan" "2D LiDAR"
 topic_status "/r100_0140/platform/odom/filtered" "Filtered odom"
 
@@ -206,9 +164,6 @@ cleanup() {
     echo "Shutting down..."
     if [ ! -z "${MOTION_PID:-}" ]; then
         kill $MOTION_PID 2>/dev/null || true
-    fi
-    if [ ! -z "${RS_PID:-}" ]; then
-        kill $RS_PID 2>/dev/null || true
     fi
     if [ ! -z "${TAIL_PID:-}" ]; then
         kill $TAIL_PID 2>/dev/null || true
@@ -256,7 +211,6 @@ postflight_ridgeback() {
     }
 
     check_owned_node "motion_server"   "$MOTION_PID" "$MOTION_LOG" "Motion Service Server started"
-    check_owned_node "realsense"       "$RS_PID"     "$RS_LOG"     "RealSense Node Is Up"
 
     # External publishers from the clearpath-platform/clearpath-sensors services
     # — these use the system DDS config so ros2 cli can see them.
@@ -275,27 +229,6 @@ postflight_ridgeback() {
         fi
     done
 
-    # Realsense publishers — color is required, depth only on USB3.
-    local rs_color="/r100_0140/sensors/camera_0/color/image_raw"
-    local color_pub
-    color_pub="$(timeout 3 ros2 topic info "$rs_color" 2>/dev/null | awk '/Publisher count:/ { print $3; exit }')"
-    if [[ -n "$color_pub" && "$color_pub" != "0" ]]; then
-        echo "  OK   topic $rs_color ($color_pub publisher(s))"
-    else
-        echo "  FAIL topic $rs_color has NO publishers (RealSense did not start?)" >&2
-        errs=$((errs + 1))
-    fi
-    if [[ "$USB_SPEED" == "3" ]]; then
-        local rs_depth="/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw"
-        local depth_pub
-        depth_pub="$(timeout 3 ros2 topic info "$rs_depth" 2>/dev/null | awk '/Publisher count:/ { print $3; exit }')"
-        if [[ -n "$depth_pub" && "$depth_pub" != "0" ]]; then
-            echo "  OK   topic $rs_depth ($depth_pub publisher(s))"
-        else
-            echo "  WARN topic $rs_depth has NO publishers (USB3 detected but depth missing)" >&2
-        fi
-    fi
-
     echo "------------------------------------------"
     if (( errs == 0 )); then
         echo "[POSTFLIGHT] PASS — Ridgeback is ready for the Jetson stack."
@@ -308,15 +241,10 @@ postflight_ridgeback() {
     echo "=========================================="
 }
 
-# Run motion server + realsense in background, teeing output for post-mortem
+# Run motion server in background, teeing output for post-mortem
 echo ""
 echo "[4/4] Starting services..."
 echo "=========================================="
-echo "Starting RealSense camera ($RS_PROFILE)..."
-RS_LOG=/tmp/ridgeback_realsense.log
-ros2 launch realsense2_camera rs_launch.py "${RS_ARGS[@]}" >"$RS_LOG" 2>&1 &
-RS_PID=$!
-
 echo "Starting motion server..."
 MOTION_LOG=/tmp/ridgeback_motion.log
 ros2 run ridgeback_image_motion motion_server.py --ros-args \
@@ -324,14 +252,14 @@ ros2 run ridgeback_image_motion motion_server.py --ros-args \
     >"$MOTION_LOG" 2>&1 &
 MOTION_PID=$!
 
-# Give nodes a moment to crash if they're going to crash on import.
-sleep 4
+# Give the node a moment to crash if it's going to crash on import.
+sleep 3
 
 check_alive() {
     local name="$1" pid="$2" log="$3" runcmd="$4"
     if ! kill -0 "$pid" 2>/dev/null; then
         echo ""
-        echo "ERROR: $name (PID $pid) died within 4s of launch."
+        echo "ERROR: $name (PID $pid) died within 3s of launch."
         echo "Last 40 lines of $log:"
         tail -n 40 "$log" 2>/dev/null || echo "(no log available)"
         echo ""
@@ -343,13 +271,11 @@ check_alive() {
 }
 
 check_alive "motion_server"   "$MOTION_PID" "$MOTION_LOG" "ros2 run ridgeback_image_motion motion_server.py"
-check_alive "realsense"       "$RS_PID"     "$RS_LOG"     "ros2 launch realsense2_camera rs_launch.py ${RS_ARGS[*]}"
 
 echo ""
 echo "=========================================="
 echo "All services running!"
 echo "  - Motion Server   (PID: $MOTION_PID, log: $MOTION_LOG)"
-echo "  - RealSense       (PID: $RS_PID, log: $RS_LOG, profile: $RS_PROFILE)"
 echo "Press Ctrl+C to stop all"
 echo "=========================================="
 
@@ -361,6 +287,5 @@ postflight_ridgeback &
 POSTFLIGHT_PID=$!
 
 wait "$MOTION_PID"
-kill "$RS_PID" 2>/dev/null || true
 kill "$TAIL_PID" 2>/dev/null || true
 kill "$POSTFLIGHT_PID" 2>/dev/null || true
