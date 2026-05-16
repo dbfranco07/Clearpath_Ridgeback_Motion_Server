@@ -264,7 +264,10 @@ elif [[ -z "${RIDGEBACK_IP:-}" ]]; then
     done
 fi
 
-if [[ -n "${JETSON_IP:-}" && -n "${RIDGEBACK_IP:-}" ]]; then
+if [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+    echo "FastDDS profile DISABLED (RIDGEBACK_DISABLE_FASTRTPS_PROFILE=1)"
+elif [[ -n "${JETSON_IP:-}" && -n "${RIDGEBACK_IP:-}" ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/fastrtps_jetson_generated.xml
     python3 "$RIDGEBACK_WORKSPACE/scripts/generate_fastrtps_profile.py" \
         --local-ip "$JETSON_IP" \

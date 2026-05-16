@@ -9,20 +9,37 @@ from pathlib import Path
 
 TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <!--
-  defaultUnicastLocatorList is intentionally omitted so FastDDS binds user and
-  metatraffic locators to *all* interfaces, including 127.0.0.1. Restricting
-  the bind list to a single WiFi IP (as a previous revision did) breaks
-  intra-machine service discovery: sibling Nav2 processes have to hairpin
-  every SPDP packet through the WiFi NIC, and `lifecycle_manager` ends up
-  stuck on "Waiting for service controller_server/get_state...".
-
-  initialPeersList still suppresses default multicast and limits cross-host
-  discovery to the listed peers, which is the whole point of the profile.
+  Why this profile:
+    1. defaultUnicastLocatorList is intentionally omitted so FastDDS binds
+       to all interfaces (including 127.0.0.1).
+    2. SHM transport is declared explicitly. When FASTRTPS_DEFAULT_PROFILES_FILE
+       is set, the env var RMW_FASTRTPS_USE_SHM=1 is ignored — the profile
+       owns the transport stack. Without SHM declared here, every local
+       participant talks UDP-only, the well-known port pool gets crowded
+       with 15+ Jetson processes, and Nav2 lifecycle_manager hangs forever
+       on "Waiting for service controller_server/get_state...".
+    3. UDPv4 stays for cross-host comms with the Ridgeback. initialPeersList
+       suppresses multicast and limits unicast SPDP to the listed peers.
 -->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/FastRTPS_Profiles">
     <profiles>
+        <transport_descriptors>
+            <transport_descriptor>
+                <transport_id>shm_transport</transport_id>
+                <type>SHM</type>
+            </transport_descriptor>
+            <transport_descriptor>
+                <transport_id>udp_transport</transport_id>
+                <type>UDPv4</type>
+            </transport_descriptor>
+        </transport_descriptors>
         <participant profile_name="participant_profile" is_default_profile="true">
             <rtps>
+                <userTransports>
+                    <transport_id>shm_transport</transport_id>
+                    <transport_id>udp_transport</transport_id>
+                </userTransports>
+                <useBuiltinTransports>false</useBuiltinTransports>
                 <builtin>
                     <initialPeersList>
 {peer_locators}
