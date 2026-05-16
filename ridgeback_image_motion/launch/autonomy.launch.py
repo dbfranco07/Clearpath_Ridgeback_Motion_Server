@@ -11,6 +11,9 @@ dashboard are conditional includes.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -18,6 +21,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
+    SetRemap,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -51,6 +55,12 @@ def _setup(context, *args, **kwargs):
     enable_web = _resolve_toggle(context, "enable_web", web)
 
     common_params = [params_file, {"namespace": namespace}]
+    # Nodes that use tf2_ros.TransformListener need to read the namespaced TF
+    # tree (platform publishes on /r100_0140/tf).
+    tf_remappings = [
+        ("/tf", "/r100_0140/tf"),
+        ("/tf_static", "/r100_0140/tf_static"),
+    ]
 
     actions = [
         LogInfo(msg=[
@@ -102,38 +112,53 @@ def _setup(context, *args, **kwargs):
             )
         )
 
+    # TFs are published on /r100_0140/tf (the platform launches under that
+    # namespace), but slam_toolbox and nav2 run at root and so subscribe to
+    # /tf by default. Remap inside each GroupAction so their internal
+    # TransformListeners see the namespaced TF tree.
+    tf_remaps = [
+        SetRemap("/tf", "/r100_0140/tf"),
+        SetRemap("/tf_static", "/r100_0140/tf_static"),
+    ]
+
     if enable_slam == "true":
         slam_pkg = FindPackageShare("slam_toolbox").perform(context)
         slam_params = PathJoinSubstitution([pkg, "config", "slam_params.yaml"]).perform(context)
         actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    f"{slam_pkg}/launch/online_async_launch.py"
+            GroupAction([
+                *tf_remaps,
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(
+                        f"{slam_pkg}/launch/online_async_launch.py"
+                    ),
+                    launch_arguments={
+                        # nav2/slam launch files build PythonExpression([... use_sim_time])
+                        # which evaluates the literal as Python — use capital True/False.
+                        "use_sim_time": "False",
+                        "slam_params_file": slam_params,
+                    }.items(),
                 ),
-                launch_arguments={
-                    # nav2/slam launch files build PythonExpression([... use_sim_time])
-                    # which evaluates the literal as Python — use capital True/False.
-                    "use_sim_time": "False",
-                    "slam_params_file": slam_params,
-                }.items(),
-            )
+            ])
         )
 
     if enable_nav2 == "true":
         nav2_pkg = FindPackageShare("nav2_bringup").perform(context)
         nav2_params = PathJoinSubstitution([pkg, "config", "nav2_params.yaml"]).perform(context)
         actions.append(
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    f"{nav2_pkg}/launch/navigation_launch.py"
+            GroupAction([
+                *tf_remaps,
+                IncludeLaunchDescription(
+                    PythonLaunchDescriptionSource(
+                        f"{nav2_pkg}/launch/navigation_launch.py"
+                    ),
+                    launch_arguments={
+                        "use_sim_time": "False",
+                        "params_file": nav2_params,
+                        "autostart": "True",
+                        "use_composition": "True",
+                    }.items(),
                 ),
-                launch_arguments={
-                    "use_sim_time": "False",
-                    "params_file": nav2_params,
-                    "autostart": "True",
-                    "use_composition": "True",
-                }.items(),
-            )
+            ])
         )
 
     if enable_explorer == "true":
@@ -144,6 +169,7 @@ def _setup(context, *args, **kwargs):
                 name="frontier_explorer",
                 output="screen",
                 parameters=common_params,
+                remappings=tf_remappings,
                 emulate_tty=True,
             ),
             Node(
@@ -152,6 +178,7 @@ def _setup(context, *args, **kwargs):
                 name="mission_orchestrator",
                 output="screen",
                 parameters=common_params,
+                remappings=tf_remappings,
                 emulate_tty=True,
             ),
             Node(
@@ -172,6 +199,7 @@ def _setup(context, *args, **kwargs):
                 name="vlm_client",
                 output="screen",
                 parameters=common_params,
+                remappings=tf_remappings,
                 emulate_tty=True,
             )
         )

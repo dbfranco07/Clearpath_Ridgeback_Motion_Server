@@ -126,10 +126,14 @@ class JetsonWatchdog(Node):
 
         if self._published_state is None or self._published_state != alive:
             self._published_state = alive
-            level = "info" if alive else "warn"
-            getattr(self.get_logger(), level)(
-                f"platform liveness={alive} (ping={ping_age:.1f}s status={status_age:.1f}s odom={odom_age:.1f}s)"
+            msg_text = (
+                f"platform liveness={alive} (ping={ping_age:.1f}s "
+                f"status={status_age:.1f}s odom={odom_age:.1f}s)"
             )
+            if alive:
+                self.get_logger().info(msg_text)
+            else:
+                self.get_logger().warn(msg_text)
 
     def _publish_diag(self, alive: bool, ping_age: float, status_age: float, odom_age: float) -> None:
         arr = DiagnosticArray()
