@@ -17,11 +17,9 @@ import subprocess
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    GroupAction,
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
-    SetRemap,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -170,53 +168,62 @@ def _setup(context, *args, **kwargs):
             )
         )
 
-    # TFs are published on /r100_0140/tf (the platform launches under that
-    # namespace), but slam_toolbox and nav2 run at root and so subscribe to
-    # /tf by default. Remap inside each GroupAction so their internal
-    # TransformListeners see the namespaced TF tree.
-    tf_remaps = [
-        SetRemap("/tf", "/r100_0140/tf"),
-        SetRemap("/tf_static", "/r100_0140/tf_static"),
-    ]
+    # The platform publishes TFs on /r100_0140/tf, but slam_toolbox/nav2 run
+    # at root and subscribe to /tf. SetRemap is post-Humble, so we bridge with
+    # topic_tools relays instead — re-publish the namespaced TF tree onto /tf
+    # so every TF listener sees it.
+    if enable_slam == "true" or enable_nav2 == "true":
+        actions.extend([
+            Node(
+                package="topic_tools",
+                executable="relay",
+                name="tf_relay",
+                arguments=["/r100_0140/tf", "/tf"],
+                output="log",
+            ),
+            Node(
+                package="topic_tools",
+                executable="relay",
+                name="tf_static_relay",
+                arguments=["/r100_0140/tf_static", "/tf_static"],
+                # /tf_static uses transient_local; relay matches input QoS.
+                parameters=[{"qos_reliability": "reliable", "qos_durability": "transient_local"}],
+                output="log",
+            ),
+        ])
 
     if enable_slam == "true":
         slam_pkg = FindPackageShare("slam_toolbox").perform(context)
         slam_params = PathJoinSubstitution([pkg, "config", "slam_params.yaml"]).perform(context)
         actions.append(
-            GroupAction([
-                *tf_remaps,
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(
-                        f"{slam_pkg}/launch/online_async_launch.py"
-                    ),
-                    launch_arguments={
-                        # nav2/slam launch files build PythonExpression([... use_sim_time])
-                        # which evaluates the literal as Python — use capital True/False.
-                        "use_sim_time": "False",
-                        "slam_params_file": slam_params,
-                    }.items(),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    f"{slam_pkg}/launch/online_async_launch.py"
                 ),
-            ])
+                launch_arguments={
+                    # nav2/slam launch files build PythonExpression([... use_sim_time])
+                    # which evaluates the literal as Python — use capital True/False.
+                    "use_sim_time": "False",
+                    "slam_params_file": slam_params,
+                }.items(),
+            )
         )
 
     if enable_nav2 == "true":
         nav2_pkg = FindPackageShare("nav2_bringup").perform(context)
         nav2_params = PathJoinSubstitution([pkg, "config", "nav2_params.yaml"]).perform(context)
         actions.append(
-            GroupAction([
-                *tf_remaps,
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(
-                        f"{nav2_pkg}/launch/navigation_launch.py"
-                    ),
-                    launch_arguments={
-                        "use_sim_time": "False",
-                        "params_file": nav2_params,
-                        "autostart": "True",
-                        "use_composition": "True",
-                    }.items(),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    f"{nav2_pkg}/launch/navigation_launch.py"
                 ),
-            ])
+                launch_arguments={
+                    "use_sim_time": "False",
+                    "params_file": nav2_params,
+                    "autostart": "True",
+                    "use_composition": "True",
+                }.items(),
+            )
         )
 
     if enable_explorer == "true":
