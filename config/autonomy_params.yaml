@@ -1,0 +1,135 @@
+# Per-node parameters for the Jetson autonomy stack.
+# All node names are unnamespaced — these are the names declared in each node's
+# super().__init__() call. Topic names default to /r100_0140/... where applicable.
+
+motion_server:
+  ros__parameters:
+    namespace: r100_0140
+    input_topic: /cmd_vel/mux_out
+    output_topic: ""        # auto: /<namespace>/platform/cmd_vel_unstamped
+    max_linear: 0.6
+    max_lateral: 0.6
+    max_angular: 1.5
+    watchdog_timeout_s: 0.3
+    publish_rate_hz: 50.0
+
+safety_controller:
+  ros__parameters:
+    heartbeat_topic: /operator/heartbeat
+    liveness_topic: /platform/liveness
+    safety_cmd_topic: /cmd_vel/safety
+    safety_latched_topic: /safety/latched
+    safety_reset_service: /safety/reset
+    heartbeat_timeout_s: 1.0
+    liveness_timeout_s: 2.5
+    publish_rate_hz: 20.0
+    require_reset: true
+
+cmd_vel_mux:
+  ros__parameters:
+    safety_topic: /cmd_vel/safety
+    teleop_topic: /cmd_vel/teleop
+    nav_topic: /cmd_vel/nav
+    output_topic: /cmd_vel/mux_out
+    safety_latched_topic: /safety/latched
+    teleop_timeout_s: 0.4
+    nav_timeout_s: 0.5
+    publish_rate_hz: 50.0
+
+jetson_watchdog:
+  ros__parameters:
+    namespace: r100_0140
+    ridgeback_ip: 192.168.131.1
+    liveness_topic: /platform/liveness
+    status_topic: ""        # auto: /<namespace>/platform/mcu/status
+    odom_topic: ""          # auto: /<namespace>/platform/odom/filtered
+    ping_period_s: 1.0
+    liveness_grace_s: 2.5
+    ping_timeout_s: 0.7
+
+frontier_explorer:
+  ros__parameters:
+    map_topic: /map
+    status_topic: /frontier/status
+    cancel_topic: /frontier/cancel
+    nav_action: navigate_to_pose
+    min_frontier_size_cells: 10
+    goal_blacklist_radius_m: 0.5
+    replan_period_s: 3.0
+    max_attempts_per_goal: 2
+    goal_padding_m: 0.3
+
+mission_orchestrator:
+  ros__parameters:
+    namespace: r100_0140
+    home_frame: map
+    base_frame: ""          # auto: <namespace>/base_link
+    goal_topic: /mission/goal
+    state_topic: /mission/state
+    home_topic: /mission/home_pose
+    frontier_cancel_topic: /frontier/cancel
+    frontier_status_topic: /frontier/status
+    vlm_trigger_topic: /vlm/trigger
+    vlm_observation_topic: /vlm/observation
+    memory_query_topic: /memory/query
+    memory_result_topic: /memory/result
+    safety_latched_topic: /safety/latched
+    nav_action: navigate_to_pose
+    periodic_vlm_period_s: 3.0
+    target_match_confidence: 0.7
+    max_explore_time_s: 600.0
+    approach_offset_m: 0.8
+    memory_lookup_timeout_s: 1.0
+    tick_period_s: 1.0
+
+spatial_memory:
+  ros__parameters:
+    db_path: ~/.ridgeback/spatial_memory.sqlite
+    min_confidence: 0.6
+    dedup_radius_m: 1.0
+    observation_topic: /vlm/observation
+    query_topic: /memory/query
+    result_topic: /memory/result
+
+vlm_client:
+  ros__parameters:
+    namespace: r100_0140
+    color_topic: ""         # auto: /<namespace>/sensors/camera_0/color/image_raw
+    odom_topic: ""          # auto: /<namespace>/platform/odom/filtered
+    trigger_topic: /vlm/trigger
+    observation_topic: /vlm/observation
+    home_frame: map
+    base_frame: ""          # auto: <namespace>/base_link
+    vlm_url: http://202.92.159.240:8000/v1
+    vlm_model: qwen2-vl
+    api_key_env: VLM_API_KEY
+    period_s: 3.0
+    motion_threshold_mps: 0.05
+    jpeg_quality: 80
+    request_timeout_s: 8.0
+    prompt: |
+      You are a building navigator. Look at this image and extract any visible
+      room number sign or door plate (e.g. '202', 'B312', '101A').
+      Reply with strict JSON only:
+      {"room": "<string or empty>", "confidence": <0..1>, "reason": "<short note>"}.
+
+ridgeback_dashboard:
+  ros__parameters:
+    namespace: r100_0140
+    scan_topic: ""          # auto: /<namespace>/sensors/lidar2d_0/scan
+    odom_topic: ""          # auto: /<namespace>/platform/odom/filtered
+    battery_topic: ""       # auto: /<namespace>/platform/bms/state
+    color_image_topic: ""   # auto: /<namespace>/sensors/camera_0/color/image_raw
+    depth_image_topic: ""   # auto: /<namespace>/sensors/camera_0/aligned_depth_to_color/image_raw
+    map_topic: /map
+    teleop_topic: /cmd_vel/teleop
+    heartbeat_topic: /operator/heartbeat
+    safety_latched_topic: /safety/latched
+    safety_reset_service: /safety/reset
+    mission_state_topic: /mission/state
+    mission_goal_topic: /mission/goal
+    frontier_status_topic: /frontier/status
+    vlm_observation_topic: /vlm/observation
+    teleop_max_linear: 0.5
+    teleop_max_lateral: 0.5
+    teleop_max_angular: 1.5

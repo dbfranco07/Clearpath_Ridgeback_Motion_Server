@@ -20,27 +20,25 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # Install Python executables
 install(PROGRAMS
   ridgeback_image_motion/autonomy_common.py
+  ridgeback_image_motion/motion_server.py
+  ridgeback_image_motion/safety_controller.py
   ridgeback_image_motion/cmd_vel_mux.py
   ridgeback_image_motion/frontier_explorer.py
-  ridgeback_image_motion/jetson_watchdog.py
   ridgeback_image_motion/mission_orchestrator.py
-  ridgeback_image_motion/room_detector.py
-  ridgeback_image_motion/safety_controller.py
-  ridgeback_image_motion/safety_policy.py
-  ridgeback_image_motion/web_controller.py
-  ridgeback_image_motion/web_dashboard.py
-  ridgeback_image_motion/motion_server.py
-  ridgeback_image_motion/spatial_memory.py
   ridgeback_image_motion/vlm_client.py
+  ridgeback_image_motion/spatial_memory.py
+  ridgeback_image_motion/jetson_watchdog.py
+  ridgeback_image_motion/web_dashboard.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # Install launch files
 install(DIRECTORY ridgeback_image_motion/launch/
-  DESTINATION share/${PROJECT_NAME}
+  DESTINATION share/${PROJECT_NAME}/launch
   FILES_MATCHING PATTERN "*.launch.py"
 )
 
+# Install config files
 install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config
   FILES_MATCHING PATTERN "*.yaml"

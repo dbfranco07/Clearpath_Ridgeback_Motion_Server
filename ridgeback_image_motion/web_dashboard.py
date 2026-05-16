@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Compact Jetson dashboard for Ridgeback autonomy and VLM chat."""
+"""Ridgeback autonomy dashboard — FastAPI + ROS2 bridge.
+
+UI HTML is preserved verbatim from the previous dashboard. The Python
+backend is trimmed to only the endpoints the UI calls, and pushes all
+mission / memory / VLM / safety state into ROS topics so other nodes own
+the logic.
+"""
 
 from __future__ import annotations
 
-import base64
+import argparse
 import math
 import threading
 import time
@@ -13,70 +19,34 @@ from typing import Any
 import cv2
 import numpy as np
 import rclpy
+import uvicorn
+from cv_bridge import CvBridge
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from pydantic import BaseModel
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, Image, LaserScan
-from std_msgs.msg import Bool, String
-from cv_bridge import CvBridge
-import uvicorn
-
-from ridgeback_image_motion.srv import Motion
+from std_msgs.msg import Bool, Header, String
+from std_srvs.srv import Trigger
 
 try:
-    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads, parse_intent_and_room
-    from ridgeback_image_motion.spatial_memory import SpatialMemory
-    from ridgeback_image_motion.vlm_client import build_vlm_client, chat_completion_messages
+    from ridgeback_image_motion.autonomy_common import (
+        json_dumps,
+        json_loads,
+        parse_intent_and_room,
+        quaternion_to_yaw_rad,
+    )
 except ImportError:
-    from autonomy_common import json_dumps, json_loads, parse_intent_and_room
-    from spatial_memory import SpatialMemory
-    from vlm_client import build_vlm_client, chat_completion_messages
-
-
-class MissionRequest(BaseModel):
-    command: str
-
-
-class ChatRequest(BaseModel):
-    message: str
-
-
-class TeleopRequest(BaseModel):
-    linear: float = 0.0
-    lateral: float = 0.0
-    angular: float = 0.0
-    source: str = "keyboard"
-    issued_at: float | None = None
-    seq: int = 0
-
-
-def extract_reasoning_trace(response: Any) -> str:
-    """Best-effort extraction of model reasoning from OpenAI-compatible responses."""
-    try:
-        choice = response.choices[0]
-        message = choice.message
-    except Exception:
-        return ""
-
-    candidates: list[Any] = []
-    for attr in ("reasoning_content", "thinking", "reasoning"):
-        candidates.append(getattr(message, attr, None))
-
-    # Some OpenAI-compatible servers place additional content in model_extra.
-    model_extra = getattr(message, "model_extra", None)
-    if isinstance(model_extra, dict):
-        for key in ("reasoning_content", "thinking", "reasoning"):
-            candidates.append(model_extra.get(key))
-
-    for value in candidates:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    return ""
+    from autonomy_common import (  # type: ignore[no-redef]
+        json_dumps,
+        json_loads,
+        parse_intent_and_room,
+        quaternion_to_yaw_rad,
+    )
 
 
 PAGE_HTML = """<!DOCTYPE html>
@@ -950,1061 +920,555 @@ updateLidar();
 """
 
 
+# ---------------------------------------------------------------------------
+# Pydantic request models
+# ---------------------------------------------------------------------------
+
+
+class TeleopRequest(BaseModel):
+    linear: float = 0.0
+    lateral: float = 0.0
+    angular: float = 0.0
+    source: str = "keyboard"
+    issued_at: float | None = None
+    seq: int = 0
+
+
+class MissionRequest(BaseModel):
+    command: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+
+
+# ---------------------------------------------------------------------------
+# ROS bridge
+# ---------------------------------------------------------------------------
+
+
+_LATCHED_QOS = QoSProfile(
+    depth=1,
+    reliability=ReliabilityPolicy.RELIABLE,
+    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    history=HistoryPolicy.KEEP_LAST,
+)
+
+
 class DashboardNode(Node):
-    def __init__(self):
+    """ROS bridge for the FastAPI dashboard.
+
+    Owns subscriptions for sensor/state topics and publishers for operator
+    actions. All heavy logic (mission FSM, safety latch, frontier exploration,
+    VLM) lives in dedicated nodes.
+    """
+
+    def __init__(self) -> None:
         super().__init__("ridgeback_dashboard")
 
-        self.declare_parameter("port", 8081)
-        self.declare_parameter("host", "0.0.0.0")
-        self.declare_parameter("raw_image_topic", "/r100_0140/sensors/camera_0/color/image_raw")
-        self.declare_parameter("depth_topic", "/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw")
-        self.declare_parameter("enable_depth_feed", True)
-        self.declare_parameter("rgb_stream_hz", 8.0)
-        self.declare_parameter("raw_rgb_render_hz", 8.0)
-        self.declare_parameter("depth_render_hz", 4.0)
-        self.declare_parameter("map_render_hz", 1.0)
-        self.declare_parameter("map_target_long_side", 1000)
-        self.declare_parameter("odom_topic", "/r100_0140/platform/odom/filtered")
-        self.declare_parameter("lidar_topic", "/r100_0140/sensors/lidar2d_0/scan")
-        self.declare_parameter("battery_topic", "/r100_0140/platform/bms/state")
+        # Parameters
+        self.declare_parameter("namespace", "r100_0140")
+        self.declare_parameter("scan_topic", "")
+        self.declare_parameter("odom_topic", "")
+        self.declare_parameter("battery_topic", "")
+        self.declare_parameter("color_image_topic", "")
+        self.declare_parameter("depth_image_topic", "")
         self.declare_parameter("map_topic", "/map")
-        self.declare_parameter("motion_service", "motion_service")
-        self.declare_parameter("cmd_vel_topic", "/cmd_vel_teleop")
-        self.declare_parameter("mission_command_topic", "/ridgeback/mission/command")
-        self.declare_parameter("exploration_command_topic", "/ridgeback/exploration/command")
-        self.declare_parameter("operator_heartbeat_topic", "/pc_heartbeat")
-        self.declare_parameter("mission_status_topic", "/ridgeback/mission/status")
-        self.declare_parameter("safety_status_topic", "/ridgeback/safety/status")
-        self.declare_parameter("vlm_status_topic", "/ridgeback/vlm/status")
-        self.declare_parameter("mux_status_topic", "/ridgeback/cmd_vel_mux/status")
-        self.declare_parameter("teleop_linear_speed", 0.28)
-        self.declare_parameter("teleop_lateral_speed", 0.28)
-        self.declare_parameter("teleop_angular_speed", 0.85)
-        self.declare_parameter("teleop_command_max_age_s", 0.75)
-        self.declare_parameter("teleop_repeat_hold_s", 0.60)
-        self.declare_parameter("teleop_repeat_hz", 20.0)
+        self.declare_parameter("teleop_topic", "/cmd_vel/teleop")
+        self.declare_parameter("heartbeat_topic", "/operator/heartbeat")
+        self.declare_parameter("safety_latched_topic", "/safety/latched")
+        self.declare_parameter("safety_reset_service", "/safety/reset")
+        self.declare_parameter("mission_state_topic", "/mission/state")
+        self.declare_parameter("mission_goal_topic", "/mission/goal")
+        self.declare_parameter("frontier_status_topic", "/frontier/status")
+        self.declare_parameter("vlm_observation_topic", "/vlm/observation")
+        self.declare_parameter("teleop_max_linear", 0.5)
+        self.declare_parameter("teleop_max_lateral", 0.5)
+        self.declare_parameter("teleop_max_angular", 1.5)
 
-        self._sensor_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT, durability=DurabilityPolicy.VOLATILE)
-        sensor_qos = self._sensor_qos
-        map_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
-        reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.VOLATILE)
-
-        raw_image_topic = str(self.get_parameter("raw_image_topic").value).strip()
-        depth_topic = str(self.get_parameter("depth_topic").value).strip()
-        self.enable_depth_feed = bool(self.get_parameter("enable_depth_feed").value)
-        self.rgb_stream_hz = max(1.0, float(self.get_parameter("rgb_stream_hz").value))
-        self.raw_rgb_render_hz = max(1.0, float(self.get_parameter("raw_rgb_render_hz").value))
-        self.depth_render_hz = max(0.5, float(self.get_parameter("depth_render_hz").value))
-        self.map_render_hz = max(0.1, float(self.get_parameter("map_render_hz").value))
-        self.map_target_long_side = max(320, int(self.get_parameter("map_target_long_side").value))
-        self.started_at = time.time()
-
-        self._dashboard_subscriptions = {}
-        self.subscription_topics = {
-            "raw_image": raw_image_topic,
-            "depth_raw": depth_topic if self.enable_depth_feed else "",
-            "odom": str(self.get_parameter("odom_topic").value),
-            "lidar": str(self.get_parameter("lidar_topic").value),
-            "battery": str(self.get_parameter("battery_topic").value),
-            "map": str(self.get_parameter("map_topic").value),
+        ns = self.get_parameter("namespace").value
+        self._params: dict[str, Any] = {
+            "scan": self.get_parameter("scan_topic").value or f"/{ns}/sensors/lidar2d_0/scan",
+            "odom": self.get_parameter("odom_topic").value or f"/{ns}/platform/odom/filtered",
+            "battery": self.get_parameter("battery_topic").value or f"/{ns}/platform/bms/state",
+            "color": self.get_parameter("color_image_topic").value
+            or f"/{ns}/sensors/camera_0/color/image_raw",
+            "depth": self.get_parameter("depth_image_topic").value
+            or f"/{ns}/sensors/camera_0/aligned_depth_to_color/image_raw",
+            "map": self.get_parameter("map_topic").value,
+            "teleop": self.get_parameter("teleop_topic").value,
+            "heartbeat": self.get_parameter("heartbeat_topic").value,
+            "safety_latched": self.get_parameter("safety_latched_topic").value,
+            "safety_reset": self.get_parameter("safety_reset_service").value,
+            "mission_state": self.get_parameter("mission_state_topic").value,
+            "mission_goal": self.get_parameter("mission_goal_topic").value,
+            "frontier_status": self.get_parameter("frontier_status_topic").value,
+            "vlm_observation": self.get_parameter("vlm_observation_topic").value,
         }
-
-        if raw_image_topic:
-            self._dashboard_subscriptions["raw_image"] = self.create_subscription(
-                Image,
-                raw_image_topic,
-                lambda msg, topic=raw_image_topic: self._raw_image_cb(msg, "raw", topic),
-                sensor_qos,
-            )
-        if self.enable_depth_feed and depth_topic:
-            self._dashboard_subscriptions["depth_raw"] = self.create_subscription(
-                Image,
-                depth_topic,
-                lambda msg, topic=depth_topic: self._depth_cb(msg, "depth_raw", topic),
-                sensor_qos,
-            )
-        self._dashboard_subscriptions["odom"] = self.create_subscription(Odometry, self.get_parameter("odom_topic").value, self._odom_cb, sensor_qos)
-        self._dashboard_subscriptions["lidar"] = self.create_subscription(LaserScan, self.get_parameter("lidar_topic").value, self._lidar_cb, sensor_qos)
-        self._dashboard_subscriptions["battery"] = self.create_subscription(BatteryState, self.get_parameter("battery_topic").value, self._battery_cb, sensor_qos)
-        self._dashboard_subscriptions["map"] = self.create_subscription(OccupancyGrid, self.get_parameter("map_topic").value, self._map_cb, map_qos)
-        self._dashboard_subscriptions["mission_status"] = self.create_subscription(String, self.get_parameter("mission_status_topic").value, self._mission_status_cb, reliable_qos)
-        self._dashboard_subscriptions["safety_status"] = self.create_subscription(String, self.get_parameter("safety_status_topic").value, self._safety_status_cb, reliable_qos)
-        self._dashboard_subscriptions["vlm_status"] = self.create_subscription(String, self.get_parameter("vlm_status_topic").value, self._vlm_status_cb, reliable_qos)
-        self._dashboard_subscriptions["mux_status"] = self.create_subscription(String, self.get_parameter("mux_status_topic").value, self._mux_status_cb, reliable_qos)
-        self.cmd_vel_pub = self.create_publisher(Twist, self.get_parameter("cmd_vel_topic").value, sensor_qos)
-        self.mission_command_pub = self.create_publisher(String, self.get_parameter("mission_command_topic").value, reliable_qos)
-        self.exploration_command_pub = self.create_publisher(String, self.get_parameter("exploration_command_topic").value, reliable_qos)
-        self.operator_heartbeat_pub = self.create_publisher(
-            Bool, self.get_parameter("operator_heartbeat_topic").value, reliable_qos
+        self._teleop_max = (
+            float(self.get_parameter("teleop_max_linear").value),
+            float(self.get_parameter("teleop_max_lateral").value),
+            float(self.get_parameter("teleop_max_angular").value),
         )
 
-        self.motion_client = self.create_client(Motion, self.get_parameter("motion_service").value)
-        self.teleop_linear_speed = float(self.get_parameter("teleop_linear_speed").value)
-        self.teleop_lateral_speed = float(self.get_parameter("teleop_lateral_speed").value)
-        self.teleop_angular_speed = float(self.get_parameter("teleop_angular_speed").value)
-        self.teleop_repeat_hold_s = max(0.10, float(self.get_parameter("teleop_repeat_hold_s").value))
-        self.teleop_repeat_hz = max(5.0, float(self.get_parameter("teleop_repeat_hz").value))
-
-        self.latest_frame: bytes | None = None
-        self.latest_frame_stamp = ""
-        self.frame_lock = threading.Lock()
-        self.last_frame_time = 0.0
-        self.last_raw_rgb_render_time = 0.0
-        self.rgb_frame_source = ""
-        self.rgb_frame_topic = ""
-        self.last_rgb_stale_reason = "no_rgb_frame"
-
-        # Depth camera
         self._bridge = CvBridge()
-        self.depth_frame: bytes | None = None
-        self.depth_lock = threading.Lock()
-        self.depth_event = threading.Event()
-        self.last_depth_time = 0.0
-        self.last_depth_render_time = 0.0
-        self.depth_frame_source = ""
-        self.depth_frame_topic = ""
-        self.last_depth_stale_reason = "no_depth_frame"
-        self.callback_counts = {
-            "raw_image": 0,
-            "depth_raw": 0,
-            "depth_rendered": 0,
-            "depth_errors": 0,
-            "odom": 0,
-            "lidar": 0,
-            "battery": 0,
-            "map": 0,
-        }
-        self.last_depth_error = ""
+        self._lock = threading.Lock()
 
-        self.odom = {"x": 0.0, "y": 0.0, "yaw": 0.0}
-        self.last_odom_time = 0.0
-        self.lidar = {"closest_m": 99.0, "range_count": 0,
-                      "ranges": [], "angle_min": 0.0, "angle_increment": 0.0, "range_max": 10.0}
-        self.last_lidar_time = 0.0
-        self.battery = {"voltage": 0.0, "pct": 0.0}
-        self.last_battery_time = 0.0
-        self.map_payload = {"image_bytes": None, "width": 0, "height": 0, "resolution": 0.0, "meta": "Waiting for map", "stamp": ""}
-        self.last_map_render_time = 0.0
-        self.last_map_time = 0.0
+        # Frame buffers
+        self._color_jpeg: bytes | None = None
+        self._color_stamp: float = 0.0
+        self._depth_jpeg: bytes | None = None
+        self._depth_stamp: float = 0.0
+        self._depth_enabled: bool = False
+        self._scan: dict[str, Any] = {}
+        self._scan_stamp: float = 0.0
+        self._battery_pct: float = 0.0
+        self._battery_v: float = 0.0
+        self._odom_x: float = 0.0
+        self._odom_y: float = 0.0
+        self._odom_yaw: float = 0.0
+        self._odom_stamp: float = 0.0
+        self._map_meta: str = ""
+        self._map_width: int = 0
+        self._map_height: int = 0
+        self._map_png: bytes | None = None
+        self._safety_latched: bool = True
+        self._mission_state: dict[str, Any] = {}
+        self._frontier_status: dict[str, Any] = {}
+        self._vlm_events: list[dict[str, Any]] = []
+        self._chat_history: list[dict[str, Any]] = []
+        self._last_teleop_source: str = "none"
+        self._last_teleop_stamp: float = 0.0
 
-        self.logs: list[dict[str, str]] = []
-        self.chat_history: list[dict[str, str]] = []
-        self.mission_history: list[dict[str, Any]] = []
-        self.vlm_events: list[dict[str, Any]] = []
-        self.max_log_entries = 80
-        self.max_chat_entries = 40
-        self.max_vlm_events = 120
-        self.memory = SpatialMemory()
-        self.mission_status: dict[str, Any] = {"state": "IDLE", "phase": "dashboard_only"}
-        self.safety_status: dict[str, Any] = {}
-        self.vlm_status: dict[str, Any] = {}
-        self.mux_status: dict[str, Any] = {}
-
-        self.image_latency_ms = 0.0
-        self.odom_latency_ms = 0.0
-        self.vlm_client, self.vlm_config = build_vlm_client()
-        self.teleop_status = "idle"
-        self.last_teleop = {"linear": 0.0, "lateral": 0.0, "angular": 0.0, "source": "none"}
-        self.repeat_teleop_until = 0.0
-        self.repeat_teleop_twist = Twist()
-        self.last_browser_heartbeat_time = 0.0
-        self.safety_warning_m = 0.80
-        self.safety_danger_m = 0.45
-        self.spin_started_at = 0.0
-        self.spin_thread_alive = False
-        self.spin_error = ""
-        self.spin_tick_count = 0
-
-        self.spin_tick_timer = self.create_timer(1.0, self._spin_tick)
-        self.heartbeat_timer = self.create_timer(0.2, self._publish_operator_heartbeat)
-        self.teleop_repeat_timer = self.create_timer(1.0 / self.teleop_repeat_hz, self._repeat_teleop_command)
-
-        self.get_logger().info(f"Dashboard ready on {self.vlm_config.base_url} / model {self.vlm_config.model_name}")
-        self.get_logger().info(
-            "Dashboard topics: raw=%s depth_raw=%s cmd_vel=%s"
-            % (
-                raw_image_topic or "disabled",
-                depth_topic if self.enable_depth_feed else "disabled",
-                self.get_parameter("cmd_vel_topic").value,
-            )
+        # QoS profiles
+        sensor_qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+            history=HistoryPolicy.KEEP_LAST,
         )
 
-    def add_log(self, kind: str, text: str) -> None:
-        self.logs.append({"timestamp": time.strftime("%H:%M:%S"), "kind": kind, "text": text})
-        if len(self.logs) > self.max_log_entries:
-            self.logs.pop(0)
+        # Subscriptions
+        self.create_subscription(LaserScan, self._params["scan"], self._on_scan, sensor_qos)
+        self.create_subscription(Odometry, self._params["odom"], self._on_odom, 10)
+        self.create_subscription(BatteryState, self._params["battery"], self._on_battery, 10)
+        self.create_subscription(Image, self._params["color"], self._on_color, sensor_qos)
+        self.create_subscription(Image, self._params["depth"], self._on_depth, sensor_qos)
+        self.create_subscription(OccupancyGrid, self._params["map"], self._on_map, _LATCHED_QOS)
+        self.create_subscription(Bool, self._params["safety_latched"], self._on_safety, _LATCHED_QOS)
+        self.create_subscription(String, self._params["mission_state"], self._on_mission_state, _LATCHED_QOS)
+        self.create_subscription(String, self._params["frontier_status"], self._on_frontier_status, 10)
+        self.create_subscription(String, self._params["vlm_observation"], self._on_vlm, 10)
 
-    def add_chat(self, role: str, message: str) -> None:
-        self.chat_history.append({"role": role, "message": message})
-        if len(self.chat_history) > self.max_chat_entries:
-            self.chat_history.pop(0)
+        # Publishers
+        self._pub_teleop = self.create_publisher(Twist, self._params["teleop"], 10)
+        self._pub_heartbeat = self.create_publisher(Header, self._params["heartbeat"], 10)
+        self._pub_mission = self.create_publisher(String, self._params["mission_goal"], 10)
 
-    def add_vlm_event(
-        self,
-        kind: str,
-        status: str = "ok",
-        prompt: str = "",
-        answer: str = "",
-        thinking: str = "",
-        intent: str = "",
-        room: str = "",
-        latency_ms: float = 0.0,
-        text: str = "",
-    ) -> None:
-        self.vlm_events.append(
-            {
-                "timestamp": time.strftime("%H:%M:%S"),
-                "kind": kind,
-                "status": status,
-                "prompt": prompt,
-                "answer": answer,
-                "thinking": thinking,
-                "intent": intent,
-                "room": room,
-                "latency_ms": float(latency_ms),
-                "text": text,
+        # Service client (safety reset; created lazily on first call)
+        self._safety_reset_client = self.create_client(Trigger, self._params["safety_reset"])
+
+        self.get_logger().info("ridgeback_dashboard ready")
+
+    # --- subscription callbacks ---------------------------------------------
+    def _on_scan(self, msg: LaserScan) -> None:
+        ranges = list(msg.ranges)
+        finite = [r for r in ranges if math.isfinite(r) and r > 0.05]
+        closest = min(finite) if finite else 0.0
+        with self._lock:
+            self._scan = {
+                "angle_min": float(msg.angle_min),
+                "angle_max": float(msg.angle_max),
+                "angle_increment": float(msg.angle_increment),
+                "range_min": float(msg.range_min),
+                "range_max": float(msg.range_max),
+                "ranges": ranges,
+                "closest_m": closest,
+                "range_count": len(finite),
             }
-        )
-        if len(self.vlm_events) > self.max_vlm_events:
-            self.vlm_events.pop(0)
+            self._scan_stamp = time.time()
 
-    def _spin_tick(self) -> None:
-        self.spin_tick_count += 1
+    def _on_odom(self, msg: Odometry) -> None:
+        with self._lock:
+            self._odom_x = float(msg.pose.pose.position.x)
+            self._odom_y = float(msg.pose.pose.position.y)
+            self._odom_yaw = quaternion_to_yaw_rad(msg.pose.pose.orientation)
+            self._odom_stamp = time.time()
 
-    def mark_browser_heartbeat(self) -> None:
-        self.last_browser_heartbeat_time = time.time()
+    def _on_battery(self, msg: BatteryState) -> None:
+        pct = float(msg.percentage) if msg.percentage > 0 else 0.0
+        # Normalize 0..1 → 0..100 if needed
+        if 0.0 < pct <= 1.0:
+            pct *= 100.0
+        with self._lock:
+            self._battery_pct = pct
+            self._battery_v = float(msg.voltage)
 
-    def _publish_operator_heartbeat(self) -> None:
-        # Network-survival heartbeat: as long as the dashboard process is
-        # alive on the Jetson, the autonomy stack is by definition reachable.
-        # Browser activity is tracked separately via last_browser_heartbeat_time
-        # for the status panel + auto-stop-on-blur UX, but the watchdog must
-        # not fire whenever the operator hides the tab.
-        self.operator_heartbeat_pub.publish(Bool(data=True))
-
-    def _rgb_stale_reason(self, now: float | None = None) -> str:
-        now = time.time() if now is None else now
-        if self.last_frame_time <= 0.0:
-            return "no_rgb_callbacks"
-        age = now - self.last_frame_time
-        if age > 4.0:
-            return f"rgb_stale_{age:.1f}s"
-        return ""
-
-    def _depth_stale_reason(self, now: float | None = None) -> str:
-        if not self.enable_depth_feed:
-            return "depth_disabled"
-        now = time.time() if now is None else now
-        if self.last_depth_time <= 0.0:
-            return "no_depth_callbacks"
-        age = now - self.last_depth_time
-        if age > 4.0:
-            return f"depth_stale_{age:.1f}s"
-        return ""
-
-    def _raw_image_cb(self, msg: Image, source: str = "raw", topic: str = "") -> None:
-        self.callback_counts["raw_image"] += 1
-        now_wall = time.time()
-        if now_wall - self.last_raw_rgb_render_time < 1.0 / self.raw_rgb_render_hz:
-            return
-        self.last_raw_rgb_render_time = now_wall
+    def _on_color(self, msg: Image) -> None:
         try:
-            now = self.get_clock().now()
-            stamp = rclpy.time.Time.from_msg(msg.header.stamp)
-            self.image_latency_ms = (now - stamp).nanoseconds / 1e6
+            cv = self._bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception:
-            pass
-
-        try:
-            cv_image = self._bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-            ok, buf = cv2.imencode(".jpg", cv_image, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            if not ok:
-                return
-            with self.frame_lock:
-                self.latest_frame = buf.tobytes()
-                self.latest_frame_stamp = f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}"
-                self.rgb_frame_source = source
-                self.rgb_frame_topic = topic
-            self.last_frame_time = now_wall
-            self.last_rgb_stale_reason = ""
-        except Exception as exc:
-            self.get_logger().error(f"Raw image cb error: {exc}")
-
-    def _odom_cb(self, msg: Odometry) -> None:
-        self.callback_counts["odom"] += 1
-        self.last_odom_time = time.time()
-        try:
-            now = self.get_clock().now()
-            stamp = rclpy.time.Time.from_msg(msg.header.stamp)
-            self.odom_latency_ms = (now - stamp).nanoseconds / 1e6
-        except Exception:
-            pass
-        self.odom["x"] = msg.pose.pose.position.x
-        self.odom["y"] = msg.pose.pose.position.y
-        q = msg.pose.pose.orientation
-        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        self.odom["yaw"] = math.degrees(math.atan2(siny_cosp, cosy_cosp))
-
-    def _store_depth_visualization(self, depth: np.ndarray, encoding: str, source: str = "", topic: str = "") -> None:
-        try:
-            depth_mm = np.asarray(depth, dtype=np.float32)
-            if np.issubdtype(np.asarray(depth).dtype, np.floating) or "32F" in encoding:
-                depth_mm *= 1000.0
-            depth_clipped = np.clip(depth_mm, 0, 5000).astype(np.float32)
-            depth_norm = (depth_clipped / 5000.0 * 255).astype(np.uint8)
-            colored = cv2.applyColorMap(depth_norm, cv2.COLORMAP_TURBO)
-            colored[(depth_mm <= 0) | ~np.isfinite(depth_mm)] = [30, 30, 30]
-            ok, buf = cv2.imencode('.jpg', colored, [cv2.IMWRITE_JPEG_QUALITY, 75])
-            if ok:
-                with self.depth_lock:
-                    self.depth_frame = buf.tobytes()
-                self.last_depth_time = time.time()
-                self.depth_frame_source = source
-                self.depth_frame_topic = topic
-                self.last_depth_stale_reason = ""
-                self.callback_counts["depth_rendered"] += 1
-                self.depth_event.set()
-        except Exception as exc:
-            self.callback_counts["depth_errors"] += 1
-            self.last_depth_error = str(exc)
-            self.get_logger().error(f"Depth visualization error: {exc}")
-
-    def _depth_cb(self, msg: Image, source: str = "depth_raw", topic: str = "") -> None:
-        self.callback_counts["depth_raw"] += 1
-        now = time.time()
-        self.last_depth_time = now
-        self.depth_frame_source = source
-        self.depth_frame_topic = topic
-        self.last_depth_stale_reason = ""
-        if now - self.last_depth_render_time < 1.0 / self.depth_render_hz:
             return
-        self.last_depth_render_time = now
+        ok, buf = cv2.imencode(".jpg", cv, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        if not ok:
+            return
+        with self._lock:
+            self._color_jpeg = bytes(buf)
+            self._color_stamp = time.time()
+
+    def _on_depth(self, msg: Image) -> None:
         try:
-            depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
-            self._store_depth_visualization(depth, msg.encoding, source, topic)
-        except Exception as exc:
-            self.callback_counts["depth_errors"] += 1
-            self.last_depth_error = str(exc)
-            self.get_logger().error(f"Raw depth cb error: {exc}")
+            cv = self._bridge.imgmsg_to_cv2(msg)
+        except Exception:
+            return
+        # Normalize to 0..5m heatmap.
+        depth = np.asarray(cv, dtype=np.float32)
+        if depth.dtype == np.uint16 or depth.max() > 100:
+            depth = depth / 1000.0
+        depth = np.clip(depth, 0.0, 5.0)
+        norm = (255.0 * (depth / 5.0)).astype(np.uint8)
+        heat = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
+        ok, buf = cv2.imencode(".jpg", heat, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
+        if not ok:
+            return
+        with self._lock:
+            self._depth_jpeg = bytes(buf)
+            self._depth_stamp = time.time()
+            self._depth_enabled = True
 
-    def _lidar_cb(self, msg: LaserScan) -> None:
-        self.callback_counts["lidar"] += 1
-        self.last_lidar_time = time.time()
-        finite_ranges = [value for value in msg.ranges if 0.05 < value < float("inf")]
-        self.lidar["closest_m"] = min(finite_ranges) if finite_ranges else 99.0
-        self.lidar["range_count"] = len(finite_ranges)
-        self.lidar["ranges"] = list(msg.ranges[::3])  # downsample 3x
-        self.lidar["angle_min"] = msg.angle_min
-        self.lidar["angle_increment"] = msg.angle_increment * 3
-        self.lidar["range_max"] = msg.range_max
+    def _on_map(self, msg: OccupancyGrid) -> None:
+        info = msg.info
+        w, h = int(info.width), int(info.height)
+        if w == 0 or h == 0:
+            return
+        data = np.asarray(msg.data, dtype=np.int8).reshape((h, w))
+        # Map -1 (unknown) → 127, 0..100 → 255..0 grayscale.
+        img = np.full((h, w), 127, dtype=np.uint8)
+        known = data >= 0
+        img[known] = (255 - (data[known].astype(np.int32) * 255 // 100)).astype(np.uint8)
+        # Flip vertically so +y is up.
+        img = cv2.flip(img, 0)
+        ok, buf = cv2.imencode(".png", img)
+        if not ok:
+            return
+        meta = f"{w}x{h} @{info.resolution:.2f}m"
+        with self._lock:
+            self._map_png = bytes(buf)
+            self._map_meta = meta
+            self._map_width = w
+            self._map_height = h
 
-    def _battery_cb(self, msg: BatteryState) -> None:
-        self.callback_counts["battery"] += 1
-        self.last_battery_time = time.time()
-        self.battery["voltage"] = msg.voltage
-        self.battery["pct"] = msg.percentage * 100.0 if 0.0 <= msg.percentage <= 1.0 else msg.percentage
+    def _on_safety(self, msg: Bool) -> None:
+        with self._lock:
+            self._safety_latched = bool(msg.data)
 
-    def _mission_status_cb(self, msg: String) -> None:
-        self.mission_status = json_loads(msg.data, self.mission_status)
+    def _on_mission_state(self, msg: String) -> None:
+        with self._lock:
+            self._mission_state = json_loads(msg.data, default={})
 
-    def _safety_status_cb(self, msg: String) -> None:
-        self.safety_status = json_loads(msg.data, self.safety_status)
+    def _on_frontier_status(self, msg: String) -> None:
+        with self._lock:
+            self._frontier_status = json_loads(msg.data, default={})
 
-    def _vlm_status_cb(self, msg: String) -> None:
-        self.vlm_status = json_loads(msg.data, self.vlm_status)
+    def _on_vlm(self, msg: String) -> None:
+        evt = json_loads(msg.data, default={})
+        if not evt:
+            return
+        ts = evt.get("timestamp") or time.strftime("%H:%M:%S")
+        item = {
+            "timestamp": ts,
+            "kind": evt.get("kind", "vlm"),
+            "status": evt.get("status", "ok"),
+            "answer": evt.get("text") or evt.get("room") or "",
+            "intent": evt.get("intent", ""),
+            "room": evt.get("room", ""),
+            "latency_ms": evt.get("latency_ms", 0),
+        }
+        with self._lock:
+            self._vlm_events.append(item)
+            if len(self._vlm_events) > 60:
+                self._vlm_events = self._vlm_events[-60:]
 
-    def _mux_status_cb(self, msg: String) -> None:
-        self.mux_status = json_loads(msg.data, self.mux_status)
+    # --- publish helpers ----------------------------------------------------
+    def publish_heartbeat(self) -> float:
+        msg = Header()
+        msg.stamp = self.get_clock().now().to_msg()
+        msg.frame_id = "operator"
+        self._pub_heartbeat.publish(msg)
+        return msg.stamp.sec + msg.stamp.nanosec * 1e-9
 
-    def _map_cb(self, msg: OccupancyGrid) -> None:
-        try:
-            self.callback_counts["map"] += 1
-            self.last_map_time = time.time()
-            now = time.time()
-            if now - self.last_map_render_time < 1.0 / self.map_render_hz:
-                return
-            self.last_map_render_time = now
+    def publish_teleop(self, req: TeleopRequest) -> None:
+        max_lin, max_lat, max_ang = self._teleop_max
+        msg = Twist()
+        msg.linear.x = max(-max_lin, min(max_lin, float(req.linear)))
+        msg.linear.y = max(-max_lat, min(max_lat, float(req.lateral)))
+        msg.angular.z = max(-max_ang, min(max_ang, float(req.angular)))
+        self._pub_teleop.publish(msg)
+        with self._lock:
+            self._last_teleop_source = req.source
+            self._last_teleop_stamp = time.time()
 
-            width = int(msg.info.width)
-            height = int(msg.info.height)
-            resolution = float(msg.info.resolution)
-            data = np.array(msg.data, dtype=np.int16).reshape((height, width))
+    def publish_mission(self, intent: str, room: str, command: str) -> None:
+        payload = {
+            "intent": intent,
+            "room": room,
+            "command": command,
+            "timestamp": time.strftime("%H:%M:%S"),
+        }
+        msg = String()
+        msg.data = json_dumps(payload)
+        self._pub_mission.publish(msg)
+        with self._lock:
+            self._chat_history.append({"role": "user", "message": command})
+            ack = f"intent={intent}" + (f" room={room}" if room else "")
+            self._chat_history.append({"role": "assistant", "message": ack})
+            if len(self._chat_history) > 40:
+                self._chat_history = self._chat_history[-40:]
 
-            image = np.full((height, width), 205, dtype=np.uint8)
-            image[data == 0] = 255
-            image[data == 100] = 0
-            image = np.flipud(image)
-            image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    def request_safety_reset(self) -> tuple[bool, str]:
+        if not self._safety_reset_client.service_is_ready():
+            self._safety_reset_client.wait_for_service(timeout_sec=0.2)
+        if not self._safety_reset_client.service_is_ready():
+            return False, "safety_reset service not available"
+        future = self._safety_reset_client.call_async(Trigger.Request())
+        # We're already running an executor in the bg thread, so just wait briefly.
+        deadline = time.time() + 1.0
+        while not future.done() and time.time() < deadline:
+            time.sleep(0.02)
+        if not future.done():
+            return False, "safety_reset timed out"
+        result = future.result()
+        return bool(result.success), result.message or ("ok" if result.success else "failed")
 
-            target_long_side = self.map_target_long_side
-            scale = max(1, min(10, target_long_side // max(width, height, 1)))
-            image = cv2.resize(image, (width * scale, height * scale), interpolation=cv2.INTER_NEAREST)
-
-            origin_x = float(msg.info.origin.position.x)
-            origin_y = float(msg.info.origin.position.y)
-            robot_px = int((self.odom["x"] - origin_x) / resolution)
-            robot_py = int((self.odom["y"] - origin_y) / resolution)
-            robot_py = height - robot_py - 1
-            robot_x = max(0, min(width - 1, robot_px)) * scale + scale // 2
-            robot_y = max(0, min(height - 1, robot_py)) * scale + scale // 2
-            cv2.circle(image, (robot_x, robot_y), max(3, scale), (0, 0, 255), -1)
-            cv2.line(
-                image,
-                (robot_x, robot_y),
-                (int(robot_x + math.cos(math.radians(self.odom["yaw"])) * scale * 2), int(robot_y - math.sin(math.radians(self.odom["yaw"])) * scale * 2)),
-                (0, 165, 255),
-                2,
-            )
-
-            success, encoded = cv2.imencode(".png", image)
-            if success:
-                self.map_payload = {
-                    "image_bytes": encoded.tobytes(),
-                    "width": width,
-                    "height": height,
-                    "resolution": resolution,
-                    "meta": f"{width} x {height} cells",
-                    "stamp": f"{msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}",
-                    "updated_at": time.strftime("%H:%M:%S"),
-                }
-        except Exception as exc:
-            self.add_log("map", f"Failed to render map: {exc}")
-
-    def latest_frame_copy(self) -> bytes | None:
-        with self.frame_lock:
-            return self.latest_frame
-
-    def send_motion_command(
-        self,
-        linear: float,
-        lateral: float,
-        angular: float,
-        source: str = "manual",
-        issued_at: float | None = None,
-        seq: int = 0,
-    ) -> tuple[bool, str]:
+    # --- snapshot for /api/status -------------------------------------------
+    def snapshot(self) -> dict[str, Any]:
         now = time.time()
-        command_is_zero = (abs(linear) + abs(lateral) + abs(angular)) <= 1e-6
-        age_s = now - float(issued_at) if issued_at is not None else 0.0
-        max_age_s = float(self.get_parameter("teleop_command_max_age_s").value)
-        if issued_at is not None and age_s > max_age_s and not command_is_zero:
-            self.last_teleop = {
-                "linear": float(linear),
-                "lateral": float(lateral),
-                "angular": float(angular),
-                "source": source,
-                "seq": int(seq),
-                "age_s": float(age_s),
-                "ignored": True,
+        with self._lock:
+            color_age = (now - self._color_stamp) if self._color_stamp else 9999.0
+            depth_age = (now - self._depth_stamp) if self._depth_stamp else 9999.0
+            odom_age = (now - self._odom_stamp) if self._odom_stamp else 9999.0
+            scan_age = (now - self._scan_stamp) if self._scan_stamp else 9999.0
+            payload = {
+                "server_time": now,
+                "connected": color_age < 5.0 or odom_age < 5.0,
+                "battery_pct": self._battery_pct,
+                "battery_voltage": self._battery_v,
+                "pose": {
+                    "x": self._odom_x,
+                    "y": self._odom_y,
+                    "yaw_deg": math.degrees(self._odom_yaw),
+                },
+                "feeds": {
+                    "camera_age_ms": color_age * 1000.0,
+                    "odom_age_ms": odom_age * 1000.0,
+                    "scan_age_ms": scan_age * 1000.0,
+                    "camera_alive": color_age < 3.0,
+                },
+                "lidar": {
+                    "closest_m": self._scan.get("closest_m", 0.0),
+                    "range_count": self._scan.get("range_count", 0),
+                },
+                "map": {
+                    "width": self._map_width,
+                    "height": self._map_height,
+                    "meta": self._map_meta or "WAITING",
+                    "image_url": "/api/map.png",
+                },
+                "safety": {
+                    "risk_level": "DANGER" if self._safety_latched else "OK",
+                    "stop_recommended": self._safety_latched,
+                    "reasons": ["safety_latched"] if self._safety_latched else [],
+                },
+                "teleop": {
+                    "status": "active" if (now - self._last_teleop_stamp) < 1.0 else "idle",
+                    "speeds": {"linear": 0.28, "lateral": 0.28, "angular": 0.85},
+                    "last": {"source": self._last_teleop_source},
+                    "mux": {"source": self._last_teleop_source},
+                },
+                "mission": {
+                    "last_intent": self._mission_state.get("intent", ""),
+                    "last_room": self._mission_state.get("room", ""),
+                    "command": self._mission_state.get("state", ""),
+                    "recent": self._mission_state.get("recent", []),
+                },
+                "memory": {
+                    "mission_count": self._mission_state.get("mission_count", 0),
+                    "location_count": self._mission_state.get("location_count", 0),
+                    "recent_locations": self._mission_state.get("recent_locations", []),
+                },
+                "vlm": {"events": list(self._vlm_events)},
+                "chat_history": list(self._chat_history),
+                "logs": [],
             }
-            self.teleop_status = "stale/ignored"
-            return False, f"stale teleop command ignored age={age_s:.2f}s"
+        return payload
 
-        self.last_teleop = {
-            "linear": float(linear),
-            "lateral": float(lateral),
-            "angular": float(angular),
-            "source": source,
-            "seq": int(seq),
-            "age_s": float(age_s),
-            "ignored": False,
-        }
-        self._publish_direct_motion(linear, lateral, angular)
-        self.teleop_status = "active/mux" if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6 else "idle/mux"
-        return True, "OK teleop command queued through cmd_vel_mux"
+    def lidar_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            scan = dict(self._scan)
+        return scan
 
-    def _publish_direct_motion(self, linear: float, lateral: float, angular: float) -> None:
-        twist = Twist()
-        twist.linear.x = float(linear)
-        twist.linear.y = float(lateral)
-        twist.angular.z = float(angular)
-        self.cmd_vel_pub.publish(twist)
-        if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6:
-            self.repeat_teleop_twist = twist
-            self.repeat_teleop_until = time.time() + self.teleop_repeat_hold_s
-        else:
-            self.repeat_teleop_until = 0.0
-            self.repeat_teleop_twist = Twist()
-            self.cmd_vel_pub.publish(Twist())
+    def map_png(self) -> bytes | None:
+        with self._lock:
+            return self._map_png
 
-    def _repeat_teleop_command(self) -> None:
-        if time.time() > self.repeat_teleop_until:
-            return
-        self.cmd_vel_pub.publish(self.repeat_teleop_twist)
+    def color_jpeg(self) -> bytes | None:
+        with self._lock:
+            return self._color_jpeg
 
-    def video_stream(self):
-        interval = 1.0 / self.rgb_stream_hz
-        while True:
-            frame = self.latest_frame_copy()
-            if frame is None:
-                time.sleep(0.04)
-                continue
-            yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-            time.sleep(interval)
+    def depth_jpeg(self) -> bytes | None:
+        with self._lock:
+            return self._depth_jpeg
 
-    def depth_stream(self):
-        last_render = 0.0
-        while True:
-            if not self.enable_depth_feed:
-                time.sleep(1.0)
-                continue
-            min_interval = 1.0 / self.depth_render_hz
-            elapsed = time.time() - last_render
-            if elapsed < min_interval:
-                time.sleep(min_interval - elapsed)
-            self.depth_event.wait(timeout=2.0)
-            self.depth_event.clear()
-            with self.depth_lock:
-                frame = self.depth_frame
-            last_render = time.time()
-            if frame:
-                yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
-
-    def _safety_payload(self) -> dict[str, Any]:
-        closest = float(self.lidar.get("closest_m", 99.0))
-        risk_level = "OK"
-        stop_recommended = False
-        if closest < self.safety_danger_m:
-            risk_level = "DANGER"
-            stop_recommended = True
-        elif closest < self.safety_warning_m:
-            risk_level = "WARNING"
-
-        return {
-            "closest_m": closest,
-            "warning_threshold_m": self.safety_warning_m,
-            "danger_threshold_m": self.safety_danger_m,
-            "reasons": [],
-            "risk_level": risk_level,
-            "stop_recommended": stop_recommended,
-        }
-
-    def status_payload(self) -> dict[str, Any]:
+    def depth_status(self) -> dict[str, Any]:
         now = time.time()
-        map_payload = self.map_payload
-        mission_last = self.mission_history[-1] if self.mission_history else {}
-        active_session = str(self.mission_status.get("session_id", "")) or self.memory.get_active_session()
-        memory_locations = self.memory.get_locations(active_session) if active_session else self.memory.get_locations()
-        memory_missions = self.memory.get_recent_missions(limit=20, session_id=active_session) if active_session else self.memory.get_recent_missions(limit=20)
-
-        mission_started_at = float(self.mission_status.get("mission_started_at") or 0.0)
-        new_location_count = 0
-        for loc in memory_locations:
-            created_raw = str(loc.get("created_at") or "")
-            try:
-                created_epoch = time.mktime(time.strptime(created_raw, "%Y-%m-%dT%H:%M:%S"))
-            except Exception:
-                created_epoch = 0.0
-            is_new = bool(
-                mission_started_at
-                and created_epoch >= mission_started_at - 1.0
-                and loc.get("label") != "start_position"
-            )
-            loc["is_new"] = is_new
-            if is_new:
-                new_location_count += 1
-
-        camera_alive = (now - self.last_frame_time) < 5.0 if self.last_frame_time > 0 else False
-        depth_alive = (now - self.last_depth_time) < 5.0 if self.last_depth_time > 0 else False
-        odom_alive = (now - self.last_odom_time) < 5.0 if self.last_odom_time > 0 else False
-        lidar_alive = (now - self.last_lidar_time) < 5.0 if self.last_lidar_time > 0 else False
-        battery_alive = (now - self.last_battery_time) < 10.0 if self.last_battery_time > 0 else False
-        camera_age_ms = (now - self.last_frame_time) * 1000.0 if self.last_frame_time > 0 else 0.0
-        odom_age_ms = (now - self.last_odom_time) * 1000.0 if self.last_odom_time > 0 else 0.0
-        lidar_age_ms = (now - self.last_lidar_time) * 1000.0 if self.last_lidar_time > 0 else 0.0
-        battery_age_ms = (now - self.last_battery_time) * 1000.0 if self.last_battery_time > 0 else 0.0
-        map_ready = int(map_payload["width"]) > 0
-        connected = camera_alive or depth_alive or odom_alive or lidar_alive or battery_alive or map_ready
-        heartbeat_age = now - self.last_browser_heartbeat_time if self.last_browser_heartbeat_time else 999.0
-
-        return {
-            "server_time": now,
-            "connected": connected,
-            "battery_pct": float(self.battery["pct"]),
-            "battery_voltage": float(self.battery["voltage"]),
-            "pose": {"x": float(self.odom["x"]), "y": float(self.odom["y"]), "yaw_deg": float(self.odom["yaw"])},
-            "lidar": {"closest_m": float(self.lidar["closest_m"]), "range_count": int(self.lidar["range_count"])},
-            "feeds": {
-                "camera_alive": camera_alive,
-                "depth_alive": depth_alive,
-                "odom_alive": odom_alive,
-                "lidar_alive": lidar_alive,
-                "battery_alive": battery_alive,
-                "map_ready": map_ready,
-                "camera_age_ms": camera_age_ms,
-                "odom_age_ms": odom_age_ms,
-                "lidar_age_ms": lidar_age_ms,
-                "battery_age_ms": battery_age_ms,
-                "camera_source": self.rgb_frame_source,
-                "camera_topic": self.rgb_frame_topic,
-                "camera_stale_reason": self.last_rgb_stale_reason or self._rgb_stale_reason(now),
-                "depth_source": self.depth_frame_source,
-                "depth_topic": self.depth_frame_topic,
-                "depth_stale_reason": self.last_depth_stale_reason or self._depth_stale_reason(now),
-            },
-            "safety": self.safety_status or self._safety_payload(),
-            "map": {
-                "width": int(map_payload["width"]),
-                "height": int(map_payload["height"]),
-                "resolution": float(map_payload["resolution"]),
-                "meta": map_payload["meta"],
-                "image_stamp": map_payload["stamp"],
-                "updated_at": map_payload.get("updated_at", ""),
-                "image_url": "/api/map.png",
-            },
-            "latency": {"image_ms": float(self.image_latency_ms), "odom_ms": float(self.odom_latency_ms)},
-            "mission": {
-                "state": str(self.mission_status.get("state") or ("QUEUED" if mission_last else "IDLE")),
-                "phase": str(self.mission_status.get("phase", "")),
-                "command": str(self.mission_status.get("command") or mission_last.get("command", "")),
-                "last_intent": str(self.mission_status.get("intent") or mission_last.get("intent", "")),
-                "last_room": str(self.mission_status.get("target_room") or mission_last.get("room", "")),
-                "queue_length": len(self.mission_history),
-                "recent": self.mission_history[-12:],
-                "live": self.mission_status,
-            },
-            "vlm": {
-                "chat_count": len(self.chat_history),
-                "log_count": len(self.logs),
-                "event_count": len(self.vlm_events),
-                "events": self.vlm_events[-60:],
-                "status": self.vlm_status,
-            },
-            "memory": {
-                "location_count": len(memory_locations),
-                "mission_count": len(memory_missions),
-                "recent_locations": memory_locations[:12],
-                "recent_missions": memory_missions[:12],
-                "new_location_count": new_location_count,
-                "mission_started_at": mission_started_at,
-            },
-            "teleop": {
-                "status": self.teleop_status,
-                "last": self.last_teleop,
-                "mux": self.mux_status,
-                "cmd_vel_topic": str(self.get_parameter("cmd_vel_topic").value),
-                "cmd_vel_subscribers": self.count_subscribers(str(self.get_parameter("cmd_vel_topic").value)),
-                "operator_heartbeat": {
-                    "age_s": heartbeat_age,
-                    "active": heartbeat_age <= 5.0,
-                },
-                "speeds": {
-                    "linear": self.teleop_linear_speed,
-                    "lateral": self.teleop_lateral_speed,
-                    "angular": self.teleop_angular_speed,
-                },
-            },
-            "logs": self.logs,
-            "chat_history": self.chat_history,
-        }
+        with self._lock:
+            age = (now - self._depth_stamp) if self._depth_stamp else 9999.0
+            return {
+                "enabled": self._depth_enabled,
+                "has_frame": self._depth_jpeg is not None,
+                "age_s": age,
+            }
 
 
-def create_app(node: DashboardNode) -> FastAPI:
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+
+def build_app(node: DashboardNode) -> FastAPI:
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        def spin_worker() -> None:
-            node.spin_started_at = time.time()
-            node.spin_thread_alive = True
-            node.spin_error = ""
-            try:
-                rclpy.spin(node)
-            except Exception as exc:
-                node.spin_error = str(exc)
-                node.get_logger().error(f"Dashboard ROS spin failed: {exc}")
-            finally:
-                node.spin_thread_alive = False
-
-        spin_thread = threading.Thread(target=spin_worker, daemon=True)
-        spin_thread.start()
-        try:
-            yield
-        finally:
-            node.destroy_node()
-            if rclpy.ok():
-                rclpy.shutdown()
-            spin_thread.join(timeout=2.0)
+    async def lifespan(_app: FastAPI):  # noqa: ARG001
+        yield
 
     app = FastAPI(lifespan=lifespan)
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> HTMLResponse:
+    async def root() -> HTMLResponse:
         return HTMLResponse(PAGE_HTML)
 
-    @app.get("/api/status")
-    def api_status() -> JSONResponse:
-        return JSONResponse(node.status_payload())
-
     @app.get("/health")
-    def health() -> JSONResponse:
-        return JSONResponse({"ok": True, "node": "ridgeback_dashboard", "mission": node.mission_status})
+    async def health() -> dict[str, Any]:
+        return {"ok": True, "ts": time.time()}
 
     @app.post("/api/heartbeat")
-    def api_heartbeat() -> JSONResponse:
-        node.mark_browser_heartbeat()
-        return JSONResponse({"ok": True, "stamp": time.time()})
+    async def heartbeat() -> dict[str, Any]:
+        stamp = node.publish_heartbeat()
+        return {"stamp": stamp}
+
+    @app.get("/api/status")
+    async def status() -> JSONResponse:
+        return JSONResponse(node.snapshot())
 
     @app.get("/api/mission/status")
-    def api_mission_status() -> JSONResponse:
-        return JSONResponse(node.mission_status)
-
-    @app.get("/api/metrics")
-    def api_metrics() -> JSONResponse:
-        status = node.mission_status
-        return JSONResponse(
-            {
-                "result": status.get("state", "UNKNOWN"),
-                "state": status.get("state", "UNKNOWN"),
-                "phase": status.get("phase", ""),
-                "elapsed_s": float(status.get("elapsed_s", 0.0) or 0.0),
-                "target_room": status.get("target_room", ""),
-                "last_error": status.get("last_error", ""),
-            }
-        )
+    async def mission_status() -> JSONResponse:
+        with node._lock:  # noqa: SLF001
+            return JSONResponse(dict(node._mission_state))  # noqa: SLF001
 
     @app.get("/api/map.png")
-    def api_map_png() -> Response:
-        payload = node.map_payload.get("image_bytes")
-        if payload is None:
-            placeholder = np.zeros((240, 320, 3), dtype=np.uint8)
-            cv2.putText(placeholder, "Waiting for SLAM map...", (18, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            success, encoded = cv2.imencode(".png", placeholder)
-            payload = encoded.tobytes() if success else b""
-        return Response(content=payload, media_type="image/png")
-
-    @app.get("/video_feed")
-    def video_feed() -> StreamingResponse:
-        return StreamingResponse(node.video_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
-
-    @app.get("/depth_feed")
-    def depth_feed() -> StreamingResponse:
-        return StreamingResponse(node.depth_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
+    async def map_png() -> Response:
+        png = node.map_png()
+        if not png:
+            return Response(status_code=204)
+        return Response(content=png, media_type="image/png")
 
     @app.get("/depth_status")
-    def depth_status() -> JSONResponse:
-        age = time.time() - node.last_depth_time if node.last_depth_time > 0 else -1.0
-        return JSONResponse({
-            "enabled": bool(node.enable_depth_feed),
-            "has_frame": node.last_depth_time > 0,
-            "age_s": round(age, 1) if age >= 0 else -1.0,
-            "callbacks": dict(node.callback_counts),
-            "last_error": node.last_depth_error,
-        })
+    async def depth_status() -> JSONResponse:
+        return JSONResponse(node.depth_status())
 
     @app.get("/lidar_scan")
-    def lidar_scan() -> JSONResponse:
-        return JSONResponse(node.lidar)
+    async def lidar_scan() -> JSONResponse:
+        return JSONResponse(node.lidar_snapshot())
 
-    @app.get("/api/debug/feeds")
-    def api_debug_feeds() -> JSONResponse:
-        now = time.time()
-        return JSONResponse({
-            "topics": node.subscription_topics,
-            "subscriptions": sorted(node._dashboard_subscriptions.keys()),
-            "callbacks": dict(node.callback_counts),
-            "spin": {
-                "started": node.spin_started_at > 0.0,
-                "alive": bool(node.spin_thread_alive),
-                "tick_count": int(node.spin_tick_count),
-                "error": node.spin_error,
-            },
-            "last_error": node.last_depth_error,
-            "camera_age_s": round(now - node.last_frame_time, 2) if node.last_frame_time > 0 else -1.0,
-            "camera_source": node.rgb_frame_source,
-            "camera_topic": node.rgb_frame_topic,
-            "camera_stale_reason": node.last_rgb_stale_reason or node._rgb_stale_reason(now),
-            "depth_age_s": round(now - node.last_depth_time, 2) if node.last_depth_time > 0 else -1.0,
-            "depth_source": node.depth_frame_source,
-            "depth_topic": node.depth_frame_topic,
-            "depth_stale_reason": node.last_depth_stale_reason or node._depth_stale_reason(now),
-            "odom_age_s": round(now - node.last_odom_time, 2) if node.last_odom_time > 0 else -1.0,
-            "lidar_age_s": round(now - node.last_lidar_time, 2) if node.last_lidar_time > 0 else -1.0,
-            "battery_age_s": round(now - node.last_battery_time, 2) if node.last_battery_time > 0 else -1.0,
-            "map_age_s": round(now - node.last_map_time, 2) if node.last_map_time > 0 else -1.0,
-            "has_rgb_frame": node.latest_frame_copy() is not None,
-            "has_depth_frame": node.depth_frame is not None,
-            "publishers": {
-                topic: node.count_publishers(topic)
-                for topic in (
-                    node.subscription_topics.get("raw_image", ""),
-                    node.subscription_topics.get("depth_raw", ""),
-                    node.subscription_topics.get("odom", ""),
-                    node.subscription_topics.get("lidar", ""),
-                    node.subscription_topics.get("battery", ""),
-                    node.subscription_topics.get("map", ""),
-                )
-                if topic
-            },
-            "subscribers": {
-                "/cmd_vel_teleop": node.count_subscribers("/cmd_vel_teleop"),
-                "/pc_heartbeat": node.count_subscribers("/pc_heartbeat"),
-            },
-        })
+    def _mjpeg_stream(getter, hz: float, placeholder_text: str):
+        boundary = b"--frame"
 
-    @app.post("/api/mission")
-    def api_mission(request: MissionRequest) -> JSONResponse:
-        parsed = parse_intent_and_room(request.command)
-        payload = {
-            "command": request.command,
-            "intent": parsed["intent"],
-            "room": parsed["room"],
-            "source": "dashboard",
-            "timestamp": time.time(),
-        }
-        node.mission_command_pub.publish(String(data=json_dumps(payload)))
-        node.mission_history.append(
-            {
-                "timestamp": time.strftime("%H:%M:%S"),
-                "command": request.command,
-                "intent": parsed["intent"],
-                "room": parsed["room"],
-                "source": "mission",
-            }
-        )
-        if len(node.mission_history) > 40:
-            node.mission_history.pop(0)
-        node.memory.record_mission(
-            request.command,
-            status="queued",
-            metadata=parsed,
-            session_id=str(node.mission_status.get("session_id", "")),
-        )
-        node.add_log("mission", f"{parsed['intent']} {parsed['room']} :: {request.command}".strip())
-        node.add_vlm_event(
-            kind="mission",
-            status="queued",
-            prompt=request.command,
-            intent=parsed["intent"],
-            room=parsed["room"],
-            text="Mission command queued",
-        )
-        return JSONResponse({"ok": True, "accepted": request.command, "parsed": parsed, "mission_status": node.mission_status})
+        async def gen():
+            import asyncio
+
+            interval = 1.0 / max(hz, 1.0)
+            while True:
+                jpeg = getter()
+                if jpeg is None:
+                    img = np.zeros((180, 320, 3), dtype=np.uint8)
+                    cv2.putText(
+                        img,
+                        placeholder_text,
+                        (12, 100),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        (255, 255, 255),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                    ok, buf = cv2.imencode(".jpg", img)
+                    if ok:
+                        jpeg = bytes(buf)
+                if jpeg:
+                    yield boundary + b"\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                    yield str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
+                await asyncio.sleep(interval)
+
+        return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    @app.get("/video_feed")
+    async def video_feed():
+        return _mjpeg_stream(node.color_jpeg, 8.0, "WAITING FOR CAMERA")
+
+    @app.get("/depth_feed")
+    async def depth_feed():
+        return _mjpeg_stream(node.depth_jpeg, 1.0, "NO DEPTH (USB2?)")
 
     @app.post("/api/teleop")
-    def api_teleop(request: TeleopRequest) -> JSONResponse:
-        linear = float(request.linear)
-        lateral = float(request.lateral)
-        angular = float(request.angular)
-        ok, message = node.send_motion_command(
-            linear,
-            lateral,
-            angular,
-            source=request.source,
-            issued_at=request.issued_at,
-            seq=request.seq,
-        )
-        if not ok:
-            if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6:
-                node.add_log("teleop", f"Rejected command ({request.source}): {message}")
-            return JSONResponse({"ok": False, "error": message})
-        if (abs(linear) + abs(lateral) + abs(angular)) > 1e-6:
-            node.add_log("teleop", f"{request.source}: x={linear:.2f} y={lateral:.2f} z={angular:.2f}")
-        return JSONResponse({"ok": True, "message": message})
+    async def api_teleop(req: TeleopRequest) -> dict[str, Any]:
+        node.publish_teleop(req)
+        return {"ok": True}
+
+    @app.post("/api/mission")
+    async def api_mission(req: MissionRequest) -> dict[str, Any]:
+        intent_room = parse_intent_and_room(req.command)
+        node.publish_mission(intent_room["intent"], intent_room["room"], req.command)
+        return {"ok": True, **intent_room}
 
     @app.post("/api/chat")
-    def api_chat(request: ChatRequest) -> JSONResponse:
-        parsed = parse_intent_and_room(
-            request.message,
-            vlm_client=node.vlm_client,
-            vlm_config=node.vlm_config,
-            vlm_timeout_s=1.5,
-        )
-        node.add_chat("user", request.message)
-        node.add_log("vlm", f"Chat query: {request.message}")
-        started_at = time.time()
+    async def api_chat(req: ChatRequest) -> dict[str, Any]:
+        intent_room = parse_intent_and_room(req.message)
+        node.publish_mission(intent_room["intent"], intent_room["room"], req.message)
+        return {"ok": True, **intent_room}
 
-        # Actionable intents short-circuit the VLM chat call: publish the
-        # mission immediately and emit a deterministic confirmation. This
-        # avoids the freeform-chat VLM occasionally refusing valid commands.
-        if parsed["intent"] in {"GO_TO_ROOM", "RETURN_TO_START", "STOP", "EXPLORE"}:
-            reply = ""
-            if parsed["intent"] == "GO_TO_ROOM":
-                node.mission_command_pub.publish(
-                    String(
-                        data=json_dumps(
-                            {
-                                "command": request.message,
-                                "intent": parsed["intent"],
-                                "room": parsed["room"],
-                                "source": "chat",
-                                "timestamp": time.time(),
-                            }
-                        )
-                    )
-                )
-                room = parsed["room"]
-                active_session = str(node.mission_status.get("session_id", "")) or node.memory.get_active_session()
-                known = node.memory.find_room(active_session, room, 0.55) if active_session and room else None
-                if known:
-                    reply = (
-                        f"Got it. Heading to room {room} "
-                        f"(last seen at x={float(known['x']):.1f}, y={float(known['y']):.1f})."
-                    )
-                else:
-                    reply = (
-                        f"I haven't seen room {room} yet. Starting exploration — "
-                        f"I'll save room numbers as I find them and head there once {room} is in view."
-                    )
-            elif parsed["intent"] == "RETURN_TO_START":
-                node.mission_command_pub.publish(
-                    String(
-                        data=json_dumps(
-                            {
-                                "command": request.message,
-                                "intent": parsed["intent"],
-                                "room": parsed["room"],
-                                "source": "chat",
-                                "timestamp": time.time(),
-                            }
-                        )
-                    )
-                )
-                reply = "Returning to the start position."
-            elif parsed["intent"] == "STOP":
-                node.mission_command_pub.publish(
-                    String(
-                        data=json_dumps(
-                            {
-                                "command": request.message,
-                                "intent": parsed["intent"],
-                                "room": parsed["room"],
-                                "source": "chat",
-                                "timestamp": time.time(),
-                            }
-                        )
-                    )
-                )
-                node.exploration_command_pub.publish(
-                    String(data=json_dumps({"action": "stop", "source": "chat"}))
-                )
-                reply = "Stopping now."
-            elif parsed["intent"] == "EXPLORE":
-                # Route EXPLORE through the mission orchestrator so the
-                # mission state machine activates: this flips room_detector
-                # into scanning mode (saves landmarks while wandering) and
-                # records the start position for return-to-home.
-                node.mission_command_pub.publish(
-                    String(
-                        data=json_dumps(
-                            {
-                                "command": request.message,
-                                "intent": parsed["intent"],
-                                "room": parsed["room"],
-                                "source": "chat",
-                                "timestamp": time.time(),
-                            }
-                        )
-                    )
-                )
-                reply = (
-                    "Starting VLM-driven exploration. I'll pick frontiers from the camera view, "
-                    "save any room numbers I see, and drive there while SLAM builds the map. "
-                    "Say 'stop' to halt."
-                )
-
-            latency_ms = (time.time() - started_at) * 1000.0
-            node.add_chat("assistant", reply)
-            node.add_log("vlm", f"Reply: {reply[:180]}")
-            node.add_vlm_event(
-                kind="mission",
-                status="ok",
-                prompt=request.message,
-                answer=reply,
-                thinking="",
-                intent=parsed["intent"],
-                room=parsed["room"],
-                latency_ms=latency_ms,
-                text=reply[:220],
-            )
-            return JSONResponse({"ok": True, "reply": reply, "parsed": parsed, "latency_ms": latency_ms})
-
-        try:
-            latest_frame = node.latest_frame_copy()
-            if latest_frame:
-                image_b64 = base64.b64encode(latest_frame).decode("utf-8")
-                user_content: list[dict[str, Any]] = [
-                    {
-                        "type": "text",
-                        "text": f"User question about current camera view: {request.message}",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
-                    },
-                ]
-                messages: list[dict[str, Any]] = [
-                    {
-                        "role": "system",
-                        "content": "You are a concise assistant for a Ridgeback R100 autonomous navigation dashboard. Use the provided camera image when relevant. Answer in 1-5 sentences and be direct.",
-                    },
-                    {"role": "user", "content": user_content},
-                ]
-            else:
-                messages = chat_completion_messages(
-                    request.message,
-                    system_prompt="You are a concise assistant for a Ridgeback R100 autonomous navigation dashboard. Answer in 1-5 sentences and be direct.",
-                )
-
-            response = node.vlm_client.chat.completions.create(
-                model=node.vlm_config.model_name,
-                messages=messages,
-                temperature=0.4,
-                max_tokens=200,
-                extra_body={"chat_template_kwargs": {"enable_thinking": node.vlm_config.enable_thinking}},
-            )
-            raw_reply = response.choices[0].message.content
-            if isinstance(raw_reply, list):
-                reply = " ".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in raw_reply).strip()
-            else:
-                reply = str(raw_reply or "")
-            thinking = extract_reasoning_trace(response)
-            latency_ms = (time.time() - started_at) * 1000.0
-            event_kind = "prompt"
-
-            node.add_chat("assistant", reply)
-            node.add_log("vlm", f"Reply: {reply[:180]}")
-            node.add_vlm_event(
-                kind=event_kind,
-                status="ok",
-                prompt=request.message,
-                answer=reply,
-                thinking=thinking,
-                intent=parsed["intent"],
-                room=parsed["room"],
-                latency_ms=latency_ms,
-                text=reply[:220],
-            )
-            return JSONResponse({"ok": True, "reply": reply, "parsed": parsed, "latency_ms": latency_ms})
-        except Exception as exc:
-            error = str(exc)
-            node.add_chat("assistant", f"Error: {error}")
-            node.add_log("vlm", f"Chat error: {error}")
-            node.add_vlm_event(
-                kind="prompt",
-                status="error",
-                prompt=request.message,
-                answer="",
-                thinking="",
-                intent=parsed["intent"],
-                room=parsed["room"],
-                latency_ms=(time.time() - started_at) * 1000.0,
-                text=error,
-            )
-            return JSONResponse({"ok": False, "error": error})
+    @app.post("/api/safety/reset")
+    async def api_safety_reset() -> dict[str, Any]:
+        ok, message = node.request_safety_reset()
+        return {"ok": ok, "message": message}
 
     return app
 
 
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+
+
 def main() -> None:
-  rclpy.init()
-  node = DashboardNode()
-  app = create_app(node)
-  port = int(node.get_parameter("port").value)
-  host = str(node.get_parameter("host").value)
-  # Force ASGI lifespan so the ROS spin thread in create_app(...lifespan=...)
-  # is always started. Without this, subscriptions can be created but never
-  # serviced, which leaves image/depth callbacks stuck at zero.
-  uvicorn.run(app, host=host, port=port, log_level="info", lifespan="on")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8081)
+    args, _ = parser.parse_known_args()
+
+    rclpy.init()
+    node = DashboardNode()
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+
+    app = build_app(node)
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

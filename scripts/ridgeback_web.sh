@@ -15,16 +15,16 @@ Usage: $(basename "$0") [options]
 Options:
   --no-nav2                 Start the Jetson stack with Nav2 disabled
   --nav2                    Force Nav2 on
-  --profile <profile>       Runtime profile: teleop, mapping, mission, debug
+  --profile <profile>       Runtime profile: full, safety_only, web_only
   -h, --help                Show this help
 
 Environment overrides:
-  RIDGEBACK_PROFILE         Runtime profile (default: mission)
-  RIDGEBACK_LAUNCH_SLAM     auto|true|false (default: auto)
-  RIDGEBACK_LAUNCH_NAV2     auto|true|false (default: auto)
-  RIDGEBACK_LAUNCH_VLM      auto|true|false (default: auto)
-  RIDGEBACK_LAUNCH_DASHBOARD auto|true|false (default: auto)
-  RIDGEBACK_LAUNCH_VSLAM    true|false (default: false; keep false until Ethernet/raw RGB-D validation)
+  RIDGEBACK_PROFILE         Runtime profile (default: full)
+  RIDGEBACK_ENABLE_SLAM     auto|true|false (default: auto)
+  RIDGEBACK_ENABLE_NAV2     auto|true|false (default: auto)
+  RIDGEBACK_ENABLE_EXPLORER auto|true|false (default: auto)
+  RIDGEBACK_ENABLE_VLM      auto|true|false (default: auto)
+  RIDGEBACK_ENABLE_WEB      auto|true|false (default: auto)
   RIDGEBACK_PREFER_WIRED    true|false (default: true)
   RIDGEBACK_REQUIRE_WIRED   true|false (default: true when RIDGEBACK_PREFER_WIRED=true)
   RIDGEBACK_CONFIGURE_WIRED true|false (default: true)
@@ -35,13 +35,12 @@ Environment overrides:
 EOF
 }
 
-RIDGEBACK_PROFILE="${RIDGEBACK_PROFILE:-mission}"
-RIDGEBACK_LAUNCH_SLAM="${RIDGEBACK_LAUNCH_SLAM:-auto}"
-RIDGEBACK_LAUNCH_NAV2="${RIDGEBACK_LAUNCH_NAV2:-auto}"
-RIDGEBACK_LAUNCH_VLM="${RIDGEBACK_LAUNCH_VLM:-auto}"
-RIDGEBACK_LAUNCH_DASHBOARD="${RIDGEBACK_LAUNCH_DASHBOARD:-auto}"
-RIDGEBACK_LAUNCH_CAMERA="${RIDGEBACK_LAUNCH_CAMERA:-auto}"
-RIDGEBACK_LAUNCH_VSLAM="${RIDGEBACK_LAUNCH_VSLAM:-false}"
+RIDGEBACK_PROFILE="${RIDGEBACK_PROFILE:-full}"
+RIDGEBACK_ENABLE_SLAM="${RIDGEBACK_ENABLE_SLAM:-auto}"
+RIDGEBACK_ENABLE_NAV2="${RIDGEBACK_ENABLE_NAV2:-auto}"
+RIDGEBACK_ENABLE_EXPLORER="${RIDGEBACK_ENABLE_EXPLORER:-auto}"
+RIDGEBACK_ENABLE_VLM="${RIDGEBACK_ENABLE_VLM:-auto}"
+RIDGEBACK_ENABLE_WEB="${RIDGEBACK_ENABLE_WEB:-auto}"
 RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
 RIDGEBACK_REQUIRE_WIRED="${RIDGEBACK_REQUIRE_WIRED:-$RIDGEBACK_PREFER_WIRED}"
 RIDGEBACK_CONFIGURE_WIRED="${RIDGEBACK_CONFIGURE_WIRED:-true}"
@@ -52,16 +51,16 @@ RIDGEBACK_WIRED_IP="${RIDGEBACK_WIRED_IP:-192.168.131.1}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-nav2)
-            RIDGEBACK_LAUNCH_NAV2=false
+            RIDGEBACK_ENABLE_NAV2=false
             shift
             ;;
         --nav2)
-            RIDGEBACK_LAUNCH_NAV2=true
+            RIDGEBACK_ENABLE_NAV2=true
             shift
             ;;
         --profile)
             if [[ -z "${2:-}" ]]; then
-                echo "ERROR: --profile requires one of: teleop, mapping, mission, debug" >&2
+                echo "ERROR: --profile requires one of: full, safety_only, web_only" >&2
                 usage >&2
                 exit 2
             fi
@@ -85,9 +84,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$RIDGEBACK_PROFILE" in
-    teleop|mapping|mission|debug) ;;
+    full|safety_only|web_only) ;;
     *)
-        echo "ERROR: invalid RIDGEBACK_PROFILE=$RIDGEBACK_PROFILE (expected teleop, mapping, mission, or debug)" >&2
+        echo "ERROR: invalid RIDGEBACK_PROFILE=$RIDGEBACK_PROFILE (expected full, safety_only, or web_only)" >&2
         exit 2
         ;;
 esac
@@ -116,12 +115,11 @@ validate_bool_toggle() {
     esac
 }
 
-validate_launch_toggle RIDGEBACK_LAUNCH_SLAM "$RIDGEBACK_LAUNCH_SLAM"
-validate_launch_toggle RIDGEBACK_LAUNCH_NAV2 "$RIDGEBACK_LAUNCH_NAV2"
-validate_launch_toggle RIDGEBACK_LAUNCH_VLM "$RIDGEBACK_LAUNCH_VLM"
-validate_launch_toggle RIDGEBACK_LAUNCH_DASHBOARD "$RIDGEBACK_LAUNCH_DASHBOARD"
-validate_launch_toggle RIDGEBACK_LAUNCH_CAMERA "$RIDGEBACK_LAUNCH_CAMERA"
-validate_bool_toggle RIDGEBACK_LAUNCH_VSLAM "$RIDGEBACK_LAUNCH_VSLAM"
+validate_launch_toggle RIDGEBACK_ENABLE_SLAM "$RIDGEBACK_ENABLE_SLAM"
+validate_launch_toggle RIDGEBACK_ENABLE_NAV2 "$RIDGEBACK_ENABLE_NAV2"
+validate_launch_toggle RIDGEBACK_ENABLE_EXPLORER "$RIDGEBACK_ENABLE_EXPLORER"
+validate_launch_toggle RIDGEBACK_ENABLE_VLM "$RIDGEBACK_ENABLE_VLM"
+validate_launch_toggle RIDGEBACK_ENABLE_WEB "$RIDGEBACK_ENABLE_WEB"
 validate_bool_toggle RIDGEBACK_PREFER_WIRED "$RIDGEBACK_PREFER_WIRED"
 validate_bool_toggle RIDGEBACK_REQUIRE_WIRED "$RIDGEBACK_REQUIRE_WIRED"
 validate_bool_toggle RIDGEBACK_CONFIGURE_WIRED "$RIDGEBACK_CONFIGURE_WIRED"
@@ -131,7 +129,13 @@ export ROS_LOCALHOST_ONLY=0
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export RMW_FASTRTPS_USE_SHM=1
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_jetson.xml"
-export RIDGEBACK_ENV_FILE="$RIDGEBACK_WORKSPACE/ridgeback_image_motion/.env"
+# Optional .env: vlm_client reads VLM_URL / VLM_MODEL / VLM_API_KEY from the env.
+if [[ -f "$RIDGEBACK_WORKSPACE/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$RIDGEBACK_WORKSPACE/.env"
+    set +a
+fi
 
 is_true() {
     [[ "$1" == "true" ]]
@@ -378,12 +382,11 @@ echo "  RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-unset}"
 echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "  RIDGEBACK_PROFILE=$RIDGEBACK_PROFILE"
-echo "  RIDGEBACK_LAUNCH_SLAM=$RIDGEBACK_LAUNCH_SLAM"
-echo "  RIDGEBACK_LAUNCH_NAV2=$RIDGEBACK_LAUNCH_NAV2"
-echo "  RIDGEBACK_LAUNCH_VLM=$RIDGEBACK_LAUNCH_VLM"
-echo "  RIDGEBACK_LAUNCH_DASHBOARD=$RIDGEBACK_LAUNCH_DASHBOARD"
-echo "  RIDGEBACK_LAUNCH_CAMERA=$RIDGEBACK_LAUNCH_CAMERA"
-echo "  RIDGEBACK_LAUNCH_VSLAM=$RIDGEBACK_LAUNCH_VSLAM"
+echo "  RIDGEBACK_ENABLE_SLAM=$RIDGEBACK_ENABLE_SLAM"
+echo "  RIDGEBACK_ENABLE_NAV2=$RIDGEBACK_ENABLE_NAV2"
+echo "  RIDGEBACK_ENABLE_EXPLORER=$RIDGEBACK_ENABLE_EXPLORER"
+echo "  RIDGEBACK_ENABLE_VLM=$RIDGEBACK_ENABLE_VLM"
+echo "  RIDGEBACK_ENABLE_WEB=$RIDGEBACK_ENABLE_WEB"
 if ! wait_for_publishers; then
     echo "  WARN Ridgeback core ROS publishers are still not visible."
     echo "       Check that the Ridgeback terminal is already running:"
@@ -419,28 +422,32 @@ if [[ "${RIDGEBACK_SKIP_STALE_CLEANUP:-0}" != "1" ]]; then
     for pattern in \
         "ros2 launch ridgeback_image_motion autonomy.launch.py" \
         "ridgeback_image_motion/.*/web_dashboard.py" \
-        "ridgeback_image_motion/.*/room_detector.py" \
         "ridgeback_image_motion/.*/mission_orchestrator.py" \
         "ridgeback_image_motion/.*/frontier_explorer.py" \
         "ridgeback_image_motion/.*/cmd_vel_mux.py" \
         "ridgeback_image_motion/.*/safety_controller.py" \
         "ridgeback_image_motion/.*/jetson_watchdog.py" \
-        "realsense2_camera_node"; do
+        "ridgeback_image_motion/.*/spatial_memory.py" \
+        "ridgeback_image_motion/.*/vlm_client.py"; do
         pkill -f "$pattern" 2>/dev/null || true
     done
 fi
 sleep 1
 
+# Resolve enable_* toggles the same way autonomy.launch.py does:
+# 'auto' falls back to the profile (full enables everything; safety_only enables
+# nothing; web_only enables only the dashboard).
 component_enabled() {
-    # component_enabled <toggle_value> <current_profile> <profile1> [<profile2> ...]
-    # Returns 0 (true) if toggle is "true" or (toggle is "auto" and profile is in list).
-    local toggle="$1" cur_profile="$2"
-    shift 2
+    # component_enabled <toggle_value> <profile_truth_for_full> <profile_truth_for_web_only>
+    # truth flags are "true" or "false".
+    local toggle="$1" full_truth="$2" web_only_truth="$3"
     if [[ "$toggle" == "true" ]]; then return 0; fi
     if [[ "$toggle" == "false" ]]; then return 1; fi
-    for p in "$@"; do
-        if [[ "$cur_profile" == "$p" ]]; then return 0; fi
-    done
+    case "$RIDGEBACK_PROFILE" in
+        full) [[ "$full_truth" == "true" ]] && return 0 || return 1 ;;
+        web_only) [[ "$web_only_truth" == "true" ]] && return 0 || return 1 ;;
+        safety_only) return 1 ;;
+    esac
     return 1
 }
 
@@ -455,7 +462,7 @@ postflight_jetson() {
     echo ""
     echo "=========================================="
     echo "[POSTFLIGHT] Jetson autonomy (after ${wait_s}s)"
-    echo "  profile=$RIDGEBACK_PROFILE slam=$RIDGEBACK_LAUNCH_SLAM nav2=$RIDGEBACK_LAUNCH_NAV2 vlm=$RIDGEBACK_LAUNCH_VLM"
+    echo "  profile=$RIDGEBACK_PROFILE slam=$RIDGEBACK_ENABLE_SLAM nav2=$RIDGEBACK_ENABLE_NAV2 explorer=$RIDGEBACK_ENABLE_EXPLORER vlm=$RIDGEBACK_ENABLE_VLM web=$RIDGEBACK_ENABLE_WEB"
     echo "=========================================="
 
     require_node() {
@@ -503,42 +510,37 @@ postflight_jetson() {
     require_node /safety_controller "core"
     require_node /cmd_vel_mux "core"
     require_node /jetson_watchdog "core"
-
-    # --- Camera (realsense2_camera on Jetson) ---
-    # Depth + aligned-depth need USB 3; postflight only requires color so the
-    # USB-2 fallback profile still passes. Aligned-depth check returns when
-    # the camera is on a USB 3 cable.
-    if component_enabled "$RIDGEBACK_LAUNCH_CAMERA" "$RIDGEBACK_PROFILE" mapping mission debug; then
-        require_topic_pub "/r100_0140/sensors/camera_0/color/image_raw" "camera"
-    fi
+    require_topic_pub "/safety/latched" "safety"
+    # Camera comes from the Ridgeback in this build; the topic check is informational.
+    require_topic_pub "/r100_0140/sensors/camera_0/color/image_raw" "camera"
 
     # --- Dashboard ---
-    if component_enabled "$RIDGEBACK_LAUNCH_DASHBOARD" "$RIDGEBACK_PROFILE" teleop mapping mission debug; then
+    if component_enabled "$RIDGEBACK_ENABLE_WEB" "true" "true"; then
         require_node /ridgeback_dashboard "dashboard"
     fi
 
     # --- SLAM ---
-    if component_enabled "$RIDGEBACK_LAUNCH_SLAM" "$RIDGEBACK_PROFILE" mapping mission debug; then
+    if component_enabled "$RIDGEBACK_ENABLE_SLAM" "true" "false"; then
         require_node /slam_toolbox "slam"
         require_topic_pub /map "slam"
     fi
 
-    # --- Frontier explorer (auto in mapping/mission/debug) ---
-    if component_enabled "${RIDGEBACK_LAUNCH_EXPLORATION:-auto}" "$RIDGEBACK_PROFILE" mapping mission debug; then
+    # --- Explorer + Mission + Memory (one toggle gates all three) ---
+    if component_enabled "$RIDGEBACK_ENABLE_EXPLORER" "true" "false"; then
         require_node /frontier_explorer "exploration"
-        require_topic_pub /ridgeback/exploration/status "exploration"
+        require_node /mission_orchestrator "mission"
+        require_node /spatial_memory "memory"
+        require_topic_pub /frontier/status "exploration"
+        require_topic_pub /mission/state "mission"
     fi
 
-    # --- Mission orchestrator + VLM room detector (mission/debug only) ---
-    if [[ "$RIDGEBACK_PROFILE" == "mission" || "$RIDGEBACK_PROFILE" == "debug" ]]; then
-        require_node /mission_orchestrator "mission"
-    fi
-    if component_enabled "$RIDGEBACK_LAUNCH_VLM" "$RIDGEBACK_PROFILE" mission debug; then
-        require_node /room_detector "vlm"
+    # --- VLM ---
+    if component_enabled "$RIDGEBACK_ENABLE_VLM" "true" "false"; then
+        require_node /vlm_client "vlm"
     fi
 
     # --- Nav2: nodes must EXIST and be in lifecycle state 'active' ---
-    if component_enabled "$RIDGEBACK_LAUNCH_NAV2" "$RIDGEBACK_PROFILE" mission debug; then
+    if component_enabled "$RIDGEBACK_ENABLE_NAV2" "true" "false"; then
         local nav2_nodes=(
             /bt_navigator
             /controller_server
@@ -582,21 +584,14 @@ postflight_jetson() {
     fi
 
     # --- VLM endpoint (best-effort warning, not fatal) ---
-    if component_enabled "$RIDGEBACK_LAUNCH_VLM" "$RIDGEBACK_PROFILE" mission debug; then
-        local vlm_endpoint vlm_port vlm_url status_code
-        vlm_endpoint="$(grep -E '^VLM_ENDPOINT=' "$RIDGEBACK_ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
-        vlm_port="$(grep -E '^VLM_PORT=' "$RIDGEBACK_ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d '"' | tr -d "'")"
-        vlm_endpoint="${vlm_endpoint:-http://202.92.159.240}"
-        vlm_port="${vlm_port:-8000}"
-        case "$vlm_endpoint" in
-            http://*|https://*) vlm_url="${vlm_endpoint%/}:${vlm_port}/v1/models" ;;
-            *)                  vlm_url="http://${vlm_endpoint}:${vlm_port}/v1/models" ;;
-        esac
+    if component_enabled "$RIDGEBACK_ENABLE_VLM" "true" "false"; then
+        local vlm_url status_code
+        vlm_url="${VLM_URL:-http://202.92.159.240:8000/v1}/models"
         status_code="$(timeout 3 curl -s -o /dev/null -w '%{http_code}' "$vlm_url" 2>/dev/null || echo 000)"
         if [[ "$status_code" == "200" ]]; then
             echo "  OK   VLM endpoint reachable: $vlm_url"
         else
-            echo "  WARN VLM endpoint $vlm_url returned HTTP $status_code (frontier_explorer will fall back to distance ranking)"
+            echo "  WARN VLM endpoint $vlm_url returned HTTP $status_code (vlm_client will log errors)"
             warns=$((warns + 1))
         fi
     fi
@@ -633,9 +628,9 @@ echo "[5/5] Starting Jetson autonomy stack..."
 echo "=========================================="
 echo "Open in browser: http://$(hostname -I | awk '{print $1}'):8081"
 echo "Profile: $RIDGEBACK_PROFILE"
-echo "Launch: SLAM=$RIDGEBACK_LAUNCH_SLAM Nav2=$RIDGEBACK_LAUNCH_NAV2 VLM=$RIDGEBACK_LAUNCH_VLM Dashboard=$RIDGEBACK_LAUNCH_DASHBOARD vSLAM=$RIDGEBACK_LAUNCH_VSLAM"
+echo "Launch: SLAM=$RIDGEBACK_ENABLE_SLAM Nav2=$RIDGEBACK_ENABLE_NAV2 Explorer=$RIDGEBACK_ENABLE_EXPLORER VLM=$RIDGEBACK_ENABLE_VLM Web=$RIDGEBACK_ENABLE_WEB"
 echo "Manual teleop while Jetson stack is running:"
-echo "  ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/cmd_vel_teleop"
+echo "  ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r /cmd_vel:=/cmd_vel/teleop"
 echo "=========================================="
 
 postflight_jetson &
@@ -645,9 +640,8 @@ ros2 launch ridgeback_image_motion autonomy.launch.py \
     host:=0.0.0.0 \
     port:=8081 \
     profile:="$RIDGEBACK_PROFILE" \
-    launch_slam:="$RIDGEBACK_LAUNCH_SLAM" \
-    launch_nav2:="$RIDGEBACK_LAUNCH_NAV2" \
-    launch_vlm:="$RIDGEBACK_LAUNCH_VLM" \
-    launch_dashboard:="$RIDGEBACK_LAUNCH_DASHBOARD" \
-    launch_camera:="$RIDGEBACK_LAUNCH_CAMERA" \
-    launch_vslam:="$RIDGEBACK_LAUNCH_VSLAM"
+    enable_slam:="$RIDGEBACK_ENABLE_SLAM" \
+    enable_nav2:="$RIDGEBACK_ENABLE_NAV2" \
+    enable_explorer:="$RIDGEBACK_ENABLE_EXPLORER" \
+    enable_vlm:="$RIDGEBACK_ENABLE_VLM" \
+    enable_web:="$RIDGEBACK_ENABLE_WEB"

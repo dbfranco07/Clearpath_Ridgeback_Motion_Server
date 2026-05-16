@@ -18,18 +18,25 @@
   <exec_depend>action_msgs</exec_depend>
   <exec_depend>nav2_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>tf2_geometry_msgs</exec_depend>
   <exec_depend>nav2_bringup</exec_depend>
   <exec_depend>slam_toolbox</exec_depend>
   <exec_depend>robot_localization</exec_depend>
-  <exec_depend>rtabmap_odom</exec_depend>
   <exec_depend>realsense2_camera</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-requests</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
+  <!-- The following are pip-installed on the Jetson; rosdep keys may not exist:
+       fastapi, uvicorn (web_dashboard.py)
+       pydantic (>=2 already pulled by fastapi)
+  -->
 
   <member_of_group>rosidl_interface_packages</member_of_group>
 

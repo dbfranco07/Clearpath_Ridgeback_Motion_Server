@@ -1,0 +1,57 @@
+# slam_toolbox online_async — fresh map, mapping mode.
+# CLAUDE.md goal #4: never load a pre-built map.
+
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+    mode: mapping
+    odom_frame: r100_0140/odom
+    map_frame: map
+    base_frame: r100_0140/base_link
+    scan_topic: /r100_0140/sensors/lidar2d_0/scan
+    scan_queue_size: 1
+
+    # Map publishing
+    map_update_interval: 1.0
+    map_file_name: ""            # never load
+    map_start_at_dock: false
+
+    # Solver
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None
+
+    # Resolution / range
+    resolution: 0.05
+    max_laser_range: 10.0
+    minimum_time_interval: 0.2
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+    stack_size_to_use: 40000000
+
+    # Loop closure
+    loop_search_maximum_distance: 6.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 10
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.35
+    loop_match_minimum_response_fine: 0.45
+
+    # Correlation
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # Scan matcher
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.2
+    minimum_travel_heading: 0.2
+    scan_buffer_size: 10
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.1
+    link_scan_maximum_distance: 1.5
+    do_loop_closing_with_initial_pose: true
