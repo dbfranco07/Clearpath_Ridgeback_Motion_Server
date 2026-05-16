@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Standalone Jetson safety controller.
 
-Fail-safe e-stop for the Ridgeback. Boots **tripped** so the robot cannot
-move until the operator's browser is connected AND the watchdog reports
-the Ridgeback platform is alive. Either input going stale re-trips the
-latch. While tripped, publishes zero Twist on /cmd_vel/safety; the
-cmd_vel mux gives this source absolute priority.
+Fail-safe slow-mode controller for the Ridgeback. Boots **tripped** so the
+robot can only crawl until the operator's browser is connected AND the
+watchdog reports the Ridgeback platform is alive. Either input going stale
+re-trips the latch. The cmd_vel mux watches /safety/latched and clamps its
+output to slow-mode caps when tripped, instead of forwarding zeros — the
+robot stays controllable but rate-limited.
 
 Reset via std_srvs/Trigger on /safety/reset (only honored once both
 conditions are healthy again).
@@ -16,7 +17,6 @@ from __future__ import annotations
 import threading
 
 import rclpy
-from geometry_msgs.msg import Twist
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, Header
@@ -37,7 +37,6 @@ class SafetyController(Node):
 
         self.declare_parameter("heartbeat_topic", "/operator/heartbeat")
         self.declare_parameter("liveness_topic", "/platform/liveness")
-        self.declare_parameter("safety_cmd_topic", "/cmd_vel/safety")
         self.declare_parameter("safety_latched_topic", "/safety/latched")
         self.declare_parameter("safety_reset_service", "/safety/reset")
         self.declare_parameter("heartbeat_timeout_s", 1.0)
@@ -70,9 +69,6 @@ class SafetyController(Node):
             self.get_parameter("liveness_topic").value,
             self._on_liveness,
             10,
-        )
-        self._pub_safety = self.create_publisher(
-            Twist, self.get_parameter("safety_cmd_topic").value, 10
         )
         self._pub_latched = self.create_publisher(
             Bool, self.get_parameter("safety_latched_topic").value, _LATCHED_QOS
@@ -134,10 +130,7 @@ class SafetyController(Node):
                     self._reasons = []
 
             self._publish_latched_locked()
-
-        # Always publish zero Twist while latched.
-        if self._latched:
-            self._pub_safety.publish(Twist())
+        # The clamping happens in cmd_vel_mux when /safety/latched=true.
 
     def _try_clear(self) -> tuple[bool, str]:
         with self._lock:

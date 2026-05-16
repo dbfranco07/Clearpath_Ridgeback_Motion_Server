@@ -17,7 +17,6 @@ safety_controller:
   ros__parameters:
     heartbeat_topic: /operator/heartbeat
     liveness_topic: /platform/liveness
-    safety_cmd_topic: /cmd_vel/safety
     safety_latched_topic: /safety/latched
     safety_reset_service: /safety/reset
     heartbeat_timeout_s: 1.0
@@ -27,7 +26,6 @@ safety_controller:
 
 cmd_vel_mux:
   ros__parameters:
-    safety_topic: /cmd_vel/safety
     teleop_topic: /cmd_vel/teleop
     nav_topic: /cmd_vel/nav
     output_topic: /cmd_vel/mux_out
@@ -35,6 +33,11 @@ cmd_vel_mux:
     teleop_timeout_s: 0.4
     nav_timeout_s: 0.5
     publish_rate_hz: 50.0
+    # Slow-mode caps applied while /safety/latched=true. Robot stays
+    # steerable but is rate-limited so accidental commands don't cause harm.
+    slow_max_linear: 0.10
+    slow_max_lateral: 0.10
+    slow_max_angular: 0.30
 
 jetson_watchdog:
   ros__parameters:
