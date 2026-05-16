@@ -8,7 +8,7 @@ slam_toolbox:
     odom_frame: odom
     map_frame: map
     base_frame: base_link
-    scan_topic: /sensors/lidar2d_0/scan
+    scan_topic: /r100_0140/sensors/lidar2d_0/scan
     scan_queue_size: 1
 
     # Map publishing
