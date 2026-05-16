@@ -131,13 +131,21 @@ export ROS_LOCALHOST_ONLY=0
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export RMW_FASTRTPS_USE_SHM=1
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_jetson.xml"
-# Optional .env: vlm_client reads VLM_URL / VLM_MODEL / VLM_API_KEY from the env.
-if [[ -f "$RIDGEBACK_WORKSPACE/.env" ]]; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$RIDGEBACK_WORKSPACE/.env"
-    set +a
-fi
+# Optional .env: vlm_client picks up VLM_ENDPOINT / VLM_PORT / VLM_MODEL_NAME /
+# VLM_API_KEY / VLM_THINK from this file. Search both the package directory
+# and the workspace root.
+for env_candidate in \
+    "$RIDGEBACK_WORKSPACE/ridgeback_image_motion/.env" \
+    "$RIDGEBACK_WORKSPACE/.env"; do
+    if [[ -f "$env_candidate" ]]; then
+        set -a
+        # shellcheck disable=SC1090
+        source "$env_candidate"
+        set +a
+        echo "Sourced VLM env from $env_candidate"
+        break
+    fi
+done
 
 is_true() {
     [[ "$1" == "true" ]]
@@ -588,8 +596,14 @@ postflight_jetson() {
 
     # --- VLM endpoint (best-effort warning, not fatal) ---
     if component_enabled "$RIDGEBACK_ENABLE_VLM" "true" "false"; then
-        local vlm_url status_code
-        vlm_url="${VLM_URL:-http://202.92.159.240:8000/v1}/models"
+        local vlm_url status_code base
+        if [[ -n "${VLM_URL:-}" ]]; then
+            base="${VLM_URL%/}"
+        else
+            base="${VLM_ENDPOINT:-http://202.92.159.240}"
+            base="${base%/}:${VLM_PORT:-8000}/v1"
+        fi
+        vlm_url="$base/models"
         status_code="$(timeout 3 curl -s -o /dev/null -w '%{http_code}' "$vlm_url" 2>/dev/null || echo 000)"
         if [[ "$status_code" == "200" ]]; then
             echo "  OK   VLM endpoint reachable: $vlm_url"

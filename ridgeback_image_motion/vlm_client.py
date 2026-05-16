@@ -49,6 +49,21 @@ _DEFAULT_PROMPT = (
 )
 
 
+def _resolve_vlm_url() -> str:
+    """Pick the VLM base URL from env.
+
+    Priority: VLM_URL (full URL incl /v1) > VLM_ENDPOINT + VLM_PORT > default.
+    """
+    explicit = os.environ.get("VLM_URL")
+    if explicit:
+        return explicit.rstrip("/")
+    endpoint = os.environ.get("VLM_ENDPOINT", "http://202.92.159.240").rstrip("/")
+    if "://" not in endpoint:
+        endpoint = f"http://{endpoint}"
+    port = os.environ.get("VLM_PORT", "8000")
+    return f"{endpoint}:{port}/v1"
+
+
 class VlmClient(Node):
     def __init__(self) -> None:
         super().__init__("vlm_client")
@@ -60,11 +75,20 @@ class VlmClient(Node):
         self.declare_parameter("observation_topic", "/vlm/observation")
         self.declare_parameter("home_frame", "map")
         self.declare_parameter("base_frame", "")
+        self.declare_parameter("vlm_url", _resolve_vlm_url())
         self.declare_parameter(
-            "vlm_url", os.environ.get("VLM_URL", "http://202.92.159.240:8000/v1")
+            "vlm_model",
+            os.environ.get("VLM_MODEL")
+            or os.environ.get("VLM_MODEL_NAME")
+            or "Qwen/Qwen3-VL-7B-Instruct",
         )
-        self.declare_parameter("vlm_model", os.environ.get("VLM_MODEL", "qwen2-vl"))
         self.declare_parameter("api_key_env", "VLM_API_KEY")
+        # VLM_THINK=false disables Qwen's extended-reasoning tokens via the
+        # vLLM chat_template_kwargs hook.
+        self.declare_parameter(
+            "enable_thinking",
+            (os.environ.get("VLM_THINK", "false").lower() == "true"),
+        )
         self.declare_parameter("period_s", 3.0)
         self.declare_parameter("motion_threshold_mps", 0.05)
         self.declare_parameter("jpeg_quality", 80)
@@ -91,6 +115,7 @@ class VlmClient(Node):
         self._vlm_model = str(self.get_parameter("vlm_model").value)
         self._api_key = os.environ.get(str(self.get_parameter("api_key_env").value), "")
         self._prompt = str(self.get_parameter("prompt").value)
+        self._enable_thinking = bool(self.get_parameter("enable_thinking").value)
 
         self._bridge = CvBridge()
         self._lock = threading.Lock()
@@ -235,6 +260,11 @@ class VlmClient(Node):
                 }
             ],
         }
+        # vLLM honours chat_template_kwargs for Qwen-family models — disable
+        # the extended-reasoning ("thinking") block when VLM_THINK=false so the
+        # response is pure JSON instead of reasoning + JSON.
+        if not self._enable_thinking:
+            body["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
