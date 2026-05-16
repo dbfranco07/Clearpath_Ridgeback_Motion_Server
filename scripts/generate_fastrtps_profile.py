@@ -8,13 +8,21 @@ from pathlib import Path
 
 
 TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  defaultUnicastLocatorList is intentionally omitted so FastDDS binds user and
+  metatraffic locators to *all* interfaces, including 127.0.0.1. Restricting
+  the bind list to a single WiFi IP (as a previous revision did) breaks
+  intra-machine service discovery: sibling Nav2 processes have to hairpin
+  every SPDP packet through the WiFi NIC, and `lifecycle_manager` ends up
+  stuck on "Waiting for service controller_server/get_state...".
+
+  initialPeersList still suppresses default multicast and limits cross-host
+  discovery to the listed peers, which is the whole point of the profile.
+-->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/FastRTPS_Profiles">
     <profiles>
         <participant profile_name="participant_profile" is_default_profile="true">
             <rtps>
-                <defaultUnicastLocatorList>
-{local_locators}
-                </defaultUnicastLocatorList>
                 <builtin>
                     <initialPeersList>
 {peer_locators}
@@ -45,12 +53,11 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Output XML path")
     args = parser.parse_args()
 
-    local_locators = locator(args.local_ip)
     initial_peers = [args.local_ip, "127.0.0.1", *args.peer_ip]
     peer_locators = "\n".join(locator(peer) for peer in dict.fromkeys(initial_peers))
     output = Path(args.output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(TEMPLATE.format(local_locators=local_locators, peer_locators=peer_locators))
+    output.write_text(TEMPLATE.format(peer_locators=peer_locators))
     print(output)
 
 

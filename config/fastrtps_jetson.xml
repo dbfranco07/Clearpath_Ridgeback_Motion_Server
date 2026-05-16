@@ -4,21 +4,16 @@
   vars are NOT set; otherwise scripts/generate_fastrtps_profile.py rewrites
   /tmp/fastrtps_jetson_generated.xml at launch time and that overrides this.
 
-  defaultUnicastLocatorList uses jetson-ridgeback.local (resolved via mDNS) so
-  DDS binds to whatever IP the Jetson currently has on WiFi without needing the
-  XML to be edited every reconnect.
+  defaultUnicastLocatorList is deliberately NOT set so FastDDS binds to all
+  interfaces (including 127.0.0.1). Pinning the bind to a single WiFi IP
+  causes sibling processes on the Jetson (e.g. every Nav2 lifecycle node when
+  use_composition=False) to hairpin SPDP through the WiFi NIC and the
+  lifecycle_manager hangs forever on "Waiting for service ..._server/get_state".
 -->
 <dds xmlns="http://www.eprosima.com/XMLSchemas/FastRTPS_Profiles">
     <profiles>
         <participant profile_name="participant_profile" is_default_profile="true">
             <rtps>
-                <defaultUnicastLocatorList>
-                    <locator>
-                        <udpv4>
-                            <address>jetson-ridgeback.local</address>
-                        </udpv4>
-                    </locator>
-                </defaultUnicastLocatorList>
                 <builtin>
                     <initialPeersList>
                         <locator>
