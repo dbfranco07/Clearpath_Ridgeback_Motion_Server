@@ -94,7 +94,9 @@ class MissionOrchestrator(Node):
 
         ns = self.get_parameter("namespace").value
         self._home_frame = self.get_parameter("home_frame").value
-        self._base_frame = self.get_parameter("base_frame").value or f"{ns}/base_link"
+        # Platform's robot_state_publisher emits URDF frame names verbatim
+        # (no ROS namespace prefix), so default to bare "base_link".
+        self._base_frame = self.get_parameter("base_frame").value or "base_link"
         self._periodic_vlm_period = float(self.get_parameter("periodic_vlm_period_s").value)
         self._match_conf = float(self.get_parameter("target_match_confidence").value)
         self._max_explore_time = float(self.get_parameter("max_explore_time_s").value)

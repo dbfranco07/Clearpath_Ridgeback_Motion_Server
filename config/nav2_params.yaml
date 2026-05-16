@@ -10,8 +10,8 @@ bt_navigator:
   ros__parameters:
     use_sim_time: false
     global_frame: map
-    robot_base_frame: r100_0140/base_link
-    odom_topic: /r100_0140/platform/odom/filtered
+    robot_base_frame: base_link
+    odom_topic: /platform/odom/filtered
     bt_loop_duration: 10
     default_server_timeout: 20
     enable_groot_monitoring: false
@@ -69,7 +69,7 @@ controller_server:
     use_sim_time: false
     controller_frequency: 20.0
     cmd_vel_topic: /cmd_vel/nav
-    odom_topic: /r100_0140/platform/odom/filtered
+    odom_topic: /platform/odom/filtered
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001
     min_theta_velocity_threshold: 0.001
@@ -124,8 +124,8 @@ local_costmap:
       use_sim_time: false
       update_frequency: 5.0
       publish_frequency: 2.0
-      global_frame: r100_0140/odom
-      robot_base_frame: r100_0140/base_link
+      global_frame: odom
+      robot_base_frame: base_link
       rolling_window: true
       width: 5
       height: 5
@@ -137,7 +137,7 @@ local_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /r100_0140/sensors/lidar2d_0/scan
+          topic: /sensors/lidar2d_0/scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -159,7 +159,7 @@ global_costmap:
       update_frequency: 1.0
       publish_frequency: 1.0
       global_frame: map
-      robot_base_frame: r100_0140/base_link
+      robot_base_frame: base_link
       rolling_window: false
       track_unknown_space: true
       robot_radius: 0.34
@@ -174,7 +174,7 @@ global_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /r100_0140/sensors/lidar2d_0/scan
+          topic: /sensors/lidar2d_0/scan
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -223,9 +223,9 @@ behavior_server:
       plugin: nav2_behaviors/DriveOnHeading
     wait:
       plugin: nav2_behaviors/Wait
-    local_frame: r100_0140/odom
+    local_frame: odom
     global_frame: map
-    robot_base_frame: r100_0140/base_link
+    robot_base_frame: base_link
     transform_tolerance: 0.5
     simulate_ahead_time: 2.0
     max_rotational_vel: 1.0
@@ -253,7 +253,7 @@ velocity_smoother:
     min_velocity: [-0.4, -0.4, -1.0]
     max_accel: [1.0, 1.0, 2.0]
     max_decel: [-1.0, -1.0, -2.0]
-    odom_topic: /r100_0140/platform/odom/filtered
+    odom_topic: /platform/odom/filtered
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0

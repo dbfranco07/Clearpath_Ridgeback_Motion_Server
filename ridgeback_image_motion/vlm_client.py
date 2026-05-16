@@ -80,7 +80,9 @@ class VlmClient(Node):
             self.get_parameter("odom_topic").value or f"/{ns}/platform/odom/filtered"
         )
         self._home_frame = self.get_parameter("home_frame").value
-        self._base_frame = self.get_parameter("base_frame").value or f"{ns}/base_link"
+        # Platform's robot_state_publisher emits URDF frame names verbatim
+        # (no ROS namespace prefix), so default to bare "base_link".
+        self._base_frame = self.get_parameter("base_frame").value or "base_link"
         self._period = float(self.get_parameter("period_s").value)
         self._motion_threshold = float(self.get_parameter("motion_threshold_mps").value)
         self._jpeg_quality = int(self.get_parameter("jpeg_quality").value)

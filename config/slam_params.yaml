@@ -5,10 +5,10 @@ slam_toolbox:
   ros__parameters:
     use_sim_time: false
     mode: mapping
-    odom_frame: r100_0140/odom
+    odom_frame: odom
     map_frame: map
-    base_frame: r100_0140/base_link
-    scan_topic: /r100_0140/sensors/lidar2d_0/scan
+    base_frame: base_link
+    scan_topic: /sensors/lidar2d_0/scan
     scan_queue_size: 1
 
     # Map publishing
