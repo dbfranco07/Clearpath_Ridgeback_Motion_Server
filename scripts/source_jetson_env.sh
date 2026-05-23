@@ -12,8 +12,12 @@ fi
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-0}"
 export ROS_LOCALHOST_ONLY=0
-export RMW_IMPLEMENTATION="${RIDGEBACK_RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
-export RMW_FASTRTPS_USE_SHM=1
+export RMW_IMPLEMENTATION="${RIDGEBACK_RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+if [[ "$RMW_IMPLEMENTATION" == "rmw_fastrtps_cpp" ]]; then
+    export RMW_FASTRTPS_USE_SHM=1
+else
+    unset RMW_FASTRTPS_USE_SHM
+fi
 
 RIDGEBACK_WIRED_IP="${RIDGEBACK_WIRED_IP:-192.168.131.1}"
 JETSON_WIRED_IP="${JETSON_WIRED_IP:-192.168.131.50}"
@@ -41,7 +45,9 @@ JETSON_IP="${JETSON_IP:-$(detect_jetson_wired_ip)}"
 JETSON_IP="${JETSON_IP:-$JETSON_WIRED_IP}"
 RIDGEBACK_IP="${RIDGEBACK_IP:-$RIDGEBACK_WIRED_IP}"
 
-if [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
+if [[ "$RMW_IMPLEMENTATION" != "rmw_fastrtps_cpp" ]]; then
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+elif [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
     unset FASTRTPS_DEFAULT_PROFILES_FILE
 else
     export FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/fastrtps_jetson_generated.xml
