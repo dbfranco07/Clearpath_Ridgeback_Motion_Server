@@ -221,9 +221,11 @@ def _setup(context, *args, **kwargs):
                         "use_sim_time": "False",
                         "params_file": nav2_params,
                         "autostart": "True",
-                        # Composition silently failed — switch to separate
-                        # processes so any node-level error is visible.
-                        "use_composition": "False",
+                        # Orin Nano can't carry 7 separate Nav2 processes
+                        # plus SLAM/VLM/camera/web — DDS service discovery
+                        # times out under load. Composition puts every
+                        # Nav2 server in one process.
+                        "use_composition": "True",
                     }.items(),
                 )
             )
