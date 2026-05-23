@@ -63,24 +63,31 @@ def _realsense_launch_args(camera_namespace: str, camera_name: str) -> tuple[str
     Returns (profile_label, args_dict).
     """
     speed = _detect_realsense_usb_speed()
+    # IR streams are disabled — nothing downstream consumes them, and the
+    # D435 defaults of 848x480@30 saturate the Jetson USB bus enough to
+    # trip the "Frames didn't arrive within 5 seconds" watchdog.
     if speed == "3":
-        return "USB3 (424x240 RGB+depth @15)", {
+        return "USB3 (424x240 RGB+depth @15, IR off)", {
             "camera_namespace": camera_namespace,
             "camera_name": camera_name,
             "enable_color": "true",
             "rgb_camera.color_profile": "424x240x15",
             "enable_depth": "true",
             "depth_module.depth_profile": "424x240x15",
+            "enable_infra1": "false",
+            "enable_infra2": "false",
             "align_depth.enable": "true",
             "enable_sync": "false",
             "pointcloud.enable": "false",
         }
-    return "USB2 (424x240 color-only @15)", {
+    return "USB2 (424x240 color-only @15, IR off)", {
         "camera_namespace": camera_namespace,
         "camera_name": camera_name,
         "enable_color": "true",
         "rgb_camera.color_profile": "424x240x15",
         "enable_depth": "false",
+        "enable_infra1": "false",
+        "enable_infra2": "false",
         "align_depth.enable": "false",
         "pointcloud.enable": "false",
     }

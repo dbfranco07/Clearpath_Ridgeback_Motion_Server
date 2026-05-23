@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  CycloneDDS peer-XML template.
+  Substituted at runtime by scripts/generate_cyclonedds_profile.py.
+
+  Why this shape:
+    - Keep multicast SPDP on (Cyclone default) so intra-host discovery on the
+      Ridgeback (clearpath-platform, clearpath-sensors, motion_server) still
+      works without changes to the systemd services.
+    - Add explicit <Peers> with the remote host's wired IP so cross-host
+      discovery is reliable even when the wired bridge briefly drops a
+      multicast SPDP packet. This is the belt-and-suspenders that the old
+      FastDDS profile (restrictive) was trying to do, but without breaking
+      intra-host comms.
+    - ParticipantIndex=auto lets multiple processes on the same host avoid
+      DDS port collisions without manual coordination.
+-->
+<CycloneDDS xmlns="https://cdds.io/config"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain id="any">
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <Peers>
+        <Peer Address="@PEER_IP@"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

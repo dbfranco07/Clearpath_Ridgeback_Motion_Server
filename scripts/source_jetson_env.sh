@@ -45,8 +45,20 @@ JETSON_IP="${JETSON_IP:-$(detect_jetson_wired_ip)}"
 JETSON_IP="${JETSON_IP:-$JETSON_WIRED_IP}"
 RIDGEBACK_IP="${RIDGEBACK_IP:-$RIDGEBACK_WIRED_IP}"
 
-if [[ "$RMW_IMPLEMENTATION" != "rmw_fastrtps_cpp" ]]; then
+if [[ "$RMW_IMPLEMENTATION" == "rmw_cyclonedds_cpp" ]]; then
+    if [[ "${RIDGEBACK_DISABLE_CYCLONEDDS_PROFILE:-0}" == "1" ]]; then
+        unset CYCLONEDDS_URI
+    else
+        cyclone_profile=/tmp/cyclonedds_jetson_generated.xml
+        python3 "$RIDGEBACK_WORKSPACE/scripts/generate_cyclonedds_profile.py" \
+            --peer-ip "$RIDGEBACK_IP" \
+            --output "$cyclone_profile" >/dev/null
+        export CYCLONEDDS_URI="file://$cyclone_profile"
+    fi
     unset FASTRTPS_DEFAULT_PROFILES_FILE
+elif [[ "$RMW_IMPLEMENTATION" != "rmw_fastrtps_cpp" ]]; then
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+    unset CYCLONEDDS_URI
 elif [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
     unset FASTRTPS_DEFAULT_PROFILES_FILE
 else
@@ -64,5 +76,6 @@ fi
 echo "Ridgeback Jetson ROS env:"
 echo "  ROS_DOMAIN_ID=$ROS_DOMAIN_ID"
 echo "  RMW_IMPLEMENTATION=$RMW_IMPLEMENTATION"
+echo "  CYCLONEDDS_URI=${CYCLONEDDS_URI:-disabled}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "  Jetson IP=$JETSON_IP  Ridgeback IP=$RIDGEBACK_IP"

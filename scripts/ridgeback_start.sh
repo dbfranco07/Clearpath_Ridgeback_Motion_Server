@@ -12,9 +12,29 @@ source "$SCRIPT_DIR/ridgeback_clock_check.sh"
 
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export RMW_FASTRTPS_USE_SHM=1
-export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_ridgeback.xml"
+# CycloneDDS is the default here so the Ridgeback side speaks the same RMW
+# as the Jetson side (avoids cross-vendor /tf and /tf_static QoS flap).
+# IMPORTANT: clearpath-platform.service still uses whatever RMW is set in
+# /etc/ros/setup.bash. For full effect, set
+#     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# in that file and `sudo systemctl restart clearpath-robot.service` once.
+# FastDDS is available as an escape hatch via RIDGEBACK_RMW_IMPLEMENTATION.
+export RMW_IMPLEMENTATION="${RIDGEBACK_RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+if [[ "$RMW_IMPLEMENTATION" == "rmw_fastrtps_cpp" ]]; then
+    export RMW_FASTRTPS_USE_SHM=1
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_ridgeback.xml"
+    unset CYCLONEDDS_URI
+else
+    unset RMW_FASTRTPS_USE_SHM
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+    # CYCLONEDDS_URI is rendered below once JETSON_IP / RIDGEBACK_IP are known.
+fi
+
+if [[ "$RMW_IMPLEMENTATION" == "rmw_cyclonedds_cpp" ]] && ! dpkg -s ros-humble-rmw-cyclonedds-cpp >/dev/null 2>&1; then
+    echo "ERROR: $RMW_IMPLEMENTATION selected but ros-humble-rmw-cyclonedds-cpp is not installed." >&2
+    echo "       sudo apt install ros-humble-rmw-cyclonedds-cpp" >&2
+    exit 1
+fi
 
 RIDGEBACK_PREFER_WIRED="${RIDGEBACK_PREFER_WIRED:-true}"
 RIDGEBACK_REQUIRE_WIRED="${RIDGEBACK_REQUIRE_WIRED:-$RIDGEBACK_PREFER_WIRED}"
@@ -92,7 +112,21 @@ elif [[ -z "${JETSON_IP:-}" ]]; then
     JETSON_IP="$(resolve_ipv4 "${JETSON_HOST:-jetson-ridgeback.local}")"
 fi
 
-if [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
+if [[ "$RMW_IMPLEMENTATION" == "rmw_cyclonedds_cpp" ]]; then
+    if [[ "${RIDGEBACK_DISABLE_CYCLONEDDS_PROFILE:-0}" == "1" ]]; then
+        unset CYCLONEDDS_URI
+        echo "CycloneDDS profile DISABLED (RIDGEBACK_DISABLE_CYCLONEDDS_PROFILE=1)"
+    elif [[ -n "${JETSON_IP:-}" ]]; then
+        cyclone_profile=/tmp/cyclonedds_ridgeback_generated.xml
+        python3 "$RIDGEBACK_WORKSPACE/scripts/generate_cyclonedds_profile.py" \
+            --peer-ip "$JETSON_IP" \
+            --output "$cyclone_profile" >/dev/null
+        export CYCLONEDDS_URI="file://$cyclone_profile"
+    else
+        echo "WARN: CycloneDDS profile not generated; JETSON_IP unknown"
+        unset CYCLONEDDS_URI
+    fi
+elif [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
     unset FASTRTPS_DEFAULT_PROFILES_FILE
 elif [[ -n "${RIDGEBACK_IP:-}" && -n "${JETSON_IP:-}" ]]; then
     export FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/fastrtps_ridgeback_generated.xml
@@ -109,6 +143,8 @@ echo "=========================================="
 echo "Ridgeback R100 - Start Script"
 echo "=========================================="
 echo "ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-unset}"
+echo "RMW: ${RMW_IMPLEMENTATION:-unset}"
+echo "CycloneDDS profile: ${CYCLONEDDS_URI:-disabled}"
 echo "FastDDS profile: ${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "Ridgeback IP: ${RIDGEBACK_IP:-unknown}  Jetson IP: ${JETSON_IP:-unknown}"
 echo "Network preference: wired=${RIDGEBACK_PREFER_WIRED} require_wired=${RIDGEBACK_REQUIRE_WIRED} ridgeback_wired=${RIDGEBACK_WIRED_IP} jetson_wired=${JETSON_WIRED_IP}"
@@ -151,6 +187,7 @@ echo "Ridgeback platform diagnostics:"
 echo "  ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-unset}"
 echo "  ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY:-unset}"
 echo "  RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-unset}"
+echo "  CYCLONEDDS_URI=${CYCLONEDDS_URI:-disabled}"
 echo "  RMW_FASTRTPS_USE_SHM=${RMW_FASTRTPS_USE_SHM:-unset}"
 echo "  FASTRTPS_DEFAULT_PROFILES_FILE=${FASTRTPS_DEFAULT_PROFILES_FILE:-disabled}"
 echo "  This script intentionally starts only motion_server.py."
