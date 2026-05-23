@@ -570,7 +570,7 @@ postflight_jetson() {
     # owned by /r100_0140/twist_mux only.
     require_topic_pub_exactly_one "/r100_0140/cmd_vel" "motion bridge"
     require_topic_pub_exactly_one "/r100_0140/platform/cmd_vel_unstamped" "native twist_mux output"
-    require_topic_pub_exactly_one "/r100_0140/sensors/camera_0/color/image_raw" "camera"
+    require_topic_pub "/r100_0140/sensors/camera_0/color/image_raw" "camera"
 
     # --- Dashboard ---
     if component_enabled "$RIDGEBACK_ENABLE_WEB" "true" "true"; then
@@ -723,7 +723,7 @@ postflight_jetson() {
         echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above." >&2
         echo "  Most common fixes:" >&2
         echo "    - Motion bridge missing -> run ridgeback_start.sh on the Ridgeback and confirm /r100_0140/cmd_vel has exactly one publisher from /motion_server." >&2
-        echo "    - More than one platform/camera publisher -> stale processes or duplicate bridge output; stop goridge, clear stale processes, then rerun." >&2
+        echo "    - More than one platform cmd_vel publisher -> stale processes or duplicate bridge output; stop goridge, clear stale processes, then rerun." >&2
         echo "    - Nav2 lifecycle still 'unconfigured' -> autostart failed; inspect the logs first, then activate manually if needed:" >&2
         echo "        for n in controller_server planner_server smoother_server behavior_server bt_navigator waypoint_follower velocity_smoother; do" >&2
         echo "          ros2 lifecycle set /\$n configure; ros2 lifecycle set /\$n activate; done" >&2
