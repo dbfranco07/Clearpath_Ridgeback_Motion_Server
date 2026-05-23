@@ -602,10 +602,11 @@ postflight_jetson() {
             fi
         done
 
-        # If any lifecycle check failed but every node is present, kick the
-        # configure→activate transitions by hand and re-check once. This
-        # rescues sessions where lifecycle_manager_navigation gave up on
-        # planner_server/get_state before the service was reachable.
+        # If any lifecycle check failed but every node is present, we only
+        # report the failure by default. Manual lifecycle pokes can race with
+        # nav2's own lifecycle manager and destabilize controller_server.
+        # Set RIDGEBACK_POSTFLIGHT_FORCE_NAV2_ACTIVATE=1 only when you want
+        # to debug lifecycle transitions by hand.
         if (( errs > lifecycle_errs_before )); then
             local all_present=true
             for node in "${nav2_lifecycle[@]}"; do
@@ -615,13 +616,17 @@ postflight_jetson() {
                 fi
             done
             if $all_present; then
-                echo "  ..   nav2 lifecycle not active; running manual configure/activate fallback"
-                nav2_activate
-                sleep 4
-                errs=$lifecycle_errs_before
-                for node in "${nav2_lifecycle[@]}"; do
-                    require_lifecycle_active "$node" || true
-                done
+                if [[ "${RIDGEBACK_POSTFLIGHT_FORCE_NAV2_ACTIVATE:-0}" == "1" ]]; then
+                    echo "  ..   nav2 lifecycle not active; running manual configure/activate fallback"
+                    nav2_activate
+                    sleep 4
+                    errs=$lifecycle_errs_before
+                    for node in "${nav2_lifecycle[@]}"; do
+                        require_lifecycle_active "$node" || true
+                    done
+                else
+                    echo "  ..   nav2 lifecycle not active; skipping manual activation to avoid racing lifecycle_manager_navigation"
+                fi
             fi
         fi
 
@@ -666,7 +671,7 @@ postflight_jetson() {
     else
         echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above." >&2
         echo "  Most common fixes:" >&2
-        echo "    - Nav2 lifecycle still 'unconfigured' → autostart failed; activate manually:" >&2
+        echo "    - Nav2 lifecycle still 'unconfigured' → autostart failed; inspect the logs first, then activate manually if needed:" >&2
         echo "        for n in controller_server planner_server smoother_server behavior_server bt_navigator waypoint_follower velocity_smoother; do" >&2
         echo "          ros2 lifecycle set /\$n configure; ros2 lifecycle set /\$n activate; done" >&2
         echo "    - A Nav2 node missing entirely → check launch log for [\$nodename] errors and rerun goridge." >&2
