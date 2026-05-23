@@ -4,25 +4,33 @@
   Substituted at runtime by scripts/generate_cyclonedds_profile.py.
 
   Why this shape:
-    - Keep multicast SPDP on (Cyclone default) so intra-host discovery on the
-      Ridgeback (clearpath-platform, clearpath-sensors, motion_server) still
-      works without changes to the systemd services.
-    - Add explicit <Peers> with the remote host's wired IP so cross-host
-      discovery is reliable even when the wired bridge briefly drops a
-      multicast SPDP packet. This is the belt-and-suspenders that the old
-      FastDDS profile (restrictive) was trying to do, but without breaking
-      intra-host comms.
-    - ParticipantIndex=auto + MaxAutoParticipantIndex=60 lets Cyclone share
-      the host with many other DDS participants. Default max is 9, which is
-      exhausted immediately when the FastDDS-based clearpath-platform service
-      already holds the low indices; symptom is
-          "Failed to find a free participant index for domain 0"
-      at motion_server startup.
+    - Pin to a single wired interface so Cyclone does NOT advertise WiFi
+      locators alongside the wired ones. With multi-NIC hosts (Jetson has
+      wired + WiFi, Ridgeback has wired bridge + WiFi), advertising WiFi
+      addresses to a peer that has no route to that subnet causes
+      "ddsi_udp_conn_write ... failed with retcode -1" spam and the
+      negotiated data path can land on the dead route, dropping /tf
+      updates for nav2 even though discovery succeeds.
+    - Keep multicast SPDP on so intra-host discovery on the Ridgeback
+      (clearpath-platform, clearpath-sensors, motion_server) still works
+      without changes to the systemd services.
+    - Add explicit <Peers> with the remote host's wired IP as a
+      belt-and-suspenders for cross-host SPDP across the wired bridge.
+    - ParticipantIndex=auto + MaxAutoParticipantIndex=60 lets Cyclone
+      share the host with many other DDS participants. Default is 9,
+      which is exhausted immediately when the FastDDS-based
+      clearpath-platform service holds the low indices.
 -->
 <CycloneDDS xmlns="https://cdds.io/config"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
   <Domain id="any">
+    <General>
+      <Interfaces>
+        <NetworkInterface autodetermine="false" name="@IFACE@" priority="default" multicast="true"/>
+      </Interfaces>
+      <AllowMulticast>spdp</AllowMulticast>
+    </General>
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>
       <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>

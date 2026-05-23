@@ -26,6 +26,7 @@ def render_peers(peers: list[str], indent: int = 8) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--iface", required=True, help="Wired NIC to bind to (e.g. eth0, eno1, eqos0)")
     parser.add_argument("--peer-ip", action="append", required=True, help="Peer IP. Repeat for multiple peers.")
     parser.add_argument("--output", required=True, help="Output XML path")
     parser.add_argument(
@@ -40,9 +41,12 @@ def main() -> None:
     template = template_path.read_text()
 
     peers_block = render_peers(args.peer_ip)
-    rendered = template.replace(
-        '        <Peer Address="@PEER_IP@"/>',
-        peers_block,
+    rendered = (
+        template.replace('name="@IFACE@"', f'name="{args.iface}"')
+        .replace(
+            '        <Peer Address="@PEER_IP@"/>',
+            peers_block,
+        )
     )
 
     output = Path(args.output).expanduser()

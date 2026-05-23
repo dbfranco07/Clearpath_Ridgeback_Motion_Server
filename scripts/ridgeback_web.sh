@@ -287,8 +287,15 @@ if [[ "$RMW_IMPLEMENTATION" == "rmw_cyclonedds_cpp" ]]; then
         unset CYCLONEDDS_URI
         echo "CycloneDDS profile DISABLED (RIDGEBACK_DISABLE_CYCLONEDDS_PROFILE=1)"
     elif [[ -n "${RIDGEBACK_IP:-}" ]]; then
+        cyclone_iface="$(detect_wired_iface)"
+        if [[ -z "$cyclone_iface" ]]; then
+            echo "ERROR: CycloneDDS profile needs a wired NIC but none was detected." >&2
+            echo "       Check 'ip -br link' and set RIDGEBACK_WIRED_IFACE explicitly." >&2
+            exit 1
+        fi
         cyclone_profile=/tmp/cyclonedds_jetson_generated.xml
         python3 "$RIDGEBACK_WORKSPACE/scripts/generate_cyclonedds_profile.py" \
+            --iface "$cyclone_iface" \
             --peer-ip "$RIDGEBACK_IP" \
             --output "$cyclone_profile" >/dev/null
         export CYCLONEDDS_URI="file://$cyclone_profile"

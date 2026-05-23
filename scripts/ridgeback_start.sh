@@ -64,6 +64,13 @@ detect_wired_ridgeback_ip() {
     '
 }
 
+detect_wired_iface_for_ip() {
+    local target_ip="$1"
+    ip -o -4 addr show 2>/dev/null | awk -v ip="$target_ip" '
+        { split($4, parts, "/"); if (parts[1] == ip) { print $2; exit } }
+    '
+}
+
 detect_local_ip() {
     local wired_ip
     if is_true "$RIDGEBACK_PREFER_WIRED"; then
@@ -116,14 +123,21 @@ if [[ "$RMW_IMPLEMENTATION" == "rmw_cyclonedds_cpp" ]]; then
     if [[ "${RIDGEBACK_DISABLE_CYCLONEDDS_PROFILE:-0}" == "1" ]]; then
         unset CYCLONEDDS_URI
         echo "CycloneDDS profile DISABLED (RIDGEBACK_DISABLE_CYCLONEDDS_PROFILE=1)"
-    elif [[ -n "${JETSON_IP:-}" ]]; then
+    elif [[ -n "${JETSON_IP:-}" && -n "${RIDGEBACK_IP:-}" ]]; then
+        cyclone_iface="$(detect_wired_iface_for_ip "$RIDGEBACK_IP")"
+        if [[ -z "$cyclone_iface" ]]; then
+            echo "ERROR: CycloneDDS profile needs the wired NIC holding $RIDGEBACK_IP, but it was not found." >&2
+            echo "       Check 'ip -br addr' and the wired bridge setup." >&2
+            exit 1
+        fi
         cyclone_profile=/tmp/cyclonedds_ridgeback_generated.xml
         python3 "$RIDGEBACK_WORKSPACE/scripts/generate_cyclonedds_profile.py" \
+            --iface "$cyclone_iface" \
             --peer-ip "$JETSON_IP" \
             --output "$cyclone_profile" >/dev/null
         export CYCLONEDDS_URI="file://$cyclone_profile"
     else
-        echo "WARN: CycloneDDS profile not generated; JETSON_IP unknown"
+        echo "WARN: CycloneDDS profile not generated; JETSON_IP or RIDGEBACK_IP unknown"
         unset CYCLONEDDS_URI
     fi
 elif [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then

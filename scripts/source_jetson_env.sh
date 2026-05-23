@@ -41,6 +41,13 @@ detect_jetson_wired_ip() {
     '
 }
 
+detect_wired_iface_for_ip() {
+    local target_ip="$1"
+    ip -o -4 addr show 2>/dev/null | awk -v ip="$target_ip" '
+        { split($4, parts, "/"); if (parts[1] == ip) { print $2; exit } }
+    '
+}
+
 JETSON_IP="${JETSON_IP:-$(detect_jetson_wired_ip)}"
 JETSON_IP="${JETSON_IP:-$JETSON_WIRED_IP}"
 RIDGEBACK_IP="${RIDGEBACK_IP:-$RIDGEBACK_WIRED_IP}"
@@ -49,8 +56,11 @@ if [[ "$RMW_IMPLEMENTATION" == "rmw_cyclonedds_cpp" ]]; then
     if [[ "${RIDGEBACK_DISABLE_CYCLONEDDS_PROFILE:-0}" == "1" ]]; then
         unset CYCLONEDDS_URI
     else
+        cyclone_iface="$(detect_wired_iface_for_ip "$JETSON_IP")"
+        cyclone_iface="${cyclone_iface:-lo}"
         cyclone_profile=/tmp/cyclonedds_jetson_generated.xml
         python3 "$RIDGEBACK_WORKSPACE/scripts/generate_cyclonedds_profile.py" \
+            --iface "$cyclone_iface" \
             --peer-ip "$RIDGEBACK_IP" \
             --output "$cyclone_profile" >/dev/null
         export CYCLONEDDS_URI="file://$cyclone_profile"
