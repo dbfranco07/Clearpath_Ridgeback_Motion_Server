@@ -128,7 +128,8 @@ validate_bool_toggle RIDGEBACK_CONFIGURE_WIRED "$RIDGEBACK_CONFIGURE_WIRED"
 
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+# export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 export RMW_FASTRTPS_USE_SHM=1
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_jetson.xml"
 # Optional .env: vlm_client picks up VLM_ENDPOINT / VLM_PORT / VLM_MODEL_NAME /
