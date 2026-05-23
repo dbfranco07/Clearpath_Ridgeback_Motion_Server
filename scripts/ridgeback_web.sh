@@ -29,6 +29,8 @@ Environment overrides:
   RIDGEBACK_REQUIRE_WIRED   true|false (default: true when RIDGEBACK_PREFER_WIRED=true)
   RIDGEBACK_CONFIGURE_WIRED true|false (default: true)
   RIDGEBACK_WIRED_IFACE     Ethernet interface or auto (default: auto)
+  RIDGEBACK_ALLOW_DEGRADED_PREFLIGHT
+                            1 to launch even when Ridgeback DDS topics are missing
   RIDGEBACK_SKIP_CLOCK_CHECK 1 to bypass the host clock preflight
   JETSON_WIRED_CIDR         Jetson wired CIDR (default: 192.168.131.50/24)
   RIDGEBACK_WIRED_IP        Ridgeback wired bridge IP (default: 192.168.131.1)
@@ -128,8 +130,10 @@ validate_bool_toggle RIDGEBACK_CONFIGURE_WIRED "$RIDGEBACK_CONFIGURE_WIRED"
 
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
-# export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+# Use FastDDS here so the generated unicast peer profile below is actually
+# honored. With CycloneDDS the Jetson still sees its local camera, but the
+# Ridgeback-side FastDDS graph can disappear when multicast is unavailable.
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export RMW_FASTRTPS_USE_SHM=1
 export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_jetson.xml"
 # Optional .env: vlm_client picks up VLM_ENDPOINT / VLM_PORT / VLM_MODEL_NAME /
@@ -335,19 +339,22 @@ topic_status() {
     fi
 }
 
+RIDGEBACK_PREFLIGHT_TOPICS=(
+    "/r100_0140/sensors/lidar2d_0/scan"
+    "/r100_0140/platform/odom/filtered"
+    "/r100_0140/tf"
+    "/r100_0140/cmd_vel"
+    "/r100_0140/platform/cmd_vel_unstamped"
+)
+
 wait_for_publishers() {
     local wait_s="${RIDGEBACK_PREFLIGHT_WAIT_S:-45}"
     local step_s=3
     local waited=0
-    local required_topics=(
-        "/r100_0140/sensors/lidar2d_0/scan"
-        "/r100_0140/platform/odom/filtered"
-        "/r100_0140/tf"
-    )
 
     while (( waited < wait_s )); do
         local missing=0
-        for topic in "${required_topics[@]}"; do
+        for topic in "${RIDGEBACK_PREFLIGHT_TOPICS[@]}"; do
             count="$(topic_publishers "$topic")"
             if [[ -z "$count" || "$count" == "0" ]]; then
                 missing=$((missing + 1))
@@ -403,13 +410,30 @@ echo "  RIDGEBACK_ENABLE_VLM=$RIDGEBACK_ENABLE_VLM"
 echo "  RIDGEBACK_ENABLE_WEB=$RIDGEBACK_ENABLE_WEB"
 echo "  RIDGEBACK_ENABLE_CAMERA=$RIDGEBACK_ENABLE_CAMERA"
 if ! wait_for_publishers; then
-    echo "  WARN Ridgeback core ROS publishers are still not visible."
-    echo "       Check that the Ridgeback terminal is already running:"
+    echo "  FAIL Ridgeback core ROS publishers are still not visible from the Jetson."
+    echo "       Missing or hidden topics:"
+    for topic in "${RIDGEBACK_PREFLIGHT_TOPICS[@]}"; do
+        count="$(topic_publishers "$topic")"
+        if [[ -z "$count" || "$count" == "0" ]]; then
+            echo "         - $topic"
+        fi
+    done
+    echo "       On the Ridgeback, run in a separate terminal:"
     echo "         bash ~/ridgeback99/scripts/ridgeback_start.sh"
-    echo "       Also verify RIDGEBACK_IP/JETSON_IP and ROS_DOMAIN_ID match on both machines."
+    echo "       Then verify wired/DDS visibility from the Jetson:"
+    echo "         ping -c 3 $RIDGEBACK_WIRED_IP"
+    echo "         ros2 topic info /r100_0140/sensors/lidar2d_0/scan"
+    echo "       To intentionally launch with missing Ridgeback topics:"
+    echo "         RIDGEBACK_ALLOW_DEGRADED_PREFLIGHT=1 goridge"
+    if [[ "${RIDGEBACK_ALLOW_DEGRADED_PREFLIGHT:-0}" != "1" ]]; then
+        exit 1
+    fi
+    echo "  WARN continuing despite failed Ridgeback preflight."
 fi
 topic_status "/r100_0140/sensors/lidar2d_0/scan" "2D LiDAR"
 topic_status "/r100_0140/platform/odom/filtered" "Filtered odom"
+topic_status "/r100_0140/cmd_vel" "Motion bridge"
+topic_status "/r100_0140/platform/cmd_vel_unstamped" "Native twist_mux output"
 topic_status "/r100_0140/sensors/camera_0/color/image_raw" "Jetson RealSense RGB"
 topic_status "/r100_0140/sensors/camera_0/aligned_depth_to_color/image_raw" "Jetson RealSense depth (aligned)"
 topic_status "/r100_0140/tf" "TF"
