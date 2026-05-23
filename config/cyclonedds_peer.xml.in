@@ -12,8 +12,12 @@
       multicast SPDP packet. This is the belt-and-suspenders that the old
       FastDDS profile (restrictive) was trying to do, but without breaking
       intra-host comms.
-    - ParticipantIndex=auto lets multiple processes on the same host avoid
-      DDS port collisions without manual coordination.
+    - ParticipantIndex=auto + MaxAutoParticipantIndex=60 lets Cyclone share
+      the host with many other DDS participants. Default max is 9, which is
+      exhausted immediately when the FastDDS-based clearpath-platform service
+      already holds the low indices; symptom is
+          "Failed to find a free participant index for domain 0"
+      at motion_server startup.
 -->
 <CycloneDDS xmlns="https://cdds.io/config"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -21,6 +25,7 @@
   <Domain id="any">
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>60</MaxAutoParticipantIndex>
       <Peers>
         <Peer Address="@PEER_IP@"/>
       </Peers>
