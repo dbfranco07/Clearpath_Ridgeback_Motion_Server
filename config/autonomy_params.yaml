@@ -20,9 +20,9 @@ safety_controller:
     safety_latched_topic: /safety/latched
     safety_reset_service: /safety/reset
     heartbeat_timeout_s: 1.0
-    liveness_timeout_s: 2.5
+    liveness_timeout_s: 5.0
     publish_rate_hz: 20.0
-    require_reset: true
+    require_reset: false
 
 cmd_vel_mux:
   ros__parameters:

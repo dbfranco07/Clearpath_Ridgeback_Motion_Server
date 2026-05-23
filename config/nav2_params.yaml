@@ -2,9 +2,21 @@
 # Holonomic controller. Output topic: /cmd_vel/nav (consumed by cmd_vel_mux).
 # Local costmap uses LiDAR only initially; depth pointcloud can be added later.
 
-amcl:
+lifecycle_manager_navigation:
   ros__parameters:
     use_sim_time: false
+    autostart: true
+    bond_timeout: 4.0
+    attempt_respawn_reconnection: true
+    bond_respawn_max_duration: 10.0
+    node_names:
+      - controller_server
+      - smoother_server
+      - planner_server
+      - behavior_server
+      - velocity_smoother
+      - waypoint_follower
+      - bt_navigator
 
 bt_navigator:
   ros__parameters:
@@ -257,7 +269,3 @@ velocity_smoother:
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
-
-collision_monitor:
-  ros__parameters:
-    use_sim_time: false

@@ -229,7 +229,7 @@ class FrontierExplorer(Node):
 
     # --- nav2 plumbing ------------------------------------------------------
     def _send_goal(self, goal: tuple[float, float]) -> None:
-        if not self._action.wait_for_server(timeout_sec=1.0):
+        if not self._action.wait_for_server(timeout_sec=10.0):
             self._last_error = "nav2_unavailable"
             self._publish_status("nav2_unavailable")
             return

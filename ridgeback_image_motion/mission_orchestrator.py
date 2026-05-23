@@ -385,7 +385,7 @@ class MissionOrchestrator(Node):
         return ps
 
     def _send_nav_goal(self, pose: PoseStamped, on_done) -> None:
-        if not self._action.wait_for_server(timeout_sec=1.0):
+        if not self._action.wait_for_server(timeout_sec=10.0):
             self._abort("nav2_unavailable")
             return
         goal = NavigateToPose.Goal()
