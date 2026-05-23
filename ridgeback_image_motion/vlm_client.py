@@ -36,9 +36,9 @@ from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
 
 try:
-    from ridgeback_image_motion.autonomy_common import json_dumps, quaternion_to_yaw_rad
+    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads, quaternion_to_yaw_rad
 except ImportError:
-    from autonomy_common import json_dumps, quaternion_to_yaw_rad  # type: ignore[no-redef]
+    from autonomy_common import json_dumps, json_loads, quaternion_to_yaw_rad  # type: ignore[no-redef]
 
 
 _DEFAULT_PROMPT = (

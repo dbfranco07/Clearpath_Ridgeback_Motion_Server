@@ -41,6 +41,7 @@ def test_room_detector_subscribes_to_primary_and_fallback_camera_topics() -> Non
 def test_vlm_endpoint_config_defaults_to_remote_and_normalizes_url() -> None:
     vlm = read_repo_file("ridgeback_image_motion", "vlm_client.py")
     env = read_repo_file("ridgeback_image_motion", ".env")
+    assert "json_loads" in vlm
     assert "normalize_base_url" in vlm
     assert "OpenAI(base_url=resolved.openai_base_url" in vlm
     assert "VLM_ENDPOINT=http://" in env
