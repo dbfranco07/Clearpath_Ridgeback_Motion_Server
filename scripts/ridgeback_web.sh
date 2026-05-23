@@ -130,12 +130,17 @@ validate_bool_toggle RIDGEBACK_CONFIGURE_WIRED "$RIDGEBACK_CONFIGURE_WIRED"
 
 export ROS_DOMAIN_ID=0
 export ROS_LOCALHOST_ONLY=0
-# Use FastDDS here so the generated unicast peer profile below is actually
-# honored. With CycloneDDS the Jetson still sees its local camera, but the
-# Ridgeback-side FastDDS graph can disappear when multicast is unavailable.
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-export RMW_FASTRTPS_USE_SHM=1
-export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_jetson.xml"
+# CycloneDDS is the default because it is what the Jetson/Ridgeback link has
+# proven to discover reliably in this deployment. FastDDS remains available by
+# setting RIDGEBACK_RMW_IMPLEMENTATION=rmw_fastrtps_cpp.
+export RMW_IMPLEMENTATION="${RIDGEBACK_RMW_IMPLEMENTATION:-rmw_cyclonedds_cpp}"
+if [[ "$RMW_IMPLEMENTATION" == "rmw_fastrtps_cpp" ]]; then
+    export RMW_FASTRTPS_USE_SHM=1
+    export FASTRTPS_DEFAULT_PROFILES_FILE="$RIDGEBACK_WORKSPACE/config/fastrtps_jetson.xml"
+else
+    unset RMW_FASTRTPS_USE_SHM
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+fi
 # Optional .env: vlm_client picks up VLM_ENDPOINT / VLM_PORT / VLM_MODEL_NAME /
 # VLM_API_KEY / VLM_THINK from this file. Search both the package directory
 # and the workspace root.
@@ -269,7 +274,9 @@ elif [[ -z "${RIDGEBACK_IP:-}" ]]; then
     done
 fi
 
-if [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
+if [[ "$RMW_IMPLEMENTATION" != "rmw_fastrtps_cpp" ]]; then
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+elif [[ "${RIDGEBACK_DISABLE_FASTRTPS_PROFILE:-0}" == "1" ]]; then
     unset FASTRTPS_DEFAULT_PROFILES_FILE
     echo "FastDDS profile DISABLED (RIDGEBACK_DISABLE_FASTRTPS_PROFILE=1)"
 elif [[ -n "${JETSON_IP:-}" && -n "${RIDGEBACK_IP:-}" ]]; then

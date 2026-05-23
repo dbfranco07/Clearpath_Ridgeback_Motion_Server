@@ -70,7 +70,8 @@ set -euo pipefail
 source /opt/ros/humble/setup.bash
 source $JETSON_SETUP
 export ROS_DOMAIN_ID=0
-export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export RMW_FASTRTPS_USE_SHM=1
 
 check_topic() {
     local topic="\$1"
