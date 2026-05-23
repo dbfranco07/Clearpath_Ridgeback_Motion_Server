@@ -24,7 +24,7 @@ safety_controller:
     safety_latched_topic: /safety/latched
     safety_reset_service: /safety/reset
     safety_override_topic: /safety/override
-    heartbeat_timeout_s: 1.0
+    heartbeat_timeout_s: 3.0
     liveness_timeout_s: 5.0
     publish_rate_hz: 20.0
     require_reset: false
@@ -148,3 +148,5 @@ ridgeback_dashboard:
     teleop_max_linear: 0.5
     teleop_max_lateral: 0.5
     teleop_max_angular: 1.5
+    dashboard_keepalive_period_s: 0.5
+    dashboard_keepalive_window_s: 30.0

@@ -22,6 +22,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
+    TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -63,15 +64,15 @@ def _realsense_launch_args(camera_namespace: str, camera_name: str) -> tuple[str
     """
     speed = _detect_realsense_usb_speed()
     if speed == "3":
-        return "USB3 (640x480 RGB+depth @30)", {
+        return "USB3 (424x240 RGB+depth @15)", {
             "camera_namespace": camera_namespace,
             "camera_name": camera_name,
             "enable_color": "true",
-            "rgb_camera.color_profile": "640x480x30",
+            "rgb_camera.color_profile": "424x240x15",
             "enable_depth": "true",
-            "depth_module.depth_profile": "640x480x30",
+            "depth_module.depth_profile": "424x240x15",
             "align_depth.enable": "true",
-            "enable_sync": "true",
+            "enable_sync": "false",
             "pointcloud.enable": "false",
         }
     return "USB2 (424x240 color-only @15)", {
@@ -245,7 +246,7 @@ def _setup(context, *args, **kwargs):
             # Jetson it was producing a /tmp/launch_params_* file that behaved
             # like the default Nav2 config (goal_checker/static_layer/no DWB
             # critics) despite the logged source YAML being correct.
-            actions.extend([
+            nav2_actions = [
                 _nav2_node(
                     "nav2_controller",
                     "controller_server",
@@ -300,7 +301,10 @@ def _setup(context, *args, **kwargs):
                     ],
                     emulate_tty=True,
                 ),
-            ])
+            ]
+            # Let the /r100_0140/tf -> /tf bridge and slam_toolbox start
+            # publishing before lifecycle_manager activates costmaps.
+            actions.append(TimerAction(period=3.0, actions=nav2_actions))
 
     if enable_explorer == "true":
         actions.extend([

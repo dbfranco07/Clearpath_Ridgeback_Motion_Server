@@ -14,14 +14,14 @@ import math
 import threading
 import time
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import cv2
 import numpy as np
 import rclpy
 import uvicorn
 from cv_bridge import CvBridge
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
@@ -479,6 +479,7 @@ function switchControlTab(tab) {
     document.getElementById('pane-'+t).style.display = t===tab ? 'flex' : 'none';
     document.getElementById('tab-'+t).classList.toggle('on', t===tab);
   });
+  if (tab === 'teleop' && document.activeElement) document.activeElement.blur();
 }
 
 function switchWorldView(view) {
@@ -496,7 +497,19 @@ function switchWorldView(view) {
 }
 
 document.querySelectorAll('.dk[data-lin]').forEach(btn => {
-  btn.addEventListener('click', () => toggleDk(btn));
+  btn.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (document.activeElement) document.activeElement.blur();
+    if (btn.setPointerCapture) btn.setPointerCapture(e.pointerId);
+    startDk(btn);
+  });
+  btn.addEventListener('pointerup', e => {
+    e.preventDefault();
+    stopRobot();
+  });
+  btn.addEventListener('pointercancel', stopRobot);
+  btn.addEventListener('lostpointercapture', stopRobot);
+  btn.addEventListener('contextmenu', e => e.preventDefault());
 });
 
 function setVlmFilter(kind) {
@@ -507,9 +520,8 @@ function setVlmFilter(kind) {
   renderVlmTimeline();
 }
 
-function toggleDk(btn) {
+function startDk(btn) {
   if (teleopTimer) return;
-  if (activeDk === btn) { stopRobot(); return; }
   if (activeDk) activeDk.classList.remove('active');
   activeDk = btn; btn.classList.add('active');
   clearInterval(btnTeleopTimer);
@@ -592,6 +604,7 @@ window.addEventListener('keyup', e => {
 window.addEventListener('blur', () => {
   if (!stopOnBlur) return;
   pressedKeys.clear();
+  if (btnTeleopTimer || activeDk) stopRobot();
   if (teleopTimer) { clearInterval(teleopTimer); teleopTimer = null; sendTeleop(0,0,0,'blur'); }
 });
 
@@ -599,8 +612,13 @@ document.addEventListener('visibilitychange', () => {
   if (!stopOnBlur) return;
   if (document.visibilityState === 'hidden') {
     pressedKeys.clear();
+    if (btnTeleopTimer || activeDk) stopRobot();
     if (teleopTimer) { clearInterval(teleopTimer); teleopTimer = null; sendTeleop(0,0,0,'blur'); }
   }
+});
+
+window.addEventListener('pointerup', () => {
+  if (activeDk) stopRobot();
 });
 
 async function sendTeleop(linear, lateral, angular, source='keyboard') {
@@ -1043,6 +1061,8 @@ class DashboardNode(Node):
         self.declare_parameter("teleop_max_linear", 0.5)
         self.declare_parameter("teleop_max_lateral", 0.5)
         self.declare_parameter("teleop_max_angular", 1.5)
+        self.declare_parameter("dashboard_keepalive_period_s", 0.5)
+        self.declare_parameter("dashboard_keepalive_window_s", 30.0)
 
         ns = self.get_parameter("namespace").value
         self._params: dict[str, Any] = {
@@ -1069,6 +1089,12 @@ class DashboardNode(Node):
             float(self.get_parameter("teleop_max_linear").value),
             float(self.get_parameter("teleop_max_lateral").value),
             float(self.get_parameter("teleop_max_angular").value),
+        )
+        self._keepalive_period_s = float(
+            self.get_parameter("dashboard_keepalive_period_s").value
+        )
+        self._keepalive_window_s = float(
+            self.get_parameter("dashboard_keepalive_window_s").value
         )
 
         self._bridge = CvBridge()
@@ -1100,6 +1126,7 @@ class DashboardNode(Node):
         self._chat_history: list[dict[str, Any]] = []
         self._last_teleop_source: str = "none"
         self._last_teleop_stamp: float = 0.0
+        self._last_client_seen: float = time.time()
 
         # QoS profiles
         sensor_qos = QoSProfile(
@@ -1129,11 +1156,26 @@ class DashboardNode(Node):
             Bool, self._params["safety_override"], _LATCHED_QOS
         )
         self._pub_vlm_trigger = self.create_publisher(String, self._params["vlm_trigger"], 10)
+        self._heartbeat_keepalive_timer = self.create_timer(
+            max(self._keepalive_period_s, 0.1),
+            self._heartbeat_keepalive_tick,
+        )
 
         # Service client (safety reset; created lazily on first call)
         self._safety_reset_client = self.create_client(Trigger, self._params["safety_reset"])
 
         self.get_logger().info("ridgeback_dashboard ready")
+
+    def mark_client_seen(self) -> None:
+        with self._lock:
+            self._last_client_seen = time.time()
+
+    def _heartbeat_keepalive_tick(self) -> None:
+        now = time.time()
+        with self._lock:
+            recent_client = (now - self._last_client_seen) <= self._keepalive_window_s
+        if recent_client:
+            self.publish_heartbeat()
 
     # --- subscription callbacks ---------------------------------------------
     def _on_scan(self, msg: LaserScan) -> None:
@@ -1438,6 +1480,14 @@ def build_app(node: DashboardNode) -> FastAPI:
 
     app = FastAPI(lifespan=lifespan)
 
+    @app.middleware("http")
+    async def mark_dashboard_activity(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        node.mark_client_seen()
+        return await call_next(request)
+
     @app.get("/", response_class=HTMLResponse)
     async def root() -> HTMLResponse:
         return HTMLResponse(PAGE_HTML)
@@ -1523,12 +1573,14 @@ def build_app(node: DashboardNode) -> FastAPI:
     @app.post("/api/mission")
     async def api_mission(req: MissionRequest) -> dict[str, Any]:
         intent_room = parse_intent_and_room(req.command)
+        node.publish_heartbeat()
         node.publish_mission(intent_room["intent"], intent_room["room"], req.command)
         return {"ok": True, **intent_room}
 
     @app.post("/api/chat")
     async def api_chat(req: ChatRequest) -> dict[str, Any]:
         intent_room = parse_intent_and_room(req.message)
+        node.publish_heartbeat()
         node.publish_mission(intent_room["intent"], intent_room["room"], req.message)
         return {"ok": True, **intent_room}
 
