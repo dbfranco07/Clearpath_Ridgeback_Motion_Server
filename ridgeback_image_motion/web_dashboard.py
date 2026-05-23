@@ -1091,7 +1091,7 @@ class DashboardNode(Node):
         # Subscriptions
         self.create_subscription(LaserScan, self._params["scan"], self._on_scan, sensor_qos)
         self.create_subscription(Odometry, self._params["odom"], self._on_odom, 10)
-        self.create_subscription(BatteryState, self._params["battery"], self._on_battery, 10)
+        self.create_subscription(BatteryState, self._params["battery"], self._on_battery, sensor_qos)
         self.create_subscription(Image, self._params["color"], self._on_color, sensor_qos)
         self.create_subscription(Image, self._params["depth"], self._on_depth, sensor_qos)
         self.create_subscription(OccupancyGrid, self._params["map"], self._on_map, _LATCHED_QOS)
