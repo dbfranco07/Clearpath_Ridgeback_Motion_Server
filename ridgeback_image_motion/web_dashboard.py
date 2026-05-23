@@ -1516,8 +1516,9 @@ def build_app(node: DashboardNode) -> FastAPI:
 
     @app.post("/api/teleop")
     async def api_teleop(req: TeleopRequest) -> dict[str, Any]:
+        stamp = node.publish_heartbeat()
         node.publish_teleop(req)
-        return {"ok": True}
+        return {"ok": True, "heartbeat": stamp}
 
     @app.post("/api/mission")
     async def api_mission(req: MissionRequest) -> dict[str, Any]:

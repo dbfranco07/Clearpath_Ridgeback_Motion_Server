@@ -21,6 +21,7 @@ import re
 import threading
 import time
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import cv2
 import numpy as np
@@ -64,6 +65,65 @@ def _resolve_vlm_url() -> str:
     return f"{endpoint}:{port}/v1"
 
 
+def _vlm_url_env_present() -> bool:
+    return any(name in os.environ for name in ("VLM_URL", "VLM_ENDPOINT", "VLM_PORT"))
+
+
+def _join_url(base: str, path: str) -> str:
+    if path.startswith(("http://", "https://")):
+        return path.rstrip("/")
+    return f"{base.rstrip('/')}/{path.lstrip('/')}"
+
+
+def _without_trailing_v1(url: str) -> str:
+    parts = urlsplit(url)
+    path = parts.path.rstrip("/")
+    if path != "/v1":
+        return url.rstrip("/")
+    return urlunsplit((parts.scheme, parts.netloc, "", "", "")).rstrip("/")
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _chat_endpoint_candidates(
+    base_url: str,
+    chat_url: str = "",
+    chat_path: str = "",
+) -> list[str]:
+    """Build OpenAI-compatible chat routes to try in order.
+
+    Some local/proxy VLM servers expose /v1/models but mount chat at
+    /chat/completions. Keep the normal /v1/chat/completions path first, then
+    try the root variant when the base URL ends in /v1.
+    """
+    if chat_url:
+        return [chat_url.rstrip("/")]
+
+    base = base_url.rstrip("/")
+    base_path = urlsplit(base).path.rstrip("/")
+    if base_path.endswith("/chat/completions"):
+        return [base]
+
+    if chat_path:
+        return [_join_url(base, chat_path)]
+
+    candidates = [_join_url(base, "/chat/completions")]
+    root_base = _without_trailing_v1(base)
+    if root_base != base:
+        candidates.append(_join_url(root_base, "/chat/completions"))
+    elif not base_path.endswith("/v1"):
+        candidates.append(_join_url(base, "/v1/chat/completions"))
+    return _dedupe(candidates)
+
+
 class VlmClient(Node):
     def __init__(self) -> None:
         super().__init__("vlm_client")
@@ -76,6 +136,8 @@ class VlmClient(Node):
         self.declare_parameter("home_frame", "map")
         self.declare_parameter("base_frame", "")
         self.declare_parameter("vlm_url", _resolve_vlm_url())
+        self.declare_parameter("vlm_chat_url", os.environ.get("VLM_CHAT_URL", ""))
+        self.declare_parameter("vlm_chat_path", os.environ.get("VLM_CHAT_PATH", ""))
         self.declare_parameter(
             "vlm_model",
             os.environ.get("VLM_MODEL")
@@ -111,8 +173,24 @@ class VlmClient(Node):
         self._motion_threshold = float(self.get_parameter("motion_threshold_mps").value)
         self._jpeg_quality = int(self.get_parameter("jpeg_quality").value)
         self._timeout = float(self.get_parameter("request_timeout_s").value)
-        self._vlm_url = str(self.get_parameter("vlm_url").value).rstrip("/")
-        self._vlm_model = str(self.get_parameter("vlm_model").value)
+        param_vlm_url = str(self.get_parameter("vlm_url").value).rstrip("/")
+        self._vlm_url = _resolve_vlm_url() if _vlm_url_env_present() else param_vlm_url
+        chat_url = os.environ.get("VLM_CHAT_URL") or str(
+            self.get_parameter("vlm_chat_url").value
+        ).strip()
+        chat_path = os.environ.get("VLM_CHAT_PATH") or str(
+            self.get_parameter("vlm_chat_path").value
+        ).strip()
+        self._vlm_chat_urls = _chat_endpoint_candidates(
+            self._vlm_url,
+            chat_url,
+            chat_path,
+        )
+        self._vlm_model = (
+            os.environ.get("VLM_MODEL")
+            or os.environ.get("VLM_MODEL_NAME")
+            or str(self.get_parameter("vlm_model").value)
+        )
         self._api_key = os.environ.get(str(self.get_parameter("api_key_env").value), "")
         self._prompt = str(self.get_parameter("prompt").value)
         self._enable_thinking = bool(self.get_parameter("enable_thinking").value)
@@ -148,7 +226,8 @@ class VlmClient(Node):
         self._timer = self.create_timer(0.5, self._tick)
 
         self.get_logger().info(
-            f"vlm_client ready url={self._vlm_url} model={self._vlm_model} period={self._period}s"
+            f"vlm_client ready url={self._vlm_url} chat={self._vlm_chat_urls[0]} "
+            f"model={self._vlm_model} period={self._period}s"
         )
 
     # --- ROS callbacks ------------------------------------------------------
@@ -268,7 +347,6 @@ class VlmClient(Node):
                 self._busy = False
 
     def _call_vlm(self, jpeg_b64: str, room_hint: str, prompt_override: str = "") -> tuple[str, str]:
-        url = f"{self._vlm_url}/chat/completions"
         prompt = prompt_override or self._prompt
         if room_hint and not prompt_override:
             prompt += f"\nThe operator is currently looking for room {room_hint}. Prefer that room if visible."
@@ -297,16 +375,28 @@ class VlmClient(Node):
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
-        try:
-            resp = requests.post(url, headers=headers, json=body, timeout=self._timeout)
-            resp.raise_for_status()
-        except Exception as exc:  # noqa: BLE001
-            return "", f"vlm_request_failed:{exc}"
-        try:
-            data = resp.json()
-            return data["choices"][0]["message"]["content"], ""
-        except Exception as exc:  # noqa: BLE001
-            return "", f"vlm_parse_failed:{exc}"
+        errors: list[str] = []
+        last_status = 0
+        for url in self._vlm_chat_urls:
+            try:
+                resp = requests.post(url, headers=headers, json=body, timeout=self._timeout)
+                last_status = resp.status_code
+                resp.raise_for_status()
+            except requests.HTTPError as exc:
+                status = exc.response.status_code if exc.response is not None else last_status
+                errors.append(f"{url} -> HTTP {status}")
+                if status in (404, 405):
+                    continue
+                return "", f"vlm_request_failed:{exc}"
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{url} -> {exc}")
+                continue
+            try:
+                data = resp.json()
+                return data["choices"][0]["message"]["content"], ""
+            except Exception as exc:  # noqa: BLE001
+                return "", f"vlm_parse_failed:{exc}"
+        return "", "vlm_request_failed:" + "; ".join(errors)
 
     @staticmethod
     def _parse_answer(answer: str) -> dict[str, Any]:

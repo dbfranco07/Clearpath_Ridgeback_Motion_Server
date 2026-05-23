@@ -5,8 +5,8 @@ Per-component toggles override the profile defaults: enable_slam,
 enable_nav2, enable_explorer, enable_vlm, enable_web.
 
 Always-on (every profile): safety_controller, cmd_vel_mux,
-jetson_watchdog. SLAM, Nav2, frontier+mission+memory, VLM, and the web
-dashboard are conditional includes.
+motion_server, jetson_watchdog. SLAM, Nav2, frontier+mission+memory, VLM,
+and the web dashboard are conditional includes.
 """
 
 from __future__ import annotations
@@ -41,15 +41,16 @@ def _detect_realsense_usb_speed() -> str:
         proc = subprocess.run([lsusb, "-t"], capture_output=True, text=True, timeout=2.0)
     except Exception:
         return "2"
-    target_line = ""
-    for line in proc.stdout.splitlines():
-        # The D435 advertises Intel 0x8086:0x0b07 (and similar variants).
-        if "Intel" in line or "8086:0b07" in line:
-            target_line = line
-            break
-    for marker, code in (("10000M", "3"), ("5000M", "3"), ("480M", "2")):
-        if marker in target_line:
-            return code
+    lines = proc.stdout.splitlines()
+    video_lines = [
+        line for line in lines if "uvcvideo" in line or "Class=Video" in line
+    ]
+    scan_lines = video_lines or lines
+    for marker in ("10000M", "5000M"):
+        if any(marker in line for line in scan_lines):
+            return "3"
+    if any("480M" in line for line in scan_lines):
+        return "2"
     return "2"
 
 
@@ -94,6 +95,8 @@ def _resolve_toggle(context, name: str, profile_truth_map: dict[str, bool]) -> s
 def _setup(context, *args, **kwargs):
     pkg = FindPackageShare("ridgeback_image_motion")
     params_file = LaunchConfiguration("params_file").perform(context)
+    slam_params_file = LaunchConfiguration("slam_params_file").perform(context)
+    nav2_params_file = LaunchConfiguration("nav2_params_file").perform(context)
     namespace = LaunchConfiguration("namespace").perform(context)
     web_host = LaunchConfiguration("host").perform(context)
     web_port = LaunchConfiguration("port").perform(context)
@@ -122,7 +125,7 @@ def _setup(context, *args, **kwargs):
             " camera=", enable_camera,
         ]),
 
-        # Always-on: safety / mux / watchdog.
+        # Always-on: safety / mux / motion bridge / watchdog.
         Node(
             package="ridgeback_image_motion",
             executable="safety_controller.py",
@@ -135,6 +138,14 @@ def _setup(context, *args, **kwargs):
             package="ridgeback_image_motion",
             executable="cmd_vel_mux.py",
             name="cmd_vel_mux",
+            output="screen",
+            parameters=common_params,
+            emulate_tty=True,
+        ),
+        Node(
+            package="ridgeback_image_motion",
+            executable="motion_server.py",
+            name="motion_server",
             output="screen",
             parameters=common_params,
             emulate_tty=True,
@@ -185,7 +196,6 @@ def _setup(context, *args, **kwargs):
 
     if enable_slam == "true":
         slam_pkg = FindPackageShare("slam_toolbox").perform(context)
-        slam_params = PathJoinSubstitution([pkg, "config", "slam_params.yaml"]).perform(context)
         actions.append(
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(
@@ -195,7 +205,7 @@ def _setup(context, *args, **kwargs):
                     # nav2/slam launch files build PythonExpression([... use_sim_time])
                     # which evaluates the literal as Python — use capital True/False.
                     "use_sim_time": "False",
-                    "slam_params_file": slam_params,
+                    "slam_params_file": slam_params_file,
                 }.items(),
             )
         )
@@ -210,16 +220,18 @@ def _setup(context, *args, **kwargs):
             nav2_pkg = ""
         if nav2_pkg:
             nav2_launch = f"{nav2_pkg}/launch/navigation_launch.py"
-            nav2_params = PathJoinSubstitution([pkg, "config", "nav2_params.yaml"]).perform(context)
             actions.append(
                 LogInfo(msg=[f"[autonomy] including {nav2_launch}"])
+            )
+            actions.append(
+                LogInfo(msg=[f"[autonomy] Nav2 params: {nav2_params_file}"])
             )
             actions.append(
                 IncludeLaunchDescription(
                     PythonLaunchDescriptionSource(nav2_launch),
                     launch_arguments={
                         "use_sim_time": "False",
-                        "params_file": nav2_params,
+                        "params_file": nav2_params_file,
                         "autostart": "True",
                         # Composition silently fails on this Jetson (container
                         # never loads, all nav2 nodes missing). Separate
@@ -307,6 +319,8 @@ def _setup(context, *args, **kwargs):
 def generate_launch_description() -> LaunchDescription:
     pkg = FindPackageShare("ridgeback_image_motion")
     default_params = PathJoinSubstitution([pkg, "config", "autonomy_params.yaml"])
+    default_slam_params = PathJoinSubstitution([pkg, "config", "slam_params.yaml"])
+    default_nav2_params = PathJoinSubstitution([pkg, "config", "nav2_params.yaml"])
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -315,6 +329,8 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument("namespace", default_value="r100_0140"),
         DeclareLaunchArgument("params_file", default_value=default_params),
+        DeclareLaunchArgument("slam_params_file", default_value=default_slam_params),
+        DeclareLaunchArgument("nav2_params_file", default_value=default_nav2_params),
         DeclareLaunchArgument("host", default_value="0.0.0.0"),
         DeclareLaunchArgument("port", default_value="8081"),
         DeclareLaunchArgument("enable_slam", default_value="auto"),

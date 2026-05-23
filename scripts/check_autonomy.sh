@@ -11,6 +11,8 @@ JETSON_SETUP="${CHECK_JETSON_SETUP:-~/ridgeback/install/setup.bash}"
 RIDGEBACK_SETUP="${CHECK_RIDGEBACK_SETUP:-~/ridgeback99/install/setup.bash}"
 ROBOT_NS="${CHECK_ROBOT_NS:-r100_0140}"
 VLM_URL="${CHECK_VLM_URL:-http://202.92.159.240:8000/v1}"
+VLM_CHAT_URL="${CHECK_VLM_CHAT_URL:-}"
+VLM_CHAT_PATH="${CHECK_VLM_CHAT_PATH:-}"
 
 SSH_OPTS=(
     -o BatchMode=yes
@@ -90,7 +92,25 @@ check_topic "/operator/heartbeat"
 check_topic "/vlm/observation"
 
 vlm_models_code="\$(curl -o /dev/null -sS -w '%{http_code}' '$VLM_URL/models' || true)"
-vlm_chat_code="\$(curl -o /dev/null -sS -w '%{http_code}' -X POST '$VLM_URL/chat/completions' -H 'Content-Type: application/json' -d '{}' || true)"
+vlm_chat_code="000"
+if [[ -n '$VLM_CHAT_URL' ]]; then
+    vlm_chat_code="\$(curl -o /dev/null -sS -w '%{http_code}' -X POST '$VLM_CHAT_URL' -H 'Content-Type: application/json' -d '{}' || true)"
+else
+    for path in '${VLM_CHAT_PATH:-/chat/completions}' '/chat/completions'; do
+        chat_url="${VLM_URL%/}/\${path#/}"
+        vlm_chat_code="\$(curl -o /dev/null -sS -w '%{http_code}' -X POST "\$chat_url" -H 'Content-Type: application/json' -d '{}' || true)"
+        if [[ "\$vlm_chat_code" != "404" && "\$vlm_chat_code" != "000" ]]; then
+            break
+        fi
+        if [[ '$VLM_URL' == */v1 ]]; then
+            chat_url="${VLM_URL%/v1}/\${path#/}"
+            vlm_chat_code="\$(curl -o /dev/null -sS -w '%{http_code}' -X POST "\$chat_url" -H 'Content-Type: application/json' -d '{}' || true)"
+            if [[ "\$vlm_chat_code" != "404" && "\$vlm_chat_code" != "000" ]]; then
+                break
+            fi
+        fi
+    done
+fi
 echo "VLM /models HTTP \${vlm_models_code}"
 echo "VLM /chat/completions HTTP \${vlm_chat_code}"
 if [[ "\$vlm_chat_code" == "404" ]]; then

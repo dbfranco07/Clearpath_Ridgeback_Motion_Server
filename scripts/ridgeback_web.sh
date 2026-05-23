@@ -439,6 +439,7 @@ if [[ "${RIDGEBACK_SKIP_STALE_CLEANUP:-0}" != "1" ]]; then
         "ridgeback_image_motion/.*/web_dashboard.py" \
         "ridgeback_image_motion/.*/mission_orchestrator.py" \
         "ridgeback_image_motion/.*/frontier_explorer.py" \
+        "ridgeback_image_motion/.*/motion_server.py" \
         "ridgeback_image_motion/.*/cmd_vel_mux.py" \
         "ridgeback_image_motion/.*/safety_controller.py" \
         "ridgeback_image_motion/.*/jetson_watchdog.py" \
@@ -524,10 +525,8 @@ postflight_jetson() {
         esac
     }
 
-    # Fallback: with use_composition=False, FastDDS service discovery is racy
-    # and lifecycle_manager often gives up before planner_server's services
-    # are reachable. Drive every Nav2 node through configure→activate by hand.
-    # Idempotent; nodes already active just return success.
+    # Debug fallback only. Manual lifecycle pokes can race with Nav2's own
+    # lifecycle_manager, so this is disabled unless explicitly requested.
     nav2_activate() {
         for n in controller_server planner_server smoother_server behavior_server \
                  bt_navigator waypoint_follower velocity_smoother; do
@@ -539,8 +538,10 @@ postflight_jetson() {
     # --- Always-required core ---
     require_node /safety_controller "core"
     require_node /cmd_vel_mux "core"
+    require_node /motion_server "core"
     require_node /jetson_watchdog "core"
     require_topic_pub "/safety/latched" "safety"
+    require_topic_pub "/r100_0140/platform/cmd_vel_unstamped" "drive bridge"
     # Camera comes from the Ridgeback in this build; the topic check is informational.
     require_topic_pub "/r100_0140/sensors/camera_0/color/image_raw" "camera"
 
@@ -644,19 +645,42 @@ postflight_jetson() {
 
     # --- VLM endpoint (best-effort warning, not fatal) ---
     if component_enabled "$RIDGEBACK_ENABLE_VLM" "true" "false"; then
-        local vlm_url status_code base
+        local vlm_models_url vlm_chat_status status_code base path chat_url
         if [[ -n "${VLM_URL:-}" ]]; then
             base="${VLM_URL%/}"
         else
             base="${VLM_ENDPOINT:-http://202.92.159.240}"
             base="${base%/}:${VLM_PORT:-8000}/v1"
         fi
-        vlm_url="$base/models"
-        status_code="$(timeout 3 curl -s -o /dev/null -w '%{http_code}' "$vlm_url" 2>/dev/null || echo 000)"
-        if [[ "$status_code" == "200" ]]; then
-            echo "  OK   VLM endpoint reachable: $vlm_url"
+        vlm_models_url="$base/models"
+        vlm_chat_status=""
+        if [[ -n "${VLM_CHAT_URL:-}" ]]; then
+            chat_url="${VLM_CHAT_URL%/}"
+            vlm_chat_status="$(timeout 3 curl -s -o /dev/null -w '%{http_code}' \
+                -X POST "$chat_url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000)"
         else
-            echo "  WARN VLM endpoint $vlm_url returned HTTP $status_code (vlm_client will log errors)"
+            for path in "${VLM_CHAT_PATH:-/chat/completions}" "/chat/completions"; do
+                chat_url="${base%/}/${path#/}"
+                vlm_chat_status="$(timeout 3 curl -s -o /dev/null -w '%{http_code}' \
+                    -X POST "$chat_url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000)"
+                if [[ "$vlm_chat_status" != "404" && "$vlm_chat_status" != "000" ]]; then
+                    break
+                fi
+                if [[ "$base" == */v1 ]]; then
+                    chat_url="${base%/v1}/${path#/}"
+                    vlm_chat_status="$(timeout 3 curl -s -o /dev/null -w '%{http_code}' \
+                        -X POST "$chat_url" -H 'Content-Type: application/json' -d '{}' 2>/dev/null || echo 000)"
+                    if [[ "$vlm_chat_status" != "404" && "$vlm_chat_status" != "000" ]]; then
+                        break
+                    fi
+                fi
+            done
+        fi
+        status_code="$(timeout 3 curl -s -o /dev/null -w '%{http_code}' "$vlm_models_url" 2>/dev/null || echo 000)"
+        if [[ "$status_code" == "200" && "$vlm_chat_status" != "404" && "$vlm_chat_status" != "000" ]]; then
+            echo "  OK   VLM endpoint reachable: $vlm_models_url; chat route HTTP $vlm_chat_status"
+        else
+            echo "  WARN VLM endpoint $vlm_models_url returned HTTP $status_code; chat route HTTP ${vlm_chat_status:-000} (vlm_client will try fallback routes)"
             warns=$((warns + 1))
         fi
     fi
@@ -671,11 +695,12 @@ postflight_jetson() {
     else
         echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above." >&2
         echo "  Most common fixes:" >&2
-        echo "    - Nav2 lifecycle still 'unconfigured' → autostart failed; inspect the logs first, then activate manually if needed:" >&2
+        echo "    - Drive bridge missing -> confirm /motion_server is running and publishes /r100_0140/platform/cmd_vel_unstamped." >&2
+        echo "    - Nav2 lifecycle still 'unconfigured' -> autostart failed; inspect the logs first, then activate manually if needed:" >&2
         echo "        for n in controller_server planner_server smoother_server behavior_server bt_navigator waypoint_follower velocity_smoother; do" >&2
         echo "          ros2 lifecycle set /\$n configure; ros2 lifecycle set /\$n activate; done" >&2
-        echo "    - A Nav2 node missing entirely → check launch log for [\$nodename] errors and rerun goridge." >&2
-        echo "    - SLAM /map missing → confirm Ridgeback ridgeback_start.sh is running and LiDAR is publishing." >&2
+        echo "    - A Nav2 node missing entirely -> check launch log for [\$nodename] errors and rerun goridge." >&2
+        echo "    - SLAM /map missing -> confirm Ridgeback ridgeback_start.sh is running and LiDAR is publishing." >&2
     fi
     echo "=========================================="
 }
@@ -704,6 +729,9 @@ POSTFLIGHT_PID=$!
 ros2 launch ridgeback_image_motion autonomy.launch.py \
     host:=0.0.0.0 \
     port:=8081 \
+    params_file:="$RIDGEBACK_WORKSPACE/config/autonomy_params.yaml" \
+    slam_params_file:="$RIDGEBACK_WORKSPACE/config/slam_params.yaml" \
+    nav2_params_file:="$RIDGEBACK_WORKSPACE/config/nav2_params.yaml" \
     profile:="$RIDGEBACK_PROFILE" \
     enable_slam:="$RIDGEBACK_ENABLE_SLAM" \
     enable_nav2:="$RIDGEBACK_ENABLE_NAV2" \
