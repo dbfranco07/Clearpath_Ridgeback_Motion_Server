@@ -94,20 +94,20 @@ controller_server:
     FollowPath:
       plugin: dwb_core::DWBLocalPlanner
       debug_trajectory_details: false
-      min_vel_x: -0.4
-      min_vel_y: -0.4
-      max_vel_x: 0.4
-      max_vel_y: 0.4
-      max_vel_theta: 1.0
+      min_vel_x: -0.15
+      min_vel_y: -0.15
+      max_vel_x: 0.15
+      max_vel_y: 0.15
+      max_vel_theta: 0.4
       min_speed_xy: 0.0
-      max_speed_xy: 0.5
+      max_speed_xy: 0.2
       min_speed_theta: 0.0
-      acc_lim_x: 1.0
-      acc_lim_y: 1.0
-      acc_lim_theta: 2.0
-      decel_lim_x: -1.0
-      decel_lim_y: -1.0
-      decel_lim_theta: -2.0
+      acc_lim_x: 0.4
+      acc_lim_y: 0.4
+      acc_lim_theta: 0.8
+      decel_lim_x: -0.4
+      decel_lim_y: -0.4
+      decel_lim_theta: -0.8
       vx_samples: 14
       vy_samples: 14
       vtheta_samples: 16
@@ -244,9 +244,9 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 1.0
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    max_rotational_vel: 0.4
+    min_rotational_vel: 0.15
+    rotational_acc_lim: 1.2
 
 waypoint_follower:
   ros__parameters:
@@ -265,10 +265,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: OPEN_LOOP
-    max_velocity: [0.4, 0.4, 1.0]
-    min_velocity: [-0.4, -0.4, -1.0]
-    max_accel: [1.0, 1.0, 2.0]
-    max_decel: [-1.0, -1.0, -2.0]
+    max_velocity: [0.15, 0.15, 0.4]
+    min_velocity: [-0.15, -0.15, -0.4]
+    max_accel: [0.4, 0.4, 0.8]
+    max_decel: [-0.4, -0.4, -0.8]
     odom_topic: /r100_0140/platform/odom/filtered
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
