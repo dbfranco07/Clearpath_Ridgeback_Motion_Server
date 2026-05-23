@@ -141,6 +141,7 @@ check_topic() {
 
 echo "ROS_DOMAIN_ID=\${ROS_DOMAIN_ID}"
 check_topic "/$ROBOT_NS/platform/cmd_vel_unstamped"
+check_topic "/$ROBOT_NS/cmd_vel"
 check_topic "/$ROBOT_NS/platform/odom/filtered"
 check_topic "/$ROBOT_NS/sensors/lidar2d_0/scan"
 EOF

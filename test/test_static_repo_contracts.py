@@ -71,6 +71,7 @@ def test_check_autonomy_script_covers_the_runtime_chain() -> None:
         "curl -o /dev/null -sS -w '%{http_code}'",
         "/cmd_vel/teleop",
         "/cmd_vel/mux_out",
+        "/$ROBOT_NS/cmd_vel",
         "platform/cmd_vel_unstamped",
         "platform/odom/filtered",
         "sensors/lidar2d_0/scan",

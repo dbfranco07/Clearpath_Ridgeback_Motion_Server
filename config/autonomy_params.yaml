@@ -2,13 +2,15 @@
 # All node names are unnamespaced — these are the names declared in each node's
 # super().__init__() call. Topic names default to /r100_0140/... where applicable.
 
-# Ridgeback-side only. scripts/ridgeback_start.sh runs this bridge; the Jetson
-# stack publishes /cmd_vel/mux_out and must not launch a second motion_server.
+# Ridgeback-side only. scripts/ridgeback_start.sh runs this bridge. Jetson
+# publishes /cmd_vel/mux_out; motion_server injects it into Clearpath's native
+# /<namespace>/cmd_vel input, and /<namespace>/twist_mux remains the only
+# publisher on /<namespace>/platform/cmd_vel_unstamped.
 motion_server:
   ros__parameters:
     namespace: r100_0140
     input_topic: /cmd_vel/mux_out
-    output_topic: ""        # auto: /<namespace>/platform/cmd_vel_unstamped
+    output_topic: ""        # auto: /<namespace>/cmd_vel (twist_mux input)
     max_linear: 0.6
     max_lateral: 0.6
     max_angular: 1.5

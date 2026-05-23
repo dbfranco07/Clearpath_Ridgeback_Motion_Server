@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ridgeback motion server.
 
-Bridges the Jetson cmd_vel_mux output onto the Clearpath platform input,
+Bridges the Jetson cmd_vel_mux output onto the Clearpath twist_mux input,
 clamps to safety limits, applies a watchdog (zeros if no fresh command),
 and exposes a Motion service for one-shot velocity requests (used by the
 dashboard teleop fallback and CLI testing).
@@ -35,7 +35,7 @@ class MotionServer(Node):
         ns = self.get_parameter("namespace").value
         out_topic = (
             self.get_parameter("output_topic").value
-            or f"/{ns}/platform/cmd_vel_unstamped"
+            or f"/{ns}/cmd_vel"
         )
         self._max = (
             float(self.get_parameter("max_linear").value),
