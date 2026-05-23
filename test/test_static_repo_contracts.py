@@ -62,3 +62,18 @@ def test_scripts_document_jetson_and_ridgeback_split() -> None:
     assert "Starting motion server" in start
     # RealSense now lives on the Jetson; the Ridgeback no longer publishes images.
     assert "Starting image publisher" not in start
+
+
+def test_check_autonomy_script_covers_the_runtime_chain() -> None:
+    script = read_repo_file("scripts", "check_autonomy.sh")
+    for token in (
+        "ssh",
+        "curl -o /dev/null -sS -w '%{http_code}'",
+        "/cmd_vel/teleop",
+        "/cmd_vel/mux_out",
+        "platform/cmd_vel_unstamped",
+        "platform/odom/filtered",
+        "sensors/lidar2d_0/scan",
+        "VLM /chat/completions HTTP",
+    ):
+        assert token in script

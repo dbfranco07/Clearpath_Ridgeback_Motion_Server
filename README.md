@@ -196,6 +196,12 @@ ip route get 192.168.131.1
 ping -c 3 192.168.131.1
 ```
 
+For a quick end-to-end runtime check, run:
+
+```bash
+bash ~/ridgeback/scripts/check_autonomy.sh
+```
+
 ---
 
 ### 🌐 Step 3: Open the Dashboard
