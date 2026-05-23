@@ -69,6 +69,13 @@ def _vlm_url_env_present() -> bool:
     return any(name in os.environ for name in ("VLM_URL", "VLM_ENDPOINT", "VLM_PORT"))
 
 
+def _env_bool(name: str) -> bool | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _join_url(base: str, path: str) -> str:
     if path.startswith(("http://", "https://")):
         return path.rstrip("/")
@@ -193,7 +200,10 @@ class VlmClient(Node):
         )
         self._api_key = os.environ.get(str(self.get_parameter("api_key_env").value), "")
         self._prompt = str(self.get_parameter("prompt").value)
-        self._enable_thinking = bool(self.get_parameter("enable_thinking").value)
+        env_think = _env_bool("VLM_THINK")
+        self._enable_thinking = (
+            env_think if env_think is not None else bool(self.get_parameter("enable_thinking").value)
+        )
 
         self._bridge = CvBridge()
         self._lock = threading.Lock()

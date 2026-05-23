@@ -1,7 +1,9 @@
-# Per-node parameters for the Jetson autonomy stack.
+# Per-node parameters for the Ridgeback + Jetson autonomy stack.
 # All node names are unnamespaced — these are the names declared in each node's
 # super().__init__() call. Topic names default to /r100_0140/... where applicable.
 
+# Ridgeback-side only. scripts/ridgeback_start.sh runs this bridge; the Jetson
+# stack publishes /cmd_vel/mux_out and must not launch a second motion_server.
 motion_server:
   ros__parameters:
     namespace: r100_0140
@@ -104,8 +106,13 @@ vlm_client:
     observation_topic: /vlm/observation
     home_frame: map
     base_frame: ""          # auto: <namespace>/base_link
+    # Deployment .env wins over these defaults:
+    #   VLM_ENDPOINT=http://202.92.159.240
+    #   VLM_PORT=8000
+    #   VLM_MODEL_NAME=Qwen/Qwen3.6-27B
+    #   VLM_THINK=false
     vlm_url: http://202.92.159.240:8000/v1
-    vlm_model: qwen2-vl
+    vlm_model: Qwen/Qwen3.6-27B
     api_key_env: VLM_API_KEY
     period_s: 3.0
     motion_threshold_mps: 0.05

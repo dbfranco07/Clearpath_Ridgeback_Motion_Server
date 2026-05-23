@@ -5,8 +5,10 @@ Per-component toggles override the profile defaults: enable_slam,
 enable_nav2, enable_explorer, enable_vlm, enable_web.
 
 Always-on (every profile): safety_controller, cmd_vel_mux,
-motion_server, jetson_watchdog. SLAM, Nav2, frontier+mission+memory, VLM,
-and the web dashboard are conditional includes.
+jetson_watchdog. SLAM, Nav2, frontier+mission+memory, VLM, and the web
+dashboard are conditional includes. The Ridgeback-side ridgeback_start.sh
+runs motion_server.py to bridge /cmd_vel/mux_out onto the platform drive
+topic.
 """
 
 from __future__ import annotations
@@ -125,7 +127,8 @@ def _setup(context, *args, **kwargs):
             " camera=", enable_camera,
         ]),
 
-        # Always-on: safety / mux / motion bridge / watchdog.
+        # Always-on: safety / mux / watchdog. The Ridgeback-side script owns
+        # motion_server.py so there is exactly one platform command publisher.
         Node(
             package="ridgeback_image_motion",
             executable="safety_controller.py",
@@ -138,14 +141,6 @@ def _setup(context, *args, **kwargs):
             package="ridgeback_image_motion",
             executable="cmd_vel_mux.py",
             name="cmd_vel_mux",
-            output="screen",
-            parameters=common_params,
-            emulate_tty=True,
-        ),
-        Node(
-            package="ridgeback_image_motion",
-            executable="motion_server.py",
-            name="motion_server",
             output="screen",
             parameters=common_params,
             emulate_tty=True,

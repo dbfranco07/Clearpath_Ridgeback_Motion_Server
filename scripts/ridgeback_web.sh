@@ -439,7 +439,6 @@ if [[ "${RIDGEBACK_SKIP_STALE_CLEANUP:-0}" != "1" ]]; then
         "ridgeback_image_motion/.*/web_dashboard.py" \
         "ridgeback_image_motion/.*/mission_orchestrator.py" \
         "ridgeback_image_motion/.*/frontier_explorer.py" \
-        "ridgeback_image_motion/.*/motion_server.py" \
         "ridgeback_image_motion/.*/cmd_vel_mux.py" \
         "ridgeback_image_motion/.*/safety_controller.py" \
         "ridgeback_image_motion/.*/jetson_watchdog.py" \
@@ -538,9 +537,11 @@ postflight_jetson() {
     # --- Always-required core ---
     require_node /safety_controller "core"
     require_node /cmd_vel_mux "core"
-    require_node /motion_server "core"
     require_node /jetson_watchdog "core"
     require_topic_pub "/safety/latched" "safety"
+    # motion_server runs on the Ridgeback side and bridges this topic to the
+    # platform controller. Checking the publisher validates the command path
+    # without launching a duplicate motion_server on the Jetson.
     require_topic_pub "/r100_0140/platform/cmd_vel_unstamped" "drive bridge"
     # Camera comes from the Ridgeback in this build; the topic check is informational.
     require_topic_pub "/r100_0140/sensors/camera_0/color/image_raw" "camera"
@@ -695,7 +696,7 @@ postflight_jetson() {
     else
         echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above." >&2
         echo "  Most common fixes:" >&2
-        echo "    - Drive bridge missing -> confirm /motion_server is running and publishes /r100_0140/platform/cmd_vel_unstamped." >&2
+        echo "    - Drive bridge missing -> run ridgeback_start.sh on the Ridgeback and confirm /r100_0140/platform/cmd_vel_unstamped has a publisher." >&2
         echo "    - Nav2 lifecycle still 'unconfigured' -> autostart failed; inspect the logs first, then activate manually if needed:" >&2
         echo "        for n in controller_server planner_server smoother_server behavior_server bt_navigator waypoint_follower velocity_smoother; do" >&2
         echo "          ros2 lifecycle set /\$n configure; ros2 lifecycle set /\$n activate; done" >&2
