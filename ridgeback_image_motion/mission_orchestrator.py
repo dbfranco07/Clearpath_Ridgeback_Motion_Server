@@ -193,7 +193,16 @@ class MissionOrchestrator(Node):
                 return
             self._begin_find_room(room)
             return
-        # Unknown / ROOM_QUERY / QUERY — no motion.
+        if intent == "QUERY":
+            # Free-form "what do you see"-style question. Forward the operator's
+            # text to vlm_client as a one-shot Q&A trigger; the answer comes back
+            # on /vlm/observation with kind="answer" and surfaces in the chat.
+            trigger = String()
+            trigger.data = json_dumps({"prompt": command, "intent": "QUERY"})
+            self._pub_vlm_trigger.publish(trigger)
+            self._publish_state("idle", note="query_to_vlm")
+            return
+        # Unknown / ROOM_QUERY — no motion.
         self._publish_state("idle", note=f"unhandled_intent:{intent}")
 
     def _on_observation(self, msg: String) -> None:

@@ -10,7 +10,7 @@ motion_server:
     max_linear: 0.6
     max_lateral: 0.6
     max_angular: 1.5
-    watchdog_timeout_s: 0.3
+    watchdog_timeout_s: 0.7
     publish_rate_hz: 50.0
 
 safety_controller:
@@ -135,6 +135,7 @@ ridgeback_dashboard:
     mission_goal_topic: /mission/goal
     frontier_status_topic: /frontier/status
     vlm_observation_topic: /vlm/observation
+    vlm_trigger_topic: /vlm/trigger
     teleop_max_linear: 0.5
     teleop_max_lateral: 0.5
     teleop_max_angular: 1.5

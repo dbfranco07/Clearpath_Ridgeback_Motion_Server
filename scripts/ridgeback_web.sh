@@ -508,16 +508,31 @@ postflight_jetson() {
         case "$state" in
             "active "*)
                 echo "  OK   $node lifecycle=active"
+                return 0
                 ;;
             "")
                 echo "  FAIL $node lifecycle UNREACHABLE (node missing or unmanaged)" >&2
                 errs=$((errs + 1))
+                return 1
                 ;;
             *)
                 echo "  FAIL $node lifecycle=${state} (expected active)" >&2
                 errs=$((errs + 1))
+                return 1
                 ;;
         esac
+    }
+
+    # Fallback: with use_composition=False, FastDDS service discovery is racy
+    # and lifecycle_manager often gives up before planner_server's services
+    # are reachable. Drive every Nav2 node through configure→activate by hand.
+    # Idempotent; nodes already active just return success.
+    nav2_activate() {
+        for n in controller_server planner_server smoother_server behavior_server \
+                 bt_navigator waypoint_follower velocity_smoother; do
+            timeout 4 ros2 lifecycle set "/$n" configure >/dev/null 2>&1 || true
+            timeout 4 ros2 lifecycle set "/$n" activate  >/dev/null 2>&1 || true
+        done
     }
 
     # --- Always-required core ---
@@ -579,11 +594,35 @@ postflight_jetson() {
             /velocity_smoother
             /waypoint_follower
         )
+        local lifecycle_errs_before=$errs
         for node in "${nav2_lifecycle[@]}"; do
             if echo "$nodes" | grep -qx "$node"; then
-                require_lifecycle_active "$node"
+                require_lifecycle_active "$node" || true
             fi
         done
+
+        # If any lifecycle check failed but every node is present, kick the
+        # configure→activate transitions by hand and re-check once. This
+        # rescues sessions where lifecycle_manager_navigation gave up on
+        # planner_server/get_state before the service was reachable.
+        if (( errs > lifecycle_errs_before )); then
+            local all_present=true
+            for node in "${nav2_lifecycle[@]}"; do
+                if ! echo "$nodes" | grep -qx "$node"; then
+                    all_present=false
+                    break
+                fi
+            done
+            if $all_present; then
+                echo "  ..   nav2 lifecycle not active; running manual configure/activate fallback"
+                nav2_activate
+                sleep 4
+                errs=$lifecycle_errs_before
+                for node in "${nav2_lifecycle[@]}"; do
+                    require_lifecycle_active "$node" || true
+                done
+            fi
+        fi
 
         # The /navigate_to_pose action MUST have at least 1 server, otherwise frontier_explorer
         # cannot send goals (last_error: nav2_unavailable).

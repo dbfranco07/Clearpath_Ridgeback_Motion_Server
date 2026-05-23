@@ -168,10 +168,25 @@ class VlmClient(Node):
             self._speed = speed
 
     def _on_trigger(self, msg: String) -> None:
-        room_hint = (msg.data or "").strip().upper()
+        # Two payload shapes:
+        #   1. Bare room hint, e.g. "222"  → existing behavior (room OCR with hint).
+        #   2. JSON {"prompt": "...", "intent": "QUERY"} → free-form Q&A; the
+        #      operator's question replaces the default room-OCR prompt and the
+        #      observation is tagged with kind="answer" so the dashboard renders
+        #      the VLM's reply in the chat instead of treating it as a detection.
+        raw = (msg.data or "").strip()
+        payload = json_loads(raw, default={}) if raw.startswith("{") else {}
+        prompt_override = str(payload.get("prompt") or "").strip()
+        intent = str(payload.get("intent") or "").strip().upper()
+        if prompt_override:
+            room_hint = ""
+            kind = "answer"
+        else:
+            room_hint = raw.upper()
+            kind = "trigger"
         threading.Thread(
             target=self._snapshot_and_query,
-            args=(room_hint, "trigger"),
+            args=(room_hint, kind, prompt_override, intent),
             daemon=True,
         ).start()
 
@@ -187,12 +202,18 @@ class VlmClient(Node):
         self._last_periodic = now
         threading.Thread(
             target=self._snapshot_and_query,
-            args=("", "periodic"),
+            args=("", "periodic", "", ""),
             daemon=True,
         ).start()
 
     # --- VLM call -----------------------------------------------------------
-    def _snapshot_and_query(self, room_hint: str, kind: str) -> None:
+    def _snapshot_and_query(
+        self,
+        room_hint: str,
+        kind: str,
+        prompt_override: str = "",
+        intent: str = "",
+    ) -> None:
         with self._lock:
             if self._busy:
                 return
@@ -202,6 +223,10 @@ class VlmClient(Node):
         if img is None:
             with self._lock:
                 self._busy = False
+            self.get_logger().warn(
+                f"vlm[{kind}] skipped: no camera frame yet (subscribed {self._color_topic})",
+                throttle_duration_sec=5.0,
+            )
             return
         try:
             ok, jpeg = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), self._jpeg_quality])
@@ -209,12 +234,13 @@ class VlmClient(Node):
                 return
             b64 = base64.b64encode(jpeg.tobytes()).decode("ascii")
             t0 = time.time()
-            answer, error = self._call_vlm(b64, room_hint)
+            answer, error = self._call_vlm(b64, room_hint, prompt_override)
             latency_ms = (time.time() - t0) * 1000.0
-            parsed = self._parse_answer(answer)
+            parsed = self._parse_answer(answer) if not prompt_override else {}
             pose = self._lookup_pose()
             obs = {
                 "kind": kind,
+                "intent": intent,
                 "room_hint": room_hint,
                 "room": parsed.get("room", ""),
                 "confidence": float(parsed.get("confidence") or 0.0),
@@ -234,14 +260,17 @@ class VlmClient(Node):
                 self.get_logger().info(
                     f"vlm[{kind}] -> room={obs['room']} conf={obs['confidence']:.2f} ({latency_ms:.0f} ms)"
                 )
+            elif kind == "answer":
+                snippet = (answer or error or "").strip().replace("\n", " ")[:80]
+                self.get_logger().info(f"vlm[answer] -> {snippet} ({latency_ms:.0f} ms)")
         finally:
             with self._lock:
                 self._busy = False
 
-    def _call_vlm(self, jpeg_b64: str, room_hint: str) -> tuple[str, str]:
+    def _call_vlm(self, jpeg_b64: str, room_hint: str, prompt_override: str = "") -> tuple[str, str]:
         url = f"{self._vlm_url}/chat/completions"
-        prompt = self._prompt
-        if room_hint:
+        prompt = prompt_override or self._prompt
+        if room_hint and not prompt_override:
             prompt += f"\nThe operator is currently looking for room {room_hint}. Prefer that room if visible."
         body = {
             "model": self._vlm_model,

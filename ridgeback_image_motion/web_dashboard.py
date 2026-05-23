@@ -979,6 +979,10 @@ class SafetyOverrideRequest(BaseModel):
     enabled: bool
 
 
+class VlmTriggerRequest(BaseModel):
+    prompt: str = "What do you see?"
+
+
 # ---------------------------------------------------------------------------
 # ROS bridge
 # ---------------------------------------------------------------------------
@@ -1020,6 +1024,7 @@ class DashboardNode(Node):
         self.declare_parameter("mission_goal_topic", "/mission/goal")
         self.declare_parameter("frontier_status_topic", "/frontier/status")
         self.declare_parameter("vlm_observation_topic", "/vlm/observation")
+        self.declare_parameter("vlm_trigger_topic", "/vlm/trigger")
         self.declare_parameter("teleop_max_linear", 0.5)
         self.declare_parameter("teleop_max_lateral", 0.5)
         self.declare_parameter("teleop_max_angular", 1.5)
@@ -1043,6 +1048,7 @@ class DashboardNode(Node):
             "mission_goal": self.get_parameter("mission_goal_topic").value,
             "frontier_status": self.get_parameter("frontier_status_topic").value,
             "vlm_observation": self.get_parameter("vlm_observation_topic").value,
+            "vlm_trigger": self.get_parameter("vlm_trigger_topic").value,
         }
         self._teleop_max = (
             float(self.get_parameter("teleop_max_linear").value),
@@ -1107,6 +1113,7 @@ class DashboardNode(Node):
         self._pub_safety_override = self.create_publisher(
             Bool, self._params["safety_override"], _LATCHED_QOS
         )
+        self._pub_vlm_trigger = self.create_publisher(String, self._params["vlm_trigger"], 10)
 
         # Service client (safety reset; created lazily on first call)
         self._safety_reset_client = self.create_client(Trigger, self._params["safety_reset"])
@@ -1150,10 +1157,15 @@ class DashboardNode(Node):
     def _on_color(self, msg: Image) -> None:
         try:
             cv = self._bridge.imgmsg_to_cv2(msg, "bgr8")
-        except Exception:
+        except Exception as exc:
+            self.get_logger().warn(
+                f"_on_color cv_bridge convert failed (encoding={msg.encoding}): {exc}",
+                throttle_duration_sec=5.0,
+            )
             return
         ok, buf = cv2.imencode(".jpg", cv, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
         if not ok:
+            self.get_logger().warn("_on_color JPEG encode failed", throttle_duration_sec=5.0)
             return
         with self._lock:
             self._color_jpeg = bytes(buf)
@@ -1231,6 +1243,11 @@ class DashboardNode(Node):
             self._vlm_events.append(item)
             if len(self._vlm_events) > 60:
                 self._vlm_events = self._vlm_events[-60:]
+            # Q&A replies surface in the chat panel too, not just the VLM log.
+            if item["kind"] == "answer" and item["answer"]:
+                self._chat_history.append({"role": "assistant", "message": item["answer"]})
+                if len(self._chat_history) > 40:
+                    self._chat_history = self._chat_history[-40:]
 
     # --- publish helpers ----------------------------------------------------
     def publish_heartbeat(self) -> float:
@@ -1264,9 +1281,22 @@ class DashboardNode(Node):
         with self._lock:
             self._chat_history.append({"role": "user", "message": command})
             ack = f"intent={intent}" + (f" room={room}" if room else "")
+            ack += f' (parsed from "{command}")'
+            if intent == "QUERY":
+                ack += " — asking VLM…"
             self._chat_history.append({"role": "assistant", "message": ack})
             if len(self._chat_history) > 40:
                 self._chat_history = self._chat_history[-40:]
+
+    def publish_vlm_trigger(self, prompt: str) -> None:
+        """Force a one-shot VLM Q&A call with the given prompt.
+
+        Independent of mission_orchestrator's QUERY branch: lets the operator
+        ask the VLM something even when no chat command has been issued.
+        """
+        msg = String()
+        msg.data = json_dumps({"prompt": prompt, "intent": "QUERY"})
+        self._pub_vlm_trigger.publish(msg)
 
     def publish_safety_override(self, enabled: bool) -> None:
         with self._lock:
@@ -1495,6 +1525,11 @@ def build_app(node: DashboardNode) -> FastAPI:
     async def api_safety_override(req: SafetyOverrideRequest) -> dict[str, Any]:
         node.publish_safety_override(req.enabled)
         return {"ok": True, "enabled": req.enabled}
+
+    @app.post("/api/vlm/trigger")
+    async def api_vlm_trigger(req: VlmTriggerRequest) -> dict[str, Any]:
+        node.publish_vlm_trigger(req.prompt)
+        return {"ok": True, "prompt": req.prompt}
 
     return app
 
