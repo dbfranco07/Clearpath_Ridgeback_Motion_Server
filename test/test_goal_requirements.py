@@ -23,7 +23,8 @@ def test_requirement_2_jetson_launch_owns_slam_nav2_exploration_and_mission() ->
     launch = read_repo_file("ridgeback_image_motion", "launch", "autonomy.launch.py")
     for token in (
         "async_slam_toolbox_node",
-        "navigation_launch.py",
+        "nav2_controller",
+        "lifecycle_manager_navigation",
         "mission_orchestrator.py",
         "frontier_explorer.py",
         "room_detector.py",

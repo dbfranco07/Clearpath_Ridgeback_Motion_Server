@@ -7,8 +7,8 @@ enable_nav2, enable_explorer, enable_vlm, enable_web.
 Always-on (every profile): safety_controller, cmd_vel_mux,
 jetson_watchdog. SLAM, Nav2, frontier+mission+memory, VLM, and the web
 dashboard are conditional includes. The Ridgeback-side ridgeback_start.sh
-runs motion_server.py to bridge /cmd_vel/mux_out onto the platform drive
-topic.
+runs motion_server.py to bridge /cmd_vel/mux_out into Clearpath's native
+twist_mux input.
 """
 
 from __future__ import annotations
@@ -92,6 +92,27 @@ def _resolve_toggle(context, name: str, profile_truth_map: dict[str, bool]) -> s
         return explicit
     # auto -> derive from profile
     return "true" if profile_truth_map.get(profile, False) else "false"
+
+
+def _nav2_node(
+    package: str,
+    executable: str,
+    name: str,
+    params_file: str,
+    extra_remappings: list[tuple[str, str]] | None = None,
+) -> Node:
+    remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
+    if extra_remappings:
+        remappings.extend(extra_remappings)
+    return Node(
+        package=package,
+        executable=executable,
+        name=name,
+        output="screen",
+        parameters=[params_file],
+        remappings=remappings,
+        emulate_tty=True,
+    )
 
 
 def _setup(context, *args, **kwargs):
@@ -214,29 +235,72 @@ def _setup(context, *args, **kwargs):
             )
             nav2_pkg = ""
         if nav2_pkg:
-            nav2_launch = f"{nav2_pkg}/launch/navigation_launch.py"
             actions.append(
-                LogInfo(msg=[f"[autonomy] including {nav2_launch}"])
+                LogInfo(msg=[
+                    "[autonomy] launching Nav2 nodes directly with params: ",
+                    nav2_params_file,
+                ])
             )
-            actions.append(
-                LogInfo(msg=[f"[autonomy] Nav2 params: {nav2_params_file}"])
-            )
-            actions.append(
-                IncludeLaunchDescription(
-                    PythonLaunchDescriptionSource(nav2_launch),
-                    launch_arguments={
-                        "use_sim_time": "False",
-                        "params_file": nav2_params_file,
-                        "autostart": "True",
-                        # Composition silently fails on this Jetson (container
-                        # never loads, all nav2 nodes missing). Separate
-                        # processes work; lifecycle service discovery latency
-                        # is mitigated by the wider postflight timeout and DDS
-                        # profile tuning instead.
-                        "use_composition": "False",
-                    }.items(),
-                )
-            )
+            # Avoid nav2_bringup's RewrittenYaml temp-file layer here. On the
+            # Jetson it was producing a /tmp/launch_params_* file that behaved
+            # like the default Nav2 config (goal_checker/static_layer/no DWB
+            # critics) despite the logged source YAML being correct.
+            actions.extend([
+                _nav2_node(
+                    "nav2_controller",
+                    "controller_server",
+                    "controller_server",
+                    nav2_params_file,
+                    extra_remappings=[("cmd_vel", "/cmd_vel/nav")],
+                ),
+                _nav2_node(
+                    "nav2_smoother",
+                    "smoother_server",
+                    "smoother_server",
+                    nav2_params_file,
+                ),
+                _nav2_node(
+                    "nav2_planner",
+                    "planner_server",
+                    "planner_server",
+                    nav2_params_file,
+                ),
+                _nav2_node(
+                    "nav2_behaviors",
+                    "behavior_server",
+                    "behavior_server",
+                    nav2_params_file,
+                ),
+                _nav2_node(
+                    "nav2_bt_navigator",
+                    "bt_navigator",
+                    "bt_navigator",
+                    nav2_params_file,
+                ),
+                _nav2_node(
+                    "nav2_waypoint_follower",
+                    "waypoint_follower",
+                    "waypoint_follower",
+                    nav2_params_file,
+                ),
+                _nav2_node(
+                    "nav2_velocity_smoother",
+                    "velocity_smoother",
+                    "velocity_smoother",
+                    nav2_params_file,
+                ),
+                Node(
+                    package="nav2_lifecycle_manager",
+                    executable="lifecycle_manager",
+                    name="lifecycle_manager_navigation",
+                    output="screen",
+                    parameters=[
+                        nav2_params_file,
+                        {"use_sim_time": False, "autostart": True},
+                    ],
+                    emulate_tty=True,
+                ),
+            ])
 
     if enable_explorer == "true":
         actions.extend([
