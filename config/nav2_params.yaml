@@ -98,16 +98,16 @@ controller_server:
       min_vel_y: -0.15
       max_vel_x: 0.15
       max_vel_y: 0.15
-      max_vel_theta: 0.4
+      max_vel_theta: 0.25
       min_speed_xy: 0.0
       max_speed_xy: 0.2
       min_speed_theta: 0.0
       acc_lim_x: 0.4
       acc_lim_y: 0.4
-      acc_lim_theta: 0.8
+      acc_lim_theta: 0.4
       decel_lim_x: -0.4
       decel_lim_y: -0.4
-      decel_lim_theta: -0.8
+      decel_lim_theta: -0.4
       vx_samples: 14
       vy_samples: 14
       vtheta_samples: 16
@@ -119,18 +119,23 @@ controller_server:
       trans_stopped_velocity: 0.25
       short_circuit_trajectory_evaluation: true
       stateful: true
+      # RotateToGoal is kept so the robot turns toward goals (helps SLAM
+      # sweep angles) but at a low scale + low slowing_factor so the spin is
+      # gentle, not the snappy 32-scale default. Angular max_vel / accel are
+      # also low (see above). Oscillation is high to suppress flip-flop when
+      # the frontier replan picks a different bearing.
       critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       BaseObstacle.scale: 0.02
-      PathAlign.scale: 32.0
-      PathAlign.forward_point_distance: 0.1
-      GoalAlign.scale: 24.0
-      GoalAlign.forward_point_distance: 0.1
+      PathAlign.scale: 12.0
+      PathAlign.forward_point_distance: 0.2
+      GoalAlign.scale: 8.0
+      GoalAlign.forward_point_distance: 0.2
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
-      Oscillation.scale: 1.0
+      RotateToGoal.scale: 8.0
+      RotateToGoal.slowing_factor: 2.0
+      RotateToGoal.lookahead_time: 1.0
+      Oscillation.scale: 8.0
 
 local_costmap:
   local_costmap:
@@ -244,9 +249,9 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 1.0
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.4
-    min_rotational_vel: 0.15
-    rotational_acc_lim: 1.2
+    max_rotational_vel: 0.25
+    min_rotational_vel: 0.10
+    rotational_acc_lim: 0.6
 
 waypoint_follower:
   ros__parameters:
@@ -265,10 +270,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: OPEN_LOOP
-    max_velocity: [0.15, 0.15, 0.4]
-    min_velocity: [-0.15, -0.15, -0.4]
-    max_accel: [0.4, 0.4, 0.8]
-    max_decel: [-0.4, -0.4, -0.8]
+    max_velocity: [0.15, 0.15, 0.25]
+    min_velocity: [-0.15, -0.15, -0.25]
+    max_accel: [0.4, 0.4, 0.4]
+    max_decel: [-0.4, -0.4, -0.4]
     odom_topic: /r100_0140/platform/odom/filtered
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

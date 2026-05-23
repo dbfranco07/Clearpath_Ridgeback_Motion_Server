@@ -31,7 +31,7 @@ from typing import Any
 
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -83,6 +83,12 @@ class MissionOrchestrator(Node):
         self.declare_parameter("memory_result_topic", "/memory/result")
         self.declare_parameter("safety_latched_topic", "/safety/latched")
         self.declare_parameter("nav_action", "navigate_to_pose")
+        # Hard-stop publisher slams zero teleop at this rate for this duration
+        # whenever STOP fires, holding cmd_vel_mux on the teleop branch so the
+        # in-flight Nav2 cmd_vel can't leak through during the async cancel.
+        self.declare_parameter("teleop_topic", "/cmd_vel/teleop")
+        self.declare_parameter("hard_stop_duration_s", 1.5)
+        self.declare_parameter("hard_stop_rate_hz", 50.0)
 
         # Behaviour params
         self.declare_parameter("periodic_vlm_period_s", 3.0)
@@ -152,6 +158,13 @@ class MissionOrchestrator(Node):
         self._pub_memory_query = self.create_publisher(
             String, self.get_parameter("memory_query_topic").value, 10
         )
+        self._pub_teleop = self.create_publisher(
+            Twist, self.get_parameter("teleop_topic").value, 10
+        )
+        self._hard_stop_until = 0.0
+        hs_rate = max(float(self.get_parameter("hard_stop_rate_hz").value), 1.0)
+        self._hard_stop_duration = float(self.get_parameter("hard_stop_duration_s").value)
+        self._hard_stop_timer = self.create_timer(1.0 / hs_rate, self._hard_stop_tick)
 
         self._action = ActionClient(self, NavigateToPose, self.get_parameter("nav_action").value)
 
@@ -422,8 +435,20 @@ class MissionOrchestrator(Node):
         msg.data = bool(cancel)
         self._pub_cancel.publish(msg)
 
+    def _engage_hard_stop(self) -> None:
+        # Holds cmd_vel_mux on the teleop branch (zero Twist) so any cmd_vel
+        # still in flight from Nav2 during its async cancel can't leak to
+        # the wheels.
+        self._hard_stop_until = time.time() + self._hard_stop_duration
+        self._pub_teleop.publish(Twist())
+
+    def _hard_stop_tick(self) -> None:
+        if time.time() < self._hard_stop_until:
+            self._pub_teleop.publish(Twist())
+
     def _abort(self, reason: str) -> None:
         self.get_logger().warn(f"mission aborted: {reason}")
+        self._engage_hard_stop()
         if self._goal_handle is not None:
             try:
                 self._goal_handle.cancel_goal_async()

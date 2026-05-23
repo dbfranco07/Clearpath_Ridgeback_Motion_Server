@@ -63,7 +63,7 @@ frontier_explorer:
     nav_action: navigate_to_pose
     min_frontier_size_cells: 10
     goal_blacklist_radius_m: 0.5
-    replan_period_s: 3.0
+    replan_period_s: 6.0
     max_attempts_per_goal: 2
     goal_padding_m: 0.3
 
