@@ -19,6 +19,7 @@ safety_controller:
     liveness_topic: /platform/liveness
     safety_latched_topic: /safety/latched
     safety_reset_service: /safety/reset
+    safety_override_topic: /safety/override
     heartbeat_timeout_s: 1.0
     liveness_timeout_s: 5.0
     publish_rate_hz: 20.0
@@ -129,6 +130,7 @@ ridgeback_dashboard:
     heartbeat_topic: /operator/heartbeat
     safety_latched_topic: /safety/latched
     safety_reset_service: /safety/reset
+    safety_override_topic: /safety/override
     mission_state_topic: /mission/state
     mission_goal_topic: /mission/goal
     frontier_status_topic: /frontier/status

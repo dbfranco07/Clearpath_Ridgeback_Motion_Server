@@ -306,6 +306,12 @@ PAGE_HTML = """<!DOCTYPE html>
           <div class="sr">
             <span class="sl">BLOCK</span><span id="st-safety-reasons" class="sv">none</span>
           </div>
+          <div class="sr">
+            <span class="sl">OVERRIDE</span>
+            <button id="btn-safety-override" type="button" class="btn"
+                    onclick="toggleSafetyOverride()">OFF</button>
+            <span id="st-safety-override-hint" class="sv">safety checks active</span>
+          </div>
         </div>
         <div id="st-log" class="mlog">--</div>
       </div>
@@ -527,6 +533,21 @@ function stopRobot() {
   sendTeleop(0, 0, 0, 'stop');
 }
 
+async function toggleSafetyOverride() {
+  const btn = document.getElementById('btn-safety-override');
+  const turningOn = (btn.textContent.trim() !== 'ON');
+  if (turningOn && !confirm('Disable safety latch?\\nThe robot will accept full-speed cmd_vel with no heartbeat/liveness check.')) {
+    return;
+  }
+  try {
+    await fetch('/api/safety/override', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: turningOn})
+    });
+  } catch (_) {}
+}
+
 const TKEYS = ['w','a','s','d','q','e'];
 
 function kbdTick() {
@@ -738,6 +759,18 @@ async function refreshStatus() {
       e('st-safety-reasons').textContent = reasons.length ? reasons.slice(0, 3).join(', ') : 'none';
       e('st-safety-reasons').style.color = reasons.length ? 'var(--danger)' : 'var(--accent)';
     }
+    if (e('btn-safety-override')) {
+      const ov = Boolean(data.safety?.override);
+      e('btn-safety-override').textContent = ov ? 'ON' : 'OFF';
+      e('btn-safety-override').style.background = ov ? 'var(--danger)' : '';
+      e('btn-safety-override').style.color = ov ? '#fff' : '';
+      if (e('st-safety-override-hint')) {
+        e('st-safety-override-hint').textContent = ov
+          ? 'CLAMP BYPASSED — full-speed cmd_vel'
+          : 'safety checks active';
+        e('st-safety-override-hint').style.color = ov ? 'var(--danger)' : 'var(--muted)';
+      }
+    }
 
     if (e('st-log') && data.logs?.length) {
       const last = data.logs[data.logs.length-1];
@@ -942,6 +975,10 @@ class ChatRequest(BaseModel):
     message: str
 
 
+class SafetyOverrideRequest(BaseModel):
+    enabled: bool
+
+
 # ---------------------------------------------------------------------------
 # ROS bridge
 # ---------------------------------------------------------------------------
@@ -978,6 +1015,7 @@ class DashboardNode(Node):
         self.declare_parameter("heartbeat_topic", "/operator/heartbeat")
         self.declare_parameter("safety_latched_topic", "/safety/latched")
         self.declare_parameter("safety_reset_service", "/safety/reset")
+        self.declare_parameter("safety_override_topic", "/safety/override")
         self.declare_parameter("mission_state_topic", "/mission/state")
         self.declare_parameter("mission_goal_topic", "/mission/goal")
         self.declare_parameter("frontier_status_topic", "/frontier/status")
@@ -1000,6 +1038,7 @@ class DashboardNode(Node):
             "heartbeat": self.get_parameter("heartbeat_topic").value,
             "safety_latched": self.get_parameter("safety_latched_topic").value,
             "safety_reset": self.get_parameter("safety_reset_service").value,
+            "safety_override": self.get_parameter("safety_override_topic").value,
             "mission_state": self.get_parameter("mission_state_topic").value,
             "mission_goal": self.get_parameter("mission_goal_topic").value,
             "frontier_status": self.get_parameter("frontier_status_topic").value,
@@ -1033,6 +1072,7 @@ class DashboardNode(Node):
         self._map_height: int = 0
         self._map_png: bytes | None = None
         self._safety_latched: bool = True
+        self._safety_override: bool = False
         self._mission_state: dict[str, Any] = {}
         self._frontier_status: dict[str, Any] = {}
         self._vlm_events: list[dict[str, Any]] = []
@@ -1064,6 +1104,9 @@ class DashboardNode(Node):
         self._pub_teleop = self.create_publisher(Twist, self._params["teleop"], 10)
         self._pub_heartbeat = self.create_publisher(Header, self._params["heartbeat"], 10)
         self._pub_mission = self.create_publisher(String, self._params["mission_goal"], 10)
+        self._pub_safety_override = self.create_publisher(
+            Bool, self._params["safety_override"], _LATCHED_QOS
+        )
 
         # Service client (safety reset; created lazily on first call)
         self._safety_reset_client = self.create_client(Trigger, self._params["safety_reset"])
@@ -1225,6 +1268,13 @@ class DashboardNode(Node):
             if len(self._chat_history) > 40:
                 self._chat_history = self._chat_history[-40:]
 
+    def publish_safety_override(self, enabled: bool) -> None:
+        with self._lock:
+            self._safety_override = bool(enabled)
+        msg = Bool()
+        msg.data = bool(enabled)
+        self._pub_safety_override.publish(msg)
+
     def request_safety_reset(self) -> tuple[bool, str]:
         if not self._safety_reset_client.service_is_ready():
             self._safety_reset_client.wait_for_service(timeout_sec=0.2)
@@ -1275,9 +1325,10 @@ class DashboardNode(Node):
                     "image_url": "/api/map.png",
                 },
                 "safety": {
-                    "risk_level": "DANGER" if self._safety_latched else "OK",
-                    "stop_recommended": self._safety_latched,
-                    "reasons": ["safety_latched"] if self._safety_latched else [],
+                    "risk_level": "OVERRIDE" if self._safety_override else ("DANGER" if self._safety_latched else "OK"),
+                    "stop_recommended": self._safety_latched and not self._safety_override,
+                    "reasons": (["override"] if self._safety_override else (["safety_latched"] if self._safety_latched else [])),
+                    "override": self._safety_override,
                 },
                 "teleop": {
                     "status": "active" if (now - self._last_teleop_stamp) < 1.0 else "idle",
@@ -1439,6 +1490,11 @@ def build_app(node: DashboardNode) -> FastAPI:
     async def api_safety_reset() -> dict[str, Any]:
         ok, message = node.request_safety_reset()
         return {"ok": ok, "message": message}
+
+    @app.post("/api/safety/override")
+    async def api_safety_override(req: SafetyOverrideRequest) -> dict[str, Any]:
+        node.publish_safety_override(req.enabled)
+        return {"ok": True, "enabled": req.enabled}
 
     return app
 

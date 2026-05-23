@@ -39,6 +39,7 @@ class SafetyController(Node):
         self.declare_parameter("liveness_topic", "/platform/liveness")
         self.declare_parameter("safety_latched_topic", "/safety/latched")
         self.declare_parameter("safety_reset_service", "/safety/reset")
+        self.declare_parameter("safety_override_topic", "/safety/override")
         self.declare_parameter("heartbeat_timeout_s", 1.0)
         self.declare_parameter("liveness_timeout_s", 2.0)
         self.declare_parameter("publish_rate_hz", 20.0)
@@ -57,6 +58,7 @@ class SafetyController(Node):
         self._liveness_stamp = 0.0
         self._liveness_value = False
         self._waiting_reset = False
+        self._override = False
 
         self.create_subscription(
             Header,
@@ -69,6 +71,12 @@ class SafetyController(Node):
             self.get_parameter("liveness_topic").value,
             self._on_liveness,
             10,
+        )
+        self.create_subscription(
+            Bool,
+            self.get_parameter("safety_override_topic").value,
+            self._on_override,
+            _LATCHED_QOS,
         )
         self._pub_latched = self.create_publisher(
             Bool, self.get_parameter("safety_latched_topic").value, _LATCHED_QOS
@@ -97,6 +105,19 @@ class SafetyController(Node):
             self._liveness_value = bool(msg.data)
             self._liveness_stamp = self._now()
 
+    def _on_override(self, msg: Bool) -> None:
+        new_value = bool(msg.data)
+        with self._lock:
+            changed = new_value != self._override
+            self._override = new_value
+        if changed:
+            if new_value:
+                self.get_logger().warn(
+                    "SAFETY OVERRIDE ENABLED — latch forced clear; heartbeat/liveness ignored"
+                )
+            else:
+                self.get_logger().info("safety override disabled — normal checks resumed")
+
     def _on_reset(self, _request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         ok, message = self._try_clear()
         response.success = ok
@@ -106,6 +127,15 @@ class SafetyController(Node):
     # --- core loop ----------------------------------------------------------
     def _tick(self) -> None:
         with self._lock:
+            if self._override:
+                if self._latched:
+                    self.get_logger().info("safety cleared via override")
+                self._latched = False
+                self._waiting_reset = False
+                self._reasons = ["override"]
+                self._publish_latched_locked()
+                return
+
             now = self._now()
             reasons: list[str] = []
             heartbeat_age = now - self._heartbeat_stamp if self._heartbeat_stamp else 1e9
