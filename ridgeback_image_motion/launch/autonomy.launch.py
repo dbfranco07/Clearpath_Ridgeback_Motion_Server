@@ -221,11 +221,12 @@ def _setup(context, *args, **kwargs):
                         "use_sim_time": "False",
                         "params_file": nav2_params,
                         "autostart": "True",
-                        # Orin Nano can't carry 7 separate Nav2 processes
-                        # plus SLAM/VLM/camera/web — DDS service discovery
-                        # times out under load. Composition puts every
-                        # Nav2 server in one process.
-                        "use_composition": "True",
+                        # Composition silently fails on this Jetson (container
+                        # never loads, all nav2 nodes missing). Separate
+                        # processes work; lifecycle service discovery latency
+                        # is mitigated by the wider postflight timeout and DDS
+                        # profile tuning instead.
+                        "use_composition": "False",
                     }.items(),
                 )
             )
