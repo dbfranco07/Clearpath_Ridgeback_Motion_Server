@@ -404,6 +404,7 @@ PAGE_HTML = """<!DOCTYPE html>
           <label><input id="tg-kbd" type="checkbox" checked> Enable keyboard teleop</label>
           <label><input id="tg-stop" type="checkbox" checked> Auto-stop on blur/tab hidden</label>
         </div>
+        <div id="teleop-feedback" class="small-note">Teleop bridge idle.</div>
         <button class="btn btn-stop" style="width:100%;margin-top:6px" onclick="stopRobot()">■ STOP</button>
       </div>
 
@@ -603,11 +604,13 @@ document.addEventListener('visibilitychange', () => {
 });
 
 async function sendTeleop(linear, lateral, angular, source='keyboard') {
+  const feedback = document.getElementById('teleop-feedback');
   pendingTeleop = {
     linear, lateral, angular, source,
     issued_at: (Date.now() + serverClockOffsetMs) / 1000.0,
     seq: ++teleopSeq
   };
+  if (feedback) feedback.textContent = `Teleop queued (${source}).`;
   pumpTeleop();
 }
 
@@ -619,13 +622,25 @@ async function pumpTeleop() {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 800);
   try {
-    await fetch('/api/teleop', {
+    const response = await fetch('/api/teleop', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify(payload),
       signal: controller.signal
     });
+    const feedback = document.getElementById('teleop-feedback');
+    if (feedback) {
+      feedback.textContent = response.ok
+        ? `Teleop sent (${payload.source}).`
+        : `Teleop backend returned ${response.status}.`;
+      feedback.style.color = response.ok ? 'var(--muted)' : 'var(--danger)';
+    }
   } catch(_) {
+    const feedback = document.getElementById('teleop-feedback');
+    if (feedback) {
+      feedback.textContent = 'Teleop request failed: dashboard backend unreachable.';
+      feedback.style.color = 'var(--danger)';
+    }
   } finally {
     clearTimeout(timeoutId);
     teleopInFlight = false;
