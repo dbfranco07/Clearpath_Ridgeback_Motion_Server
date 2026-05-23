@@ -439,11 +439,22 @@ if [[ "${RIDGEBACK_SKIP_STALE_CLEANUP:-0}" != "1" ]]; then
         "ridgeback_image_motion/.*/web_dashboard.py" \
         "ridgeback_image_motion/.*/mission_orchestrator.py" \
         "ridgeback_image_motion/.*/frontier_explorer.py" \
+        "ridgeback_image_motion/.*/motion_server.py" \
         "ridgeback_image_motion/.*/cmd_vel_mux.py" \
         "ridgeback_image_motion/.*/safety_controller.py" \
         "ridgeback_image_motion/.*/jetson_watchdog.py" \
         "ridgeback_image_motion/.*/spatial_memory.py" \
-        "ridgeback_image_motion/.*/vlm_client.py"; do
+        "ridgeback_image_motion/.*/vlm_client.py" \
+        "async_slam_toolbox_node" \
+        "realsense2_camera_node" \
+        "/opt/ros/humble/lib/nav2_controller/controller_server" \
+        "/opt/ros/humble/lib/nav2_planner/planner_server" \
+        "/opt/ros/humble/lib/nav2_smoother/smoother_server" \
+        "/opt/ros/humble/lib/nav2_behaviors/behavior_server" \
+        "/opt/ros/humble/lib/nav2_bt_navigator/bt_navigator" \
+        "/opt/ros/humble/lib/nav2_waypoint_follower/waypoint_follower" \
+        "/opt/ros/humble/lib/nav2_velocity_smoother/velocity_smoother" \
+        "/opt/ros/humble/lib/nav2_lifecycle_manager/lifecycle_manager"; do
         pkill -f "$pattern" 2>/dev/null || true
     done
 fi
@@ -502,6 +513,21 @@ postflight_jetson() {
         fi
     }
 
+    require_topic_pub_exactly_one() {
+        local topic="$1" tag="$2"
+        local pub_count
+        pub_count="$(timeout 3 ros2 topic info "$topic" 2>/dev/null | awk '/Publisher count:/ { print $3; exit }')"
+        if [[ "$pub_count" == "1" ]]; then
+            echo "  OK   topic $topic has 1 publisher ($tag)"
+        elif [[ -n "$pub_count" && "$pub_count" != "0" ]]; then
+            echo "  FAIL topic $topic has $pub_count publishers ($tag; expected exactly 1, stale duplicate process likely)" >&2
+            errs=$((errs + 1))
+        else
+            echo "  FAIL topic $topic has NO publishers ($tag)" >&2
+            errs=$((errs + 1))
+        fi
+    }
+
     require_lifecycle_active() {
         local node="$1"
         local state
@@ -542,9 +568,8 @@ postflight_jetson() {
     # motion_server runs on the Ridgeback side and bridges this topic to the
     # platform controller. Checking the publisher validates the command path
     # without launching a duplicate motion_server on the Jetson.
-    require_topic_pub "/r100_0140/platform/cmd_vel_unstamped" "drive bridge"
-    # Camera comes from the Ridgeback in this build; the topic check is informational.
-    require_topic_pub "/r100_0140/sensors/camera_0/color/image_raw" "camera"
+    require_topic_pub_exactly_one "/r100_0140/platform/cmd_vel_unstamped" "drive bridge"
+    require_topic_pub_exactly_one "/r100_0140/sensors/camera_0/color/image_raw" "camera"
 
     # --- Dashboard ---
     if component_enabled "$RIDGEBACK_ENABLE_WEB" "true" "true"; then
@@ -697,6 +722,7 @@ postflight_jetson() {
         echo "[POSTFLIGHT] FAIL — ${errs} problem(s) above." >&2
         echo "  Most common fixes:" >&2
         echo "    - Drive bridge missing -> run ridgeback_start.sh on the Ridgeback and confirm /r100_0140/platform/cmd_vel_unstamped has a publisher." >&2
+        echo "    - More than one drive/camera publisher -> stale Jetson processes are still running; stop goridge, pkill stale nav2/realsense/motion_server processes, then rerun." >&2
         echo "    - Nav2 lifecycle still 'unconfigured' -> autostart failed; inspect the logs first, then activate manually if needed:" >&2
         echo "        for n in controller_server planner_server smoother_server behavior_server bt_navigator waypoint_follower velocity_smoother; do" >&2
         echo "          ros2 lifecycle set /\$n configure; ros2 lifecycle set /\$n activate; done" >&2
