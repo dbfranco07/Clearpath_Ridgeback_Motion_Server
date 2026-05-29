@@ -84,7 +84,12 @@ class FrontierExplorer(Node):
         self.declare_parameter("recency_window_s", 60.0)
         self.declare_parameter("info_gain_radius_m", 2.0)
         self.declare_parameter("max_distance_cap_m", 8.0)
-        self.declare_parameter("min_score_threshold", 0.10)
+        # 0.15 keeps low-value candidates from being attempted at all.
+        # Scores at 0.10 in logs were marginal frontiers that the planner
+        # repeatedly failed to reach, triggering the recovery cascade.
+        # Safe to raise because of the no_frontiers debounce in the
+        # orchestrator (3 consecutive reports required).
+        self.declare_parameter("min_score_threshold", 0.15)
 
         self._min_size = int(self.get_parameter("min_frontier_size_cells").value)
         self._blacklist_radius = float(self.get_parameter("goal_blacklist_radius_m").value)
@@ -107,7 +112,11 @@ class FrontierExplorer(Node):
 
         self._lock = threading.Lock()
         self._map: OccupancyGrid | None = None
-        self._cancelled = False
+        # Default to cancelled: never explore on boot unless the mission
+        # orchestrator explicitly enables us (cancel=False on the latched
+        # topic). This makes `Ctrl+C goridge` restartable safely — the
+        # robot won't auto-resume exploration the moment nodes come back.
+        self._cancelled = True
         self._active = False
         self._current_goal: tuple[float, float] | None = None
         self._goal_handle = None
@@ -126,8 +135,12 @@ class FrontierExplorer(Node):
         self.create_subscription(
             OccupancyGrid, self.get_parameter("map_topic").value, self._on_map, _LATCHED_QOS
         )
+        # Latched so a late subscriber (explorer started before orchestrator,
+        # or restarted independently) always receives the most recent cancel
+        # state. Without this, the boot-time cancel(True) from the
+        # orchestrator is lost and the explorer auto-explores.
         self.create_subscription(
-            Bool, self.get_parameter("cancel_topic").value, self._on_cancel, 10
+            Bool, self.get_parameter("cancel_topic").value, self._on_cancel, _LATCHED_QOS
         )
         self.create_subscription(
             String, self.get_parameter("hint_topic").value, self._on_hint, 10
@@ -223,8 +236,14 @@ class FrontierExplorer(Node):
             self._publish_status("no_frontiers")
             return
 
-        if active and self._current_goal is not None and self._dist(goal, self._current_goal) < 0.4:
-            # Already heading there — let it finish.
+        if active:
+            # Never preempt our own in-flight goal. Preemption races with
+            # Nav2's recovery dance (clear_costmap → spin → backup): the
+            # planner is still working on the old goal when the explorer
+            # yanks the target away, producing the
+            # "Planning algorithm failed → goal aborted" cascade. Let the
+            # current goal succeed, fail, or get blacklisted naturally —
+            # the next tick will pick a fresh winner with up-to-date map.
             self._publish_status("navigating")
             return
 

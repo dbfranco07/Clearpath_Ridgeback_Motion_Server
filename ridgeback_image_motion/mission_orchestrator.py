@@ -97,7 +97,11 @@ class MissionOrchestrator(Node):
         # whenever STOP fires, holding cmd_vel_mux on the teleop branch so the
         # in-flight Nav2 cmd_vel can't leak through during the async cancel.
         self.declare_parameter("teleop_topic", "/cmd_vel/teleop")
-        self.declare_parameter("hard_stop_duration_s", 1.5)
+        # 3 s holds the teleop branch long enough for the async Nav2
+        # cancel-goal handshake to fully settle. 1.5 s sometimes let a
+        # stray Nav2 cmd_vel slip through after the hard-stop expired,
+        # so the robot drifted a few cm after the operator said STOP.
+        self.declare_parameter("hard_stop_duration_s", 3.0)
         self.declare_parameter("hard_stop_rate_hz", 50.0)
 
         # Behaviour params
@@ -162,8 +166,10 @@ class MissionOrchestrator(Node):
         self._pub_home = self.create_publisher(
             PoseStamped, self.get_parameter("home_topic").value, _LATCHED_QOS
         )
+        # TRANSIENT_LOCAL so the explorer always sees the latest cancel
+        # state even if it subscribes after the orchestrator publishes.
         self._pub_cancel = self.create_publisher(
-            Bool, self.get_parameter("frontier_cancel_topic").value, 10
+            Bool, self.get_parameter("frontier_cancel_topic").value, _LATCHED_QOS
         )
         self._pub_hint = self.create_publisher(
             String, self.get_parameter("frontier_hint_topic").value, 10
