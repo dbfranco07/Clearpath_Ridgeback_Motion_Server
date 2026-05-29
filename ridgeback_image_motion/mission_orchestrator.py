@@ -109,7 +109,15 @@ class MissionOrchestrator(Node):
 
         # Behaviour params
         self.declare_parameter("periodic_vlm_period_s", 3.0)
-        self.declare_parameter("target_match_confidence", 0.7)
+        # 0.45 lets singleton VLM detections through. The voting layer in
+        # vlm_client multiplies a single high-raw observation (e.g. raw=0.95)
+        # by vote_singleton_factor=0.5 -> ~0.47. Threshold 0.7 was silently
+        # dropping every one of those even when the model was clearly seeing
+        # the right sign, because the robot was moving between frames so
+        # the pose-bucket vote couldn't aggregate. With raw conf typically
+        # 0.90-1.0 for genuine sign reads, 0.45 still rejects low-quality
+        # guesses without requiring corroboration the robot can't provide.
+        self.declare_parameter("target_match_confidence", 0.45)
         self.declare_parameter("max_explore_time_s", 600.0)
         self.declare_parameter("approach_offset_m", 0.8)
         self.declare_parameter("memory_lookup_timeout_s", 1.0)

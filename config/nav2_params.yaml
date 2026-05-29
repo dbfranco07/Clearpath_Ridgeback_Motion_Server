@@ -119,9 +119,14 @@ controller_server:
       decel_lim_x: -0.4
       decel_lim_y: -0.4
       decel_lim_theta: -0.20
-      vx_samples: 14
-      vy_samples: 14
-      vtheta_samples: 16
+      # DWB samples reduced from 14/14/16 (= 3,136 trajectories/cycle) to
+      # 8/8/10 (= 640) — a ~5x cut. Jetson Orin Nano was missing the 10 Hz
+      # control loop continuously while also running SLAM, costmap inflation,
+      # VLM and the web dashboard. 8 samples per linear axis still gives
+      # good resolution at 0.15 m/s max velocity (~3.75 cm granularity).
+      vx_samples: 8
+      vy_samples: 8
+      vtheta_samples: 10
       # 2.5 s rollout. At max_vel_x 0.15 that's ~37 cm of forward
       # lookahead, enough for DWB to see and avoid a corner before the
       # footprint reaches it. The previous 1.7 s only looked 25 cm ahead
