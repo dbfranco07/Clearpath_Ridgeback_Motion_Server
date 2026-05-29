@@ -149,7 +149,13 @@ controller_server:
       # a holonomic base that strafes close to walls. BaseObstacle samples
       # only the center point and lets corners clip obstacles.
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      ObstacleFootprint.scale: 0.5
+      # Scale raised 0.5 -> 3.0 to compensate for tighter local-costmap
+      # inflation (0.55/5.0). With less soft-cost push from inflation,
+      # corner-clipping trajectories need a stronger DWB-level penalty so
+      # holonomic strafes don't drag the chassis into wall edges. 3.0 makes
+      # any rolled footprint touching a high-cost cell heavily preferred-against
+      # without dominating the score above PathDist (32) / PathAlign (12).
+      ObstacleFootprint.scale: 3.0
       ObstacleFootprint.sum_scores: false
       PathAlign.scale: 12.0
       PathAlign.forward_point_distance: 0.2
@@ -218,14 +224,17 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # 0.85 extends the soft cost zone past the circumscribed radius
-        # so the robot is pushed off walls during corner rounding. The
-        # inscribed (lethal) radius is unchanged at 0.43 m — doors of
-        # 0.86 m+ still plan through. cost_scaling_factor 2.5 (was 3.0)
-        # gives a gentler decay so high cost lingers a bit further out,
-        # providing more lateral "push" for DWB.
-        cost_scaling_factor: 2.5
-        inflation_radius: 0.85
+        # LOCAL inflation is tight: 0.55 m radius with sharp 5.0 scaling.
+        # In a ~1 m corridor with static_layer enabled, the previous 0.85/2.5
+        # values left zero non-lethal cells in the middle (inscribed 0.43 m
+        # from each wall = 0.86 m, larger than the corridor), so the planner
+        # refused every goal and behavior_server aborted spin/backup with
+        # "Collision Ahead". Sharp 5.0 scaling gives the soft band ~0.12 m
+        # of width, then cost decays fast. Corner safety is moved to DWB's
+        # ObstacleFootprint critic (scale 3.0) rather than relying on a
+        # wide inflation band to keep the robot off corners.
+        cost_scaling_factor: 5.0
+        inflation_radius: 0.55
       always_send_full_costmap: true
 
 global_costmap:
@@ -318,7 +327,13 @@ behavior_server:
     global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 1.0
-    simulate_ahead_time: 2.0
+    # Reduced 2.0 -> 1.0 so spin/backup recoveries don't abort prematurely
+    # when surrounded by tighter inflation. At max_rotational_vel 0.20 the
+    # old 2.0 s lookahead projected 23° of rotation before checking the
+    # footprint — in narrow corridors that always landed on inflation, so
+    # every recovery aborted instantly with "Collision Ahead". 1.0 s checks
+    # only ~11° ahead, enough to catch real collisions without false aborts.
+    simulate_ahead_time: 1.0
     # Spin/backup recoveries previously jerked at 0.6 rad/s² — that was
     # the loudest yaw event during planning failures. Match the DWB
     # angular budget so recoveries feel like the rest of motion.
