@@ -97,12 +97,17 @@ controller_server:
     FollowPath:
       plugin: dwb_core::DWBLocalPlanner
       debug_trajectory_details: false
-      # Allow tiny reverse (-0.05 m/s) so DWB's lowest-cost rollout can
-      # nudge the robot ~5-10 cm off a wall when it has parked too close
-      # and every forward trajectory rolls through the inscribed (lethal)
-      # band. Not enough velocity to be "driving backward" — just enough
-      # to break loose. The behavior_server's backup recovery also benefits.
-      min_vel_x: -0.05
+      # Forward-only at the controller. The reverse band (-0.05) was added
+      # back when inflation closed corridors and every forward rollout hit
+      # lethal; with local inflation now at 0.65/4.0 there's room ahead, so
+      # the reverse band stopped serving its purpose and started causing
+      # problems instead — at doorways DWB found that a tiny reverse cost
+      # less than threading the door (door centerline near inscribed) and
+      # the robot would drift backward away from its goal. 0.0 forces DWB
+      # to only choose forward+rotate+strafe rollouts. The behavior_server's
+      # backup recovery is independent of DWB and still drives reverse when
+      # the robot genuinely needs to escape.
+      min_vel_x: 0.0
       min_vel_y: -0.15
       max_vel_x: 0.15
       max_vel_y: 0.15
@@ -156,7 +161,12 @@ controller_server:
       # corner-safety push without dominating PathDist (32) / PathAlign (12).
       ObstacleFootprint.scale: 1.2
       ObstacleFootprint.sum_scores: false
-      PathAlign.scale: 12.0
+      # PathAlign bumped 12 -> 18 so DWB stays tightly centered on the
+      # global plan when threading narrow openings (doorways, corridor
+      # mouths). Without this, rollouts that drifted laterally by 5-10 cm
+      # at the door could still score well on PathDist (still "near" the
+      # path) but bury the footprint corner into a door jamb.
+      PathAlign.scale: 18.0
       PathAlign.forward_point_distance: 0.2
       GoalAlign.scale: 8.0
       GoalAlign.forward_point_distance: 0.2
@@ -272,8 +282,15 @@ global_costmap:
           data_type: LaserScan
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 2.5
-        inflation_radius: 0.85
+        # Global matched to local (0.65/4.0) so global plans actually route
+        # through doorways. The previous 0.85/2.5 made door-centerline cells
+        # essentially blocked in the global costmap (inscribed 0.43 m × 2 =
+        # 0.86 m equals door width), so NavFn often picked detours through
+        # unknown space instead of through the door — which the local
+        # costmap then couldn't follow, triggering planner replan loops at
+        # the doorway approach.
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.65
       always_send_full_costmap: true
 
 planner_server:
