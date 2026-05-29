@@ -425,7 +425,17 @@ class FrontierExplorer(Node):
         ps.header.stamp = self.get_clock().now().to_msg()
         ps.pose.position.x = goal[0]
         ps.pose.position.y = goal[1]
-        ps.pose.orientation = yaw_to_quaternion(0.0)
+        # Face the frontier from the robot's current pose. Sending yaw=0
+        # forced RotateToGoal to spin the robot to world-east at every
+        # waypoint regardless of travel direction, which thrashed the
+        # drives. atan2(dy,dx) lets the goal yaw match the natural arrival
+        # heading, so DWB barely needs to rotate at the end.
+        robot_xy = self._lookup_robot_pose()
+        if robot_xy is not None:
+            heading = math.atan2(goal[1] - robot_xy[1], goal[0] - robot_xy[0])
+        else:
+            heading = 0.0
+        ps.pose.orientation = yaw_to_quaternion(heading)
 
         msg = NavigateToPose.Goal()
         msg.pose = ps
