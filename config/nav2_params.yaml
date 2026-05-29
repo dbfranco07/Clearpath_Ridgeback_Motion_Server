@@ -154,12 +154,13 @@ controller_server:
       # a holonomic base that strafes close to walls. BaseObstacle samples
       # only the center point and lets corners clip obstacles.
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      # 1.2 is the sweet spot found by trial: 0.5 (default) let corners clip;
-      # 3.0 made doorway traversal impossible because every rollout through a
-      # door has the footprint near both jambs at once, so all trajectories
-      # got penalized and DWB had no winner. 1.2 gives ~2.4x the original
-      # corner-safety push without dominating PathDist (32) / PathAlign (12).
-      ObstacleFootprint.scale: 1.2
+      # Reverted to 0.5 (the d9b78ad value that successfully threaded
+      # doorways). Higher values (1.2, 3.0) penalize all rollouts at a
+      # doorway because the footprint sits between both jambs no matter
+      # what — so DWB has no winner and the robot stalls at the door.
+      # Corner-clipping protection now relies on the tightened inflation
+      # (0.65/4.0) instead of a heavier critic.
+      ObstacleFootprint.scale: 0.5
       ObstacleFootprint.sum_scores: false
       # PathAlign bumped 12 -> 18 so DWB stays tightly centered on the
       # global plan when threading narrow openings (doorways, corridor
