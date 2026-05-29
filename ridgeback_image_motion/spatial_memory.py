@@ -42,6 +42,7 @@ class SpatialMemoryNode(Node):
         self.declare_parameter("observation_topic", "/vlm/observation")
         self.declare_parameter("query_topic", "/memory/query")
         self.declare_parameter("result_topic", "/memory/result")
+        self.declare_parameter("forget_topic", "/memory/forget")
 
         self._min_confidence = float(self.get_parameter("min_confidence").value)
         self._dedup_radius = float(self.get_parameter("dedup_radius_m").value)
@@ -64,6 +65,9 @@ class SpatialMemoryNode(Node):
         )
         self.create_subscription(
             String, self.get_parameter("query_topic").value, self._on_query, 10
+        )
+        self.create_subscription(
+            String, self.get_parameter("forget_topic").value, self._on_forget, 10
         )
         self._pub_result = self.create_publisher(
             String, self.get_parameter("result_topic").value, 10
@@ -122,6 +126,27 @@ class SpatialMemoryNode(Node):
             return
         x, y, yaw, conf = row
         self._publish_result(request_id, room, True, x=x, y=y, yaw=yaw, confidence=conf)
+
+    def _on_forget(self, msg: String) -> None:
+        """Invalidate memory entries. Payloads:
+          {"clear_all": true}    -> wipe every row (used at SLAM session start)
+          {"room": "203"}        -> drop one room (used when an approach to a
+                                    remembered pose fails: the saved coordinate
+                                    is no longer valid).
+        """
+        req = json_loads(msg.data, default={})
+        with self._db_lock:
+            if bool(req.get("clear_all")):
+                self._db.execute("DELETE FROM rooms")
+                self._db.commit()
+                self.get_logger().info("memory: cleared all rooms (session reset)")
+                return
+            room = str(req.get("room") or "").strip().upper()
+            if not room:
+                return
+            self._db.execute("DELETE FROM rooms WHERE room=?", (room,))
+            self._db.commit()
+        self.get_logger().info(f"memory: forgot {room}")
 
     def _publish_result(
         self,

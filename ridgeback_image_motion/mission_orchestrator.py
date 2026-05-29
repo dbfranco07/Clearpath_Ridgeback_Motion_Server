@@ -91,6 +91,7 @@ class MissionOrchestrator(Node):
         self.declare_parameter("vlm_observation_topic", "/vlm/observation")
         self.declare_parameter("memory_query_topic", "/memory/query")
         self.declare_parameter("memory_result_topic", "/memory/result")
+        self.declare_parameter("memory_forget_topic", "/memory/forget")
         self.declare_parameter("safety_latched_topic", "/safety/latched")
         self.declare_parameter("nav_action", "navigate_to_pose")
         # Hard-stop publisher slams zero teleop at this rate for this duration
@@ -139,6 +140,17 @@ class MissionOrchestrator(Node):
         self._safety_latched = True
         self._goal_handle = None
         self._memory_pending: dict[str, dict[str, Any]] = {}
+        # Tracks whether the current approach was sourced from spatial
+        # memory (vs a live VLM detection). Memory poses are only valid
+        # within the SLAM session that recorded them — if the approach
+        # fails, the saved coord is stale and we should drop it and
+        # fall back to exploration.
+        self._approach_source = "vlm"
+        # One-shot flag: clear spatial_memory the first time we capture
+        # a home pose in this process lifetime. The SLAM frame is rebuilt
+        # from scratch every session (tabula rasa per CLAUDE.md) so prior
+        # memory entries refer to a coordinate system that no longer exists.
+        self._memory_cleared_this_session = False
 
         # ROS plumbing
         self._tf_buffer = Buffer()
@@ -179,6 +191,9 @@ class MissionOrchestrator(Node):
         )
         self._pub_memory_query = self.create_publisher(
             String, self.get_parameter("memory_query_topic").value, 10
+        )
+        self._pub_memory_forget = self.create_publisher(
+            String, self.get_parameter("memory_forget_topic").value, 10
         )
         self._pub_teleop = self.create_publisher(
             Twist, self.get_parameter("teleop_topic").value, 10
@@ -382,6 +397,7 @@ class MissionOrchestrator(Node):
         with self._lock:
             self._state = "APPROACHING_ROOM"
             self._target_pose = (x, y, yaw)
+            self._approach_source = source
         self._cancel_frontier(True)
         ps = self._make_pose(x, y, yaw)
         self._send_nav_goal(ps, on_done=self._on_approach_done)
@@ -389,6 +405,23 @@ class MissionOrchestrator(Node):
 
     def _on_approach_done(self, status: int) -> None:
         if status != GoalStatus.STATUS_SUCCEEDED:
+            with self._lock:
+                source = self._approach_source
+                target = self._target_room
+            # If the approach came from spatial_memory, the saved pose is
+            # almost certainly stale (different SLAM frame, or the room
+            # actually moved). Forget the bad entry and re-explore for
+            # the target instead of aborting the whole mission.
+            if source == "memory" and target:
+                self.get_logger().warn(
+                    f"memory-sourced approach to {target} failed (status {status}); "
+                    f"forgetting entry and re-exploring"
+                )
+                forget = String()
+                forget.data = json_dumps({"room": target})
+                self._pub_memory_forget.publish(forget)
+                self._begin_explore_for_target()
+                return
             self._abort(f"approach_failed_status_{status}")
             return
         with self._lock:
@@ -457,6 +490,12 @@ class MissionOrchestrator(Node):
         self.get_logger().info(
             f"home pose captured @ ({ps.pose.position.x:.2f}, {ps.pose.position.y:.2f})"
         )
+        if not self._memory_cleared_this_session:
+            self._memory_cleared_this_session = True
+            forget = String()
+            forget.data = json_dumps({"clear_all": True})
+            self._pub_memory_forget.publish(forget)
+            self.get_logger().info("requested spatial_memory clear (new SLAM session)")
         return True
 
     def _make_pose(self, x: float, y: float, yaw: float) -> PoseStamped:
