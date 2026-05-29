@@ -415,6 +415,7 @@ class MissionOrchestrator(Node):
             with self._lock:
                 source = self._approach_source
                 target = self._target_room
+                home = self._home_pose
             # If the approach came from spatial_memory, the saved pose is
             # almost certainly stale (different SLAM frame, or the room
             # actually moved). Forget the bad entry and re-explore for
@@ -428,6 +429,16 @@ class MissionOrchestrator(Node):
                 forget.data = json_dumps({"room": target})
                 self._pub_memory_forget.publish(forget)
                 self._begin_explore_for_target()
+                return
+            # Live-VLM approach failed (planner couldn't reach the
+            # detected pose, BT recoveries exhausted, etc.). Rather than
+            # leaving the operator with a stranded robot wherever it
+            # gave up, fall back to returning home if one is captured.
+            if home is not None:
+                self.get_logger().warn(
+                    f"approach failed (status {status}); returning home"
+                )
+                self._begin_return_home()
                 return
             self._abort(f"approach_failed_status_{status}")
             return
