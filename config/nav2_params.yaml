@@ -97,11 +97,12 @@ controller_server:
     FollowPath:
       plugin: dwb_core::DWBLocalPlanner
       debug_trajectory_details: false
-      # No reverse: the Hokuyo UST-10LX is 270° front-mounted, so the
-      # rear ~90° wedge is blind. Driving backward in autonomy is unsafe.
-      # Recovery still uses the behavior_server's backup behavior, which
-      # runs short and slow under separate guards.
-      min_vel_x: 0.0
+      # Allow tiny reverse (-0.05 m/s) so DWB's lowest-cost rollout can
+      # nudge the robot ~5-10 cm off a wall when it has parked too close
+      # and every forward trajectory rolls through the inscribed (lethal)
+      # band. Not enough velocity to be "driving backward" — just enough
+      # to break loose. The behavior_server's backup recovery also benefits.
+      min_vel_x: -0.05
       min_vel_y: -0.15
       max_vel_x: 0.15
       max_vel_y: 0.15
@@ -201,12 +202,14 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # 0.75 gives ~12 cm of soft cost buffer beyond the padded
-        # circumscribed radius (0.625 + 0.08 padding = 0.705) — enough
-        # room for DWB to swing the corner-of-robot around a wall corner.
-        # Sharp decay (3.0) keeps narrow doorways still traversable.
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.75
+        # 0.85 extends the soft cost zone past the circumscribed radius
+        # so the robot is pushed off walls during corner rounding. The
+        # inscribed (lethal) radius is unchanged at 0.43 m — doors of
+        # 0.86 m+ still plan through. cost_scaling_factor 2.5 (was 3.0)
+        # gives a gentler decay so high cost lingers a bit further out,
+        # providing more lateral "push" for DWB.
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.85
       always_send_full_costmap: true
 
 global_costmap:
@@ -245,8 +248,8 @@ global_costmap:
           data_type: LaserScan
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.75
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.85
       always_send_full_costmap: true
 
 planner_server:
@@ -256,8 +259,13 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: nav2_navfn_planner/NavfnPlanner
-      tolerance: 0.5
-      use_astar: false
+      # tolerance 1.5 lets the planner accept a path that ends within
+      # 1.5 m of the requested goal. With strict 0.5, marginal goals
+      # near walls or in tight clutter were rejected outright.
+      tolerance: 1.5
+      # A* (directed) sometimes finds a valid path through marginal-cost
+      # cells where the Dijkstra potential-field flood stalls.
+      use_astar: true
       allow_unknown: true
 
 smoother_server:
@@ -317,8 +325,8 @@ velocity_smoother:
     scale_velocities: false
     feedback: OPEN_LOOP
     max_velocity: [0.15, 0.15, 0.20]
-    # No reverse on x — see DWB min_vel_x comment.
-    min_velocity: [0.0, -0.15, -0.20]
+    # Match DWB: tiny reverse band for recovery escape only.
+    min_velocity: [-0.05, -0.15, -0.20]
     max_accel: [0.4, 0.4, 0.20]
     max_decel: [-0.4, -0.4, -0.20]
     odom_topic: /r100_0140/platform/odom/filtered
