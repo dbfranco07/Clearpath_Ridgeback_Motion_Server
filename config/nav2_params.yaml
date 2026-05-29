@@ -149,13 +149,12 @@ controller_server:
       # a holonomic base that strafes close to walls. BaseObstacle samples
       # only the center point and lets corners clip obstacles.
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      # Scale raised 0.5 -> 3.0 to compensate for tighter local-costmap
-      # inflation (0.55/5.0). With less soft-cost push from inflation,
-      # corner-clipping trajectories need a stronger DWB-level penalty so
-      # holonomic strafes don't drag the chassis into wall edges. 3.0 makes
-      # any rolled footprint touching a high-cost cell heavily preferred-against
-      # without dominating the score above PathDist (32) / PathAlign (12).
-      ObstacleFootprint.scale: 3.0
+      # 1.2 is the sweet spot found by trial: 0.5 (default) let corners clip;
+      # 3.0 made doorway traversal impossible because every rollout through a
+      # door has the footprint near both jambs at once, so all trajectories
+      # got penalized and DWB had no winner. 1.2 gives ~2.4x the original
+      # corner-safety push without dominating PathDist (32) / PathAlign (12).
+      ObstacleFootprint.scale: 1.2
       ObstacleFootprint.sum_scores: false
       PathAlign.scale: 12.0
       PathAlign.forward_point_distance: 0.2
@@ -224,17 +223,17 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # LOCAL inflation is tight: 0.55 m radius with sharp 5.0 scaling.
-        # In a ~1 m corridor with static_layer enabled, the previous 0.85/2.5
-        # values left zero non-lethal cells in the middle (inscribed 0.43 m
-        # from each wall = 0.86 m, larger than the corridor), so the planner
-        # refused every goal and behavior_server aborted spin/backup with
-        # "Collision Ahead". Sharp 5.0 scaling gives the soft band ~0.12 m
-        # of width, then cost decays fast. Corner safety is moved to DWB's
-        # ObstacleFootprint critic (scale 3.0) rather than relying on a
-        # wide inflation band to keep the robot off corners.
-        cost_scaling_factor: 5.0
-        inflation_radius: 0.55
+        # LOCAL inflation kept slightly tighter than global. 0.65 m radius with
+        # 4.0 scaling: enough soft-cost push to bias DWB off walls, but the
+        # band is narrow enough that ~1 m corridors and standard doorways
+        # still have plannable non-lethal cells in the middle. The previous
+        # 0.85/2.5 values closed corridors entirely (inscribed 0.43 m from
+        # each wall = 0.86 m of lethal, larger than the corridor) and
+        # behavior_server aborted spin/backup with "Collision Ahead" on
+        # every recovery attempt. Corner safety is also reinforced by DWB's
+        # ObstacleFootprint critic (scale 1.2).
+        cost_scaling_factor: 4.0
+        inflation_radius: 0.65
       always_send_full_costmap: true
 
 global_costmap:
