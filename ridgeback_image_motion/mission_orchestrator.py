@@ -454,10 +454,17 @@ class MissionOrchestrator(Node):
         threading.Timer(6.0, self._confirm_timeout).start()
 
     def _confirm_timeout(self) -> None:
+        # Read state under the lock, RELEASE it, then call the next-step
+        # method. _begin_return_home acquires self._lock itself; nesting the
+        # acquisitions deadlocked the timer thread because self._lock is a
+        # plain (non-reentrant) Lock — the log line printed and then the
+        # thread hung forever waiting on itself.
         with self._lock:
-            if self._state == "CONFIRMING":
-                self.get_logger().info("confirm timeout — proceeding to return home")
-                self._begin_return_home()
+            should_proceed = self._state == "CONFIRMING"
+        if not should_proceed:
+            return
+        self.get_logger().info("confirm timeout — proceeding to return home")
+        self._begin_return_home()
 
     def _begin_return_home(self) -> None:
         with self._lock:
