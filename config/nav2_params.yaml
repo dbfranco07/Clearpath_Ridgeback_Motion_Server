@@ -178,11 +178,12 @@ local_costmap:
       # strafing. Use the actual rectangular footprint.
       footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
       # 5 cm padding absorbs URDF/sensor-mount slop and small TF jitter.
-      # 8 cm padding (was 5). Extra 3 cm uniform buffer absorbs the
-      # remaining corner clipping: LiDAR sees the corner late as the robot
-      # rounds it, and the inflation kernel finishes outside the padded
-      # footprint by ~7 cm — plenty of margin even when TF jitters.
-      footprint_padding: 0.08
+      # 3 cm padding — just enough for TF jitter and URDF rounding.
+      # Larger values push the inscribed (lethal) radius past 0.43 m,
+      # which makes standard 0.81-0.91 m office doors unplannable.
+      # Corner safety is handled by ObstacleFootprint critic + 0.75 m
+      # inflation + 2.5 s sim_time, not by the padding.
+      footprint_padding: 0.03
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
@@ -220,11 +221,12 @@ global_costmap:
       rolling_window: false
       track_unknown_space: true
       footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
-      # 8 cm padding (was 5). Extra 3 cm uniform buffer absorbs the
-      # remaining corner clipping: LiDAR sees the corner late as the robot
-      # rounds it, and the inflation kernel finishes outside the padded
-      # footprint by ~7 cm — plenty of margin even when TF jitters.
-      footprint_padding: 0.08
+      # 3 cm padding — just enough for TF jitter and URDF rounding.
+      # Larger values push the inscribed (lethal) radius past 0.43 m,
+      # which makes standard 0.81-0.91 m office doors unplannable.
+      # Corner safety is handled by ObstacleFootprint critic + 0.75 m
+      # inflation + 2.5 s sim_time, not by the padding.
+      footprint_padding: 0.03
       resolution: 0.05
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
