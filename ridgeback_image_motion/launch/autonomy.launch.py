@@ -278,6 +278,13 @@ def _setup(context, *args, **kwargs):
                     "behavior_server",
                     "behavior_server",
                     nav2_params_file,
+                    # Without this remap, behavior_server's recovery
+                    # commands (spin/backup/drive_on_heading) publish to
+                    # /cmd_vel, which cmd_vel_mux does not subscribe to,
+                    # so the robot never executes any recovery. The
+                    # behavior_server runs each behavior to its timeout
+                    # without the robot moving an inch.
+                    extra_remappings=[("cmd_vel", "/cmd_vel/nav")],
                 ),
                 _nav2_node(
                     "nav2_bt_navigator",
