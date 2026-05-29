@@ -81,6 +81,12 @@ class MissionOrchestrator(Node):
         self.declare_parameter("frontier_status_topic", "/frontier/status")
         self.declare_parameter("frontier_hint_topic", "/frontier/hint")
         self.declare_parameter("enter_idle_on_no_frontiers", True)
+        # Require N consecutive no_frontiers reports before declaring
+        # map_complete. A single report can fire spuriously right after a
+        # goal is sent (recency penalty drops the just-targeted cluster
+        # below threshold, or SLAM updates erode the cluster by one cell).
+        # Without debouncing the mission self-terminates ~3s into the run.
+        self.declare_parameter("no_frontiers_streak_required", 3)
         self.declare_parameter("vlm_trigger_topic", "/vlm/trigger")
         self.declare_parameter("vlm_observation_topic", "/vlm/observation")
         self.declare_parameter("memory_query_topic", "/memory/query")
@@ -113,6 +119,8 @@ class MissionOrchestrator(Node):
         self._approach_offset = float(self.get_parameter("approach_offset_m").value)
         self._memory_timeout = float(self.get_parameter("memory_lookup_timeout_s").value)
         self._idle_on_no_frontiers = bool(self.get_parameter("enter_idle_on_no_frontiers").value)
+        self._no_frontiers_required = int(self.get_parameter("no_frontiers_streak_required").value)
+        self._no_frontiers_streak = 0
 
         # State
         self._lock = threading.Lock()
@@ -259,20 +267,34 @@ class MissionOrchestrator(Node):
 
     def _on_frontier(self, msg: String) -> None:
         info = json_loads(msg.data)
-        if info.get("state") == "no_frontiers":
-            with self._lock:
-                state = self._state
-                target = self._target_room
-            if state != "EXPLORING":
-                return
-            if self._idle_on_no_frontiers:
-                # Map is closed. Don't abort (which slams the hard stop and
-                # leaves the operator with no recovery path) — transition to
-                # IDLE_MAP_COMPLETE so the dashboard can offer the next move.
-                note = "target_not_found" if target else "map_complete"
-                self._enter_idle_map_complete(note)
-            else:
-                self._abort("no_frontiers")
+        state_str = info.get("state")
+        if state_str != "no_frontiers":
+            # Any non-no_frontiers report resets the debounce streak.
+            self._no_frontiers_streak = 0
+            return
+        with self._lock:
+            mission_state = self._state
+            target = self._target_room
+        if mission_state != "EXPLORING":
+            self._no_frontiers_streak = 0
+            return
+        # Don't trust no_frontiers while a goal is still in flight — the
+        # explorer typically just spuriously dropped the just-targeted
+        # cluster below its score threshold. Wait until the goal resolves.
+        if info.get("current_goal") is not None:
+            return
+        self._no_frontiers_streak += 1
+        if self._no_frontiers_streak < self._no_frontiers_required:
+            return
+        self._no_frontiers_streak = 0
+        if self._idle_on_no_frontiers:
+            # Map is closed. Don't abort (which slams the hard stop and
+            # leaves the operator with no recovery path) — transition to
+            # IDLE_MAP_COMPLETE so the dashboard can offer the next move.
+            note = "target_not_found" if target else "map_complete"
+            self._enter_idle_map_complete(note)
+        else:
+            self._abort("no_frontiers")
 
     def _enter_idle_map_complete(self, note: str) -> None:
         self.get_logger().info(f"mission entering IDLE_MAP_COMPLETE: {note}")
