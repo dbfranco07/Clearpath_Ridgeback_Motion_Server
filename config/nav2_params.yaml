@@ -259,10 +259,13 @@ planner_server:
     planner_plugins: ["GridBased"]
     GridBased:
       plugin: nav2_navfn_planner/NavfnPlanner
-      # tolerance 1.5 lets the planner accept a path that ends within
-      # 1.5 m of the requested goal. With strict 0.5, marginal goals
-      # near walls or in tight clutter were rejected outright.
-      tolerance: 1.5
+      # tolerance 0.6 m — wide enough to accept "land near the goal" cases
+      # when the exact frontier cell is borderline-lethal, but not so wide
+      # that the NavFn tolerance search sweeps cells off the costmap edge.
+      # A larger tolerance (we had 1.5) generated hundreds of
+      # `worldToMap failed` log lines per goal whenever a frontier was
+      # near the map boundary.
+      tolerance: 0.6
       # A* (directed) sometimes finds a valid path through marginal-cost
       # cells where the Dijkstra potential-field flood stalls.
       use_astar: true

@@ -69,11 +69,13 @@ class FrontierExplorer(Node):
         self.declare_parameter("max_attempts_per_goal", 2)
         self.declare_parameter("goal_padding_m", 0.3)
         # Reject frontier candidates whose centroid is within this many cells
-        # of the SLAM map edge. The global_costmap (static_layer) trails SLAM
-        # by 1-2 update cycles when the map grows, so edge-cell goals can
-        # transiently land outside the costmap, producing worldToMap-fail
-        # spam from the planner until the goal aborts.
-        self.declare_parameter("edge_margin_cells", 4)
+        # of the SLAM map edge. Must be ≥ ceil(planner tolerance / resolution).
+        # NavFn's tolerance search sweeps cells in an expanding square around
+        # the goal; if those cells overflow the costmap the planner emits a
+        # worldToMap-failed log line per overflow cell. With tolerance 0.6 m
+        # and resolution 0.05 m, the search reaches 12 cells; 16 gives a
+        # 4-cell safety buffer for static_layer/SLAM-map sync lag.
+        self.declare_parameter("edge_margin_cells", 16)
         # Weighted scoring (see _score_cluster). Higher = preferred.
         self.declare_parameter("score_w_info_gain", 1.0)
         self.declare_parameter("score_w_distance", 0.6)
