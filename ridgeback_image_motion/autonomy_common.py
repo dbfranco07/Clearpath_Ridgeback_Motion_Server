@@ -27,6 +27,11 @@ ACTIVE_MISSION_STATES = {
     "RETURNING_TO_START",
 }
 
+# Terminal state entered when the frontier explorer reports "no_frontiers"
+# while a mission was active. NOT in ACTIVE_MISSION_STATES — entering it stops
+# further motion and waits for the next operator goal.
+IDLE_MAP_COMPLETE = "IDLE_MAP_COMPLETE"
+
 
 def parse_intent_and_room(text: str) -> dict[str, str]:
     """Parse an operator command into {intent, room}.

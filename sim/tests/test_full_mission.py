@@ -124,3 +124,66 @@ class TestFullMission:
         metrics = mr.json()
         assert metrics.get("result") in ("success", "DONE")
         assert metrics.get("elapsed_s", 0) > 0
+
+
+# ── Safety FOV veto + map-complete termination ────────────────────────
+
+
+class TestFovBlockExposure:
+    """The dashboard surfaces safety_controller's per-axis veto mask."""
+
+    def test_fov_block_in_status(self, http):
+        r = http.get(f"{DASHBOARD_URL}/api/status", timeout=5.0)
+        assert r.status_code == 200
+        body = r.json()
+        fov = body.get("safety", {}).get("fov_block", {})
+        # Mask may be {} during the first few hundred ms while the safety
+        # controller waits for its first scan — accept that and only validate
+        # the schema once it has been populated.
+        if not fov:
+            time.sleep(1.5)
+            r = http.get(f"{DASHBOARD_URL}/api/status", timeout=5.0)
+            fov = r.json().get("safety", {}).get("fov_block", {})
+        assert fov, "safety.fov_block never appeared in /api/status — is safety_controller publishing /safety/fov_block?"
+        for axis in ("plus_x", "minus_x", "plus_y", "minus_y", "plus_yaw", "minus_yaw"):
+            assert axis in fov, f"fov_block missing axis: {axis}"
+            assert isinstance(fov[axis], bool), f"fov_block.{axis} is not bool: {fov[axis]!r}"
+        # The 270° LiDAR doesn't cover the rear sector; minus_x must report
+        # clear (False) at all times — backing up is never blocked by FOV.
+        assert fov["minus_x"] is False, "minus_x must always be clear (rear unmeasured)"
+
+
+@pytest.mark.integration
+class TestMapCompleteTermination:
+    """When the explorer runs out of viable frontiers, the orchestrator
+    transitions to idle_map_complete instead of aborting hard."""
+
+    def test_unknown_room_eventually_idle_map_complete(self, http):
+        # Pick a room id that no fixture publishes so the explorer cannot
+        # converge on it. We expect the explorer to exhaust frontiers and
+        # the orchestrator to publish state=idle_map_complete.
+        r = http.post(
+            f"{DASHBOARD_URL}/api/mission",
+            json={"command": "go to room 9999", "strategy": "frontier_nearest"},
+            timeout=10.0,
+        )
+        assert r.status_code in (200, 201, 202)
+
+        start = time.time()
+        last_state = None
+        while time.time() - start < MISSION_TIMEOUT_S:
+            time.sleep(5)
+            sr = http.get(f"{DASHBOARD_URL}/api/status", timeout=5.0)
+            state = (sr.json().get("mission", {}).get("command") or "").lower()
+            last_state = state
+            if state == "idle_map_complete":
+                note = sr.json().get("mission", {}).get("note") or ""
+                # Either generic map_complete or target_not_found is fine —
+                # both correctly indicate the explorer terminated cleanly.
+                assert note in ("map_complete", "target_not_found"), (
+                    f"unexpected idle_map_complete note: {note!r}"
+                )
+                return
+        pytest.fail(
+            f"Mission never reached idle_map_complete (last state: {last_state!r})"
+        )

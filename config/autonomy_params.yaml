@@ -28,6 +28,18 @@ safety_controller:
     liveness_timeout_s: 5.0
     publish_rate_hz: 20.0
     require_reset: false
+    # Holonomic LiDAR FOV obstacle check. Publishes a per-axis Boolean
+    # veto mask on fov_block_topic; cmd_vel_mux zeroes any blocked axis.
+    # Ridgeback's 2D LiDAR covers ~270° — the rear ~90° sector is NOT
+    # measured, so minus_x is always reported clear here.
+    scan_topic: ""                  # auto: /<namespace>/sensors/lidar2d_0/scan
+    namespace: r100_0140
+    fov_block_topic: /safety/fov_block
+    fov_min_clearance_forward_m: 0.45
+    fov_min_clearance_lateral_m: 0.35
+    fov_min_clearance_rot_m: 0.30
+    fov_block_hysteresis_s: 0.30
+    fov_scan_max_age_s: 0.5
 
 cmd_vel_mux:
   ros__parameters:
@@ -43,6 +55,9 @@ cmd_vel_mux:
     slow_max_linear: 0.10
     slow_max_lateral: 0.10
     slow_max_angular: 0.30
+    # Per-axis obstacle veto driven by safety_controller's LiDAR FOV check.
+    fov_block_topic: /safety/fov_block
+    fov_block_apply: true
 
 jetson_watchdog:
   ros__parameters:
@@ -60,12 +75,28 @@ frontier_explorer:
     map_topic: /map
     status_topic: /frontier/status
     cancel_topic: /frontier/cancel
+    hint_topic: /frontier/hint
     nav_action: navigate_to_pose
+    base_frame: ""                  # auto: base_link (matches orchestrator)
+    home_frame: map
     min_frontier_size_cells: 10
     goal_blacklist_radius_m: 0.5
     replan_period_s: 6.0
     max_attempts_per_goal: 2
     goal_padding_m: 0.3
+    # Weighted scoring: pick the frontier with the largest info gain per
+    # meter, penalised by recency of visits and proximity to blacklist.
+    # If best_score < min_score_threshold, publish state="no_frontiers"
+    # so the orchestrator can transition to IDLE_MAP_COMPLETE.
+    score_w_info_gain: 1.0
+    score_w_distance: 0.6
+    score_w_recency: 0.4
+    score_w_blacklist_prox: 0.8
+    score_w_hint_align: 0.5
+    recency_window_s: 60.0
+    info_gain_radius_m: 2.0
+    max_distance_cap_m: 8.0
+    min_score_threshold: 0.10
 
 mission_orchestrator:
   ros__parameters:
@@ -89,6 +120,13 @@ mission_orchestrator:
     approach_offset_m: 0.8
     memory_lookup_timeout_s: 1.0
     tick_period_s: 1.0
+    # Frontier hint to bias exploration toward a directional preference
+    # (e.g. unknown target room). Empty hint = no bias (default scoring).
+    frontier_hint_topic: /frontier/hint
+    # When the frontier explorer reports no_frontiers while EXPLORING, switch
+    # to IDLE_MAP_COMPLETE instead of ABORTED. The map is closed; the operator
+    # can issue a new goal or RETURN_TO_START.
+    enter_idle_on_no_frontiers: true
 
 spatial_memory:
   ros__parameters:
@@ -150,3 +188,4 @@ ridgeback_dashboard:
     teleop_max_angular: 1.5
     dashboard_keepalive_period_s: 0.5
     dashboard_keepalive_window_s: 30.0
+    fov_block_topic: /safety/fov_block

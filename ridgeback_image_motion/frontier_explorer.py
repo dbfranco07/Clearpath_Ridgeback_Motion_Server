@@ -2,12 +2,15 @@
 """Frontier-based exploration on the SLAM occupancy grid.
 
 Detects frontier cells (free cells adjacent to unknown cells), groups
-them into clusters, picks the closest viable cluster centroid, and sends
-a NavigateToPose goal. Replans periodically and on goal completion. The
-mission orchestrator can suspend/resume exploration via /frontier/cancel.
+them into clusters, scores each candidate with a weighted utility
+(information gain − distance − recency − blacklist proximity + optional
+direction hint), and sends a NavigateToPose goal to the best one. When
+no candidate scores above the threshold, publishes state="no_frontiers"
+so the mission orchestrator can declare the map complete.
 
-Status JSON published on /frontier/status:
-    {state, current_goal:[x,y], attempts, last_error, frontier_count}
+Status JSON published on /frontier/status (TRANSIENT_LOCAL):
+    {state, current_goal:[x,y], attempts, last_error, frontier_count,
+     blacklist_size, score, ts}
 """
 
 from __future__ import annotations
@@ -24,14 +27,16 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Bool, String
+from tf2_ros import Buffer, TransformException, TransformListener
 
 try:
-    from ridgeback_image_motion.autonomy_common import json_dumps, yaw_to_quaternion
+    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads, yaw_to_quaternion
 except ImportError:
-    from autonomy_common import json_dumps, yaw_to_quaternion  # type: ignore[no-redef]
+    from autonomy_common import json_dumps, json_loads, yaw_to_quaternion  # type: ignore[no-redef]
 
 
 _LATCHED_QOS = QoSProfile(
@@ -49,18 +54,42 @@ class FrontierExplorer(Node):
         self.declare_parameter("map_topic", "/map")
         self.declare_parameter("status_topic", "/frontier/status")
         self.declare_parameter("cancel_topic", "/frontier/cancel")
+        self.declare_parameter("hint_topic", "/frontier/hint")
         self.declare_parameter("nav_action", "navigate_to_pose")
+        self.declare_parameter("base_frame", "")
+        self.declare_parameter("home_frame", "map")
         self.declare_parameter("min_frontier_size_cells", 10)
         self.declare_parameter("goal_blacklist_radius_m", 0.5)
         self.declare_parameter("replan_period_s", 3.0)
         self.declare_parameter("max_attempts_per_goal", 2)
         self.declare_parameter("goal_padding_m", 0.3)
+        # Weighted scoring (see _score_cluster). Higher = preferred.
+        self.declare_parameter("score_w_info_gain", 1.0)
+        self.declare_parameter("score_w_distance", 0.6)
+        self.declare_parameter("score_w_recency", 0.4)
+        self.declare_parameter("score_w_blacklist_prox", 0.8)
+        self.declare_parameter("score_w_hint_align", 0.5)
+        self.declare_parameter("recency_window_s", 60.0)
+        self.declare_parameter("info_gain_radius_m", 2.0)
+        self.declare_parameter("max_distance_cap_m", 8.0)
+        self.declare_parameter("min_score_threshold", 0.10)
 
         self._min_size = int(self.get_parameter("min_frontier_size_cells").value)
         self._blacklist_radius = float(self.get_parameter("goal_blacklist_radius_m").value)
         self._replan_period = float(self.get_parameter("replan_period_s").value)
         self._max_attempts = int(self.get_parameter("max_attempts_per_goal").value)
         self._goal_padding = float(self.get_parameter("goal_padding_m").value)
+        self._base_frame = self.get_parameter("base_frame").value or "base_link"
+        self._home_frame = self.get_parameter("home_frame").value
+        self._w_info = float(self.get_parameter("score_w_info_gain").value)
+        self._w_dist = float(self.get_parameter("score_w_distance").value)
+        self._w_recency = float(self.get_parameter("score_w_recency").value)
+        self._w_blacklist = float(self.get_parameter("score_w_blacklist_prox").value)
+        self._w_hint = float(self.get_parameter("score_w_hint_align").value)
+        self._recency_window = max(float(self.get_parameter("recency_window_s").value), 1.0)
+        self._info_radius = max(float(self.get_parameter("info_gain_radius_m").value), 0.1)
+        self._max_dist_cap = max(float(self.get_parameter("max_distance_cap_m").value), 0.1)
+        self._min_score = float(self.get_parameter("min_score_threshold").value)
 
         self._lock = threading.Lock()
         self._map: OccupancyGrid | None = None
@@ -70,9 +99,15 @@ class FrontierExplorer(Node):
         self._goal_handle = None
         self._attempts: dict[tuple[float, float], int] = {}
         self._blacklist: list[tuple[float, float]] = []
+        self._visited: list[tuple[float, float, float]] = []  # (x, y, ts)
+        self._hint: dict[str, Any] = {}  # {dx, dy, target_room}
         self._last_error = ""
         self._frontier_count = 0
         self._last_replan = 0.0
+        self._last_score = 0.0
+
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
 
         self.create_subscription(
             OccupancyGrid, self.get_parameter("map_topic").value, self._on_map, _LATCHED_QOS
@@ -80,15 +115,20 @@ class FrontierExplorer(Node):
         self.create_subscription(
             Bool, self.get_parameter("cancel_topic").value, self._on_cancel, 10
         )
+        self.create_subscription(
+            String, self.get_parameter("hint_topic").value, self._on_hint, 10
+        )
         self._pub_status = self.create_publisher(
-            String, self.get_parameter("status_topic").value, 10
+            String, self.get_parameter("status_topic").value, _LATCHED_QOS
         )
         self._action = ActionClient(self, NavigateToPose, self.get_parameter("nav_action").value)
         self._timer = self.create_timer(1.0, self._tick)
 
         self.get_logger().info(
             f"frontier_explorer ready (min_size={self._min_size}, "
-            f"blacklist_r={self._blacklist_radius}m, replan={self._replan_period}s)"
+            f"blacklist_r={self._blacklist_radius}m, replan={self._replan_period}s, "
+            f"score_w[info={self._w_info},dist={self._w_dist},rec={self._w_recency},"
+            f"black={self._w_blacklist},hint={self._w_hint}], min_score={self._min_score})"
         )
 
     # --- callbacks ----------------------------------------------------------
@@ -104,6 +144,23 @@ class FrontierExplorer(Node):
                 self._goal_handle.cancel_goal_async()
                 self._goal_handle = None
                 self._current_goal = None
+
+    def _on_hint(self, msg: String) -> None:
+        payload = json_loads(msg.data, default={})
+        dx = float(payload.get("dx", 0.0) or 0.0)
+        dy = float(payload.get("dy", 0.0) or 0.0)
+        norm = math.hypot(dx, dy)
+        if norm > 1e-6:
+            dx, dy = dx / norm, dy / norm
+        else:
+            dx = dy = 0.0
+        with self._lock:
+            self._hint = {
+                "dx": dx,
+                "dy": dy,
+                "target_room": str(payload.get("target_room") or "").upper(),
+                "active": norm > 1e-6,
+            }
 
     # --- main loop ----------------------------------------------------------
     def _tick(self) -> None:
@@ -136,10 +193,19 @@ class FrontierExplorer(Node):
             self._publish_status("no_frontiers")
             return
 
-        goal = self._pick_best_cluster(grid, clusters)
-        if goal is None:
+        result = self._pick_best_cluster(grid, clusters)
+        if result is None:
             self._last_error = "all_blacklisted"
             self._publish_status("blocked")
+            return
+        goal, score = result
+        with self._lock:
+            self._last_score = score
+        if score < self._min_score:
+            # All remaining candidates score below threshold — treat as map
+            # complete. The orchestrator picks this up to enter IDLE_MAP_COMPLETE.
+            self._last_error = "no_frontiers"
+            self._publish_status("no_frontiers")
             return
 
         if active and self._current_goal is not None and self._dist(goal, self._current_goal) < 0.4:
@@ -204,28 +270,149 @@ class FrontierExplorer(Node):
         self,
         grid: OccupancyGrid,
         clusters: list[tuple[int, int, int]],
-    ) -> tuple[float, float] | None:
+    ) -> tuple[tuple[float, float], float] | None:
+        """Weighted-score selection of the best frontier cluster.
+
+        Returns (world_xy, score) for the highest-scoring candidate, or None
+        if every cluster was blacklisted. Score may be negative; the caller
+        decides whether to treat low scores as "map complete".
+        """
         info = grid.info
         ox, oy = float(info.origin.position.x), float(info.origin.position.y)
         res = float(info.resolution)
-        # Robot pose is (0,0) in map until we have TF; rank by cluster size as tiebreaker.
-        candidates: list[tuple[float, float, int]] = []
+        robot = self._lookup_robot_pose()  # (x, y) or None
+        now = time.time()
+        with self._lock:
+            hint = dict(self._hint) if self._hint.get("active") else {}
+            visited = list(self._visited)
+            blacklist = list(self._blacklist)
+
+        # Drop visit history older than 2× the recency window — it can never
+        # contribute meaningfully and grows unbounded otherwise.
+        cutoff = now - 2.0 * self._recency_window
+        if visited:
+            kept = [v for v in visited if v[2] >= cutoff]
+            if len(kept) != len(visited):
+                with self._lock:
+                    self._visited = kept
+
+        best: tuple[tuple[float, float], float, int] | None = None
         for cx, cy, size in clusters:
             wx = ox + (cx + 0.5) * res
             wy = oy + (cy + 0.5) * res
             world = (round(wx, 2), round(wy, 2))
-            if any(self._dist(world, b) < self._blacklist_radius for b in self._blacklist):
+            if any(self._dist(world, b) < self._blacklist_radius for b in blacklist):
                 continue
             attempts = self._attempts.get(world, 0)
             if attempts >= self._max_attempts:
-                self._blacklist.append(world)
+                with self._lock:
+                    if world not in self._blacklist:
+                        self._blacklist.append(world)
                 continue
-            candidates.append((wx, wy, size))
-        if not candidates:
+            score = self._score_cluster(
+                world, size, grid, robot, visited, blacklist, hint, now,
+            )
+            if best is None or score > best[1] or (
+                math.isclose(score, best[1]) and size > best[2]
+            ):
+                best = (world, score, size)
+        if best is None:
             return None
-        # Prefer larger cluster (more unknown to reveal). Ties broken by recency.
-        candidates.sort(key=lambda t: -t[2])
-        return (candidates[0][0], candidates[0][1])
+        return best[0], best[1]
+
+    def _score_cluster(
+        self,
+        world: tuple[float, float],
+        size: int,
+        grid: OccupancyGrid,
+        robot: tuple[float, float] | None,
+        visited: list[tuple[float, float, float]],
+        blacklist: list[tuple[float, float]],
+        hint: dict[str, Any],
+        now: float,
+    ) -> float:
+        info_gain = self._info_gain(grid, world)
+        # Distance penalty: normalised by cap so the term stays in [0, 1].
+        if robot is None:
+            distance_term = 0.0
+        else:
+            d = self._dist(world, robot)
+            distance_term = min(d, self._max_dist_cap) / self._max_dist_cap
+        # Recency: visits closer in time and space hurt more.
+        recency_term = 0.0
+        for vx, vy, vts in visited:
+            age = max(0.0, now - vts)
+            if age > 2.0 * self._recency_window:
+                continue
+            time_decay = math.exp(-age / self._recency_window)
+            spatial = math.exp(-((world[0] - vx) ** 2 + (world[1] - vy) ** 2) / 2.0)
+            recency_term += time_decay * spatial
+        # Blacklist proximity: smooth penalty in addition to the hard filter
+        # above, since a cluster *near* a blacklist point is also suspect.
+        blacklist_term = 0.0
+        if blacklist:
+            sigma2 = max(self._blacklist_radius, 0.1) ** 2
+            for bx, by in blacklist:
+                blacklist_term += math.exp(-((world[0] - bx) ** 2 + (world[1] - by) ** 2) / (2.0 * sigma2))
+        # Hint alignment: only when an orchestrator hint is active *and* we
+        # have a robot pose to anchor the direction.
+        hint_term = 0.0
+        if hint and robot is not None:
+            cx, cy = world[0] - robot[0], world[1] - robot[1]
+            cnorm = math.hypot(cx, cy)
+            if cnorm > 1e-6:
+                hint_term = max(0.0, (cx * hint.get("dx", 0.0) + cy * hint.get("dy", 0.0)) / cnorm)
+        # Tiny cluster-size boost so genuine ties prefer the bigger frontier.
+        size_bonus = 0.01 * min(size, 100) / 100.0
+        return (
+            self._w_info * info_gain
+            - self._w_dist * distance_term
+            - self._w_recency * recency_term
+            - self._w_blacklist * blacklist_term
+            + self._w_hint * hint_term
+            + size_bonus
+        )
+
+    def _info_gain(self, grid: OccupancyGrid, world: tuple[float, float]) -> float:
+        """Fraction of unknown cells inside info_gain_radius around the goal.
+
+        Cheap O(r²/res²) array slice on the existing OccupancyGrid — no extra
+        subscriptions or raycasts. Returns a value in [0, 1].
+        """
+        info = grid.info
+        res = float(info.resolution)
+        if res <= 0.0:
+            return 0.0
+        w, h = int(info.width), int(info.height)
+        ox, oy = float(info.origin.position.x), float(info.origin.position.y)
+        gx = int((world[0] - ox) / res)
+        gy = int((world[1] - oy) / res)
+        r_cells = max(int(self._info_radius / res), 1)
+        x0 = max(0, gx - r_cells)
+        x1 = min(w, gx + r_cells + 1)
+        y0 = max(0, gy - r_cells)
+        y1 = min(h, gy + r_cells + 1)
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        data = np.asarray(grid.data, dtype=np.int8).reshape((h, w))
+        window = data[y0:y1, x0:x1]
+        total = window.size
+        if total == 0:
+            return 0.0
+        unknown = int(np.count_nonzero(window < 0))
+        return unknown / float(total)
+
+    def _lookup_robot_pose(self) -> tuple[float, float] | None:
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                self._home_frame,
+                self._base_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.2),
+            )
+        except TransformException:
+            return None
+        return (float(tf.transform.translation.x), float(tf.transform.translation.y))
 
     # --- nav2 plumbing ------------------------------------------------------
     def _send_goal(self, goal: tuple[float, float]) -> None:
@@ -247,8 +434,11 @@ class FrontierExplorer(Node):
             self._current_goal = goal
             self._active = True
             self._attempts[goal] = self._attempts.get(goal, 0) + 1
+            self._visited.append((goal[0], goal[1], time.time()))
 
-        self.get_logger().info(f"frontier goal -> ({goal[0]:.2f}, {goal[1]:.2f})")
+        self.get_logger().info(
+            f"frontier goal -> ({goal[0]:.2f}, {goal[1]:.2f}) score={self._last_score:.3f}"
+        )
         future = self._action.send_goal_async(msg)
         future.add_done_callback(self._on_goal_response)
         self._publish_status("navigating")
@@ -306,6 +496,8 @@ class FrontierExplorer(Node):
                 "last_error": self._last_error,
                 "frontier_count": self._frontier_count,
                 "blacklist_size": len(self._blacklist),
+                "score": self._last_score,
+                "hint_active": bool(self._hint.get("active", False)),
                 "ts": time.time(),
             }
         msg = String()

@@ -43,6 +43,7 @@ from tf2_ros import Buffer, TransformException, TransformListener
 try:
     from ridgeback_image_motion.autonomy_common import (
         ACTIVE_MISSION_STATES,
+        IDLE_MAP_COMPLETE,
         json_dumps,
         json_loads,
         yaw_to_quaternion,
@@ -50,6 +51,7 @@ try:
 except ImportError:
     from autonomy_common import (  # type: ignore[no-redef]
         ACTIVE_MISSION_STATES,
+        IDLE_MAP_COMPLETE,
         json_dumps,
         json_loads,
         yaw_to_quaternion,
@@ -77,6 +79,8 @@ class MissionOrchestrator(Node):
         self.declare_parameter("home_topic", "/mission/home_pose")
         self.declare_parameter("frontier_cancel_topic", "/frontier/cancel")
         self.declare_parameter("frontier_status_topic", "/frontier/status")
+        self.declare_parameter("frontier_hint_topic", "/frontier/hint")
+        self.declare_parameter("enter_idle_on_no_frontiers", True)
         self.declare_parameter("vlm_trigger_topic", "/vlm/trigger")
         self.declare_parameter("vlm_observation_topic", "/vlm/observation")
         self.declare_parameter("memory_query_topic", "/memory/query")
@@ -108,6 +112,7 @@ class MissionOrchestrator(Node):
         self._max_explore_time = float(self.get_parameter("max_explore_time_s").value)
         self._approach_offset = float(self.get_parameter("approach_offset_m").value)
         self._memory_timeout = float(self.get_parameter("memory_lookup_timeout_s").value)
+        self._idle_on_no_frontiers = bool(self.get_parameter("enter_idle_on_no_frontiers").value)
 
         # State
         self._lock = threading.Lock()
@@ -151,6 +156,9 @@ class MissionOrchestrator(Node):
         )
         self._pub_cancel = self.create_publisher(
             Bool, self.get_parameter("frontier_cancel_topic").value, 10
+        )
+        self._pub_hint = self.create_publisher(
+            String, self.get_parameter("frontier_hint_topic").value, 10
         )
         self._pub_vlm_trigger = self.create_publisher(
             String, self.get_parameter("vlm_trigger_topic").value, 10
@@ -254,8 +262,26 @@ class MissionOrchestrator(Node):
         if info.get("state") == "no_frontiers":
             with self._lock:
                 state = self._state
-            if state in ("EXPLORING",):
+                target = self._target_room
+            if state != "EXPLORING":
+                return
+            if self._idle_on_no_frontiers:
+                # Map is closed. Don't abort (which slams the hard stop and
+                # leaves the operator with no recovery path) — transition to
+                # IDLE_MAP_COMPLETE so the dashboard can offer the next move.
+                note = "target_not_found" if target else "map_complete"
+                self._enter_idle_map_complete(note)
+            else:
                 self._abort("no_frontiers")
+
+    def _enter_idle_map_complete(self, note: str) -> None:
+        self.get_logger().info(f"mission entering IDLE_MAP_COMPLETE: {note}")
+        # Send an empty hint to clear any active direction bias.
+        self._publish_hint("", 0.0, 0.0)
+        self._cancel_frontier(True)
+        with self._lock:
+            self._state = IDLE_MAP_COMPLETE
+        self._publish_state("idle_map_complete", note=note)
 
     def _on_memory_result(self, msg: String) -> None:
         result = json_loads(msg.data)
@@ -284,6 +310,8 @@ class MissionOrchestrator(Node):
         with self._lock:
             self._state = "EXPLORING"
             self._mission_start_ts = time.time()
+        # No target room and no direction bias for free-form explore.
+        self._publish_hint("", 0.0, 0.0)
         self._cancel_frontier(False)
         self._publish_state("exploring")
 
@@ -312,6 +340,12 @@ class MissionOrchestrator(Node):
         with self._lock:
             self._state = "EXPLORING"
             self._mission_start_ts = time.time()
+            target = self._target_room
+        # Hint payload carries the target room so the frontier scoring can
+        # log it; direction (dx, dy) is zero for now because we don't have a
+        # partial detection yet. Future work: bias toward most-recent VLM
+        # observation when one exists below the match threshold.
+        self._publish_hint(target, 0.0, 0.0)
         self._cancel_frontier(False)
         self._publish_state("exploring")
 
@@ -434,6 +468,15 @@ class MissionOrchestrator(Node):
         msg = Bool()
         msg.data = bool(cancel)
         self._pub_cancel.publish(msg)
+
+    def _publish_hint(self, target_room: str, dx: float, dy: float) -> None:
+        msg = String()
+        msg.data = json_dumps({
+            "target_room": target_room or "",
+            "dx": float(dx),
+            "dy": float(dy),
+        })
+        self._pub_hint.publish(msg)
 
     def _engage_hard_stop(self) -> None:
         # Holds cmd_vel_mux on the teleop branch (zero Twist) so any cmd_vel

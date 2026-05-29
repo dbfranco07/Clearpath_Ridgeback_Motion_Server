@@ -812,7 +812,25 @@ async function refreshStatus() {
 
     if (e('mm-intent')) e('mm-intent').textContent = data.mission?.last_intent || 'NONE';
     if (e('mm-room')) e('mm-room').textContent = data.mission?.last_room ? `ROOM ${data.mission.last_room}` : 'NO ROOM';
-    if (e('mm-command')) e('mm-command').textContent = data.mission?.command || '--';
+    if (e('mm-command')) {
+      const cmdState = (data.mission?.command || '--').toString();
+      const note = (data.mission?.note || '').toString();
+      let label = cmdState;
+      let color = '';
+      const cmpStateNoCase = cmdState.toLowerCase();
+      if (cmpStateNoCase === 'idle_map_complete') {
+        label = note === 'target_not_found'
+          ? 'MAP COMPLETE — target not found'
+          : 'MAP COMPLETE';
+        color = 'var(--warn)';
+      } else if (cmpStateNoCase === 'aborted') {
+        color = 'var(--danger)';
+      } else if (cmpStateNoCase === 'done') {
+        color = 'var(--accent)';
+      }
+      e('mm-command').textContent = label;
+      e('mm-command').style.color = color;
+    }
     if (e('mm-mission-count')) e('mm-mission-count').textContent = String(data.memory?.mission_count || 0);
     if (e('mm-loc-count')) e('mm-loc-count').textContent = String(data.memory?.location_count || 0);
     if (e('mm-missions')) e('mm-missions').innerHTML = renderMissionList(data.mission?.recent || []);
@@ -1063,6 +1081,7 @@ class DashboardNode(Node):
         self.declare_parameter("teleop_max_angular", 1.5)
         self.declare_parameter("dashboard_keepalive_period_s", 0.5)
         self.declare_parameter("dashboard_keepalive_window_s", 30.0)
+        self.declare_parameter("fov_block_topic", "/safety/fov_block")
 
         ns = self.get_parameter("namespace").value
         self._params: dict[str, Any] = {
@@ -1084,6 +1103,7 @@ class DashboardNode(Node):
             "frontier_status": self.get_parameter("frontier_status_topic").value,
             "vlm_observation": self.get_parameter("vlm_observation_topic").value,
             "vlm_trigger": self.get_parameter("vlm_trigger_topic").value,
+            "fov_block": self.get_parameter("fov_block_topic").value,
         }
         self._teleop_max = (
             float(self.get_parameter("teleop_max_linear").value),
@@ -1122,6 +1142,7 @@ class DashboardNode(Node):
         self._safety_override: bool = False
         self._mission_state: dict[str, Any] = {}
         self._frontier_status: dict[str, Any] = {}
+        self._fov_block: dict[str, Any] = {}
         self._vlm_events: list[dict[str, Any]] = []
         self._chat_history: list[dict[str, Any]] = []
         self._last_teleop_source: str = "none"
@@ -1147,6 +1168,7 @@ class DashboardNode(Node):
         self.create_subscription(String, self._params["mission_state"], self._on_mission_state, _LATCHED_QOS)
         self.create_subscription(String, self._params["frontier_status"], self._on_frontier_status, 10)
         self.create_subscription(String, self._params["vlm_observation"], self._on_vlm, 10)
+        self.create_subscription(String, self._params["fov_block"], self._on_fov_block, _LATCHED_QOS)
 
         # Publishers
         self._pub_teleop = self.create_publisher(Twist, self._params["teleop"], 10)
@@ -1282,6 +1304,10 @@ class DashboardNode(Node):
         with self._lock:
             self._frontier_status = json_loads(msg.data, default={})
 
+    def _on_fov_block(self, msg: String) -> None:
+        with self._lock:
+            self._fov_block = json_loads(msg.data, default={})
+
     def _on_vlm(self, msg: String) -> None:
         evt = json_loads(msg.data, default={})
         if not evt:
@@ -1416,6 +1442,7 @@ class DashboardNode(Node):
                     "stop_recommended": self._safety_latched and not self._safety_override,
                     "reasons": (["override"] if self._safety_override else (["safety_latched"] if self._safety_latched else [])),
                     "override": self._safety_override,
+                    "fov_block": dict(self._fov_block),
                 },
                 "teleop": {
                     "status": "active" if (now - self._last_teleop_stamp) < 1.0 else "idle",
@@ -1427,6 +1454,7 @@ class DashboardNode(Node):
                     "last_intent": self._mission_state.get("intent", ""),
                     "last_room": self._mission_state.get("room", ""),
                     "command": self._mission_state.get("state", ""),
+                    "note": self._mission_state.get("note", ""),
                     "recent": self._mission_state.get("recent", []),
                 },
                 "memory": {

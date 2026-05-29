@@ -27,11 +27,13 @@ import cv2
 import numpy as np
 import rclpy
 import requests
+from builtin_interfaces.msg import Time as TimeMsg
 from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time as RclpyTime
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from tf2_ros import Buffer, TransformException, TransformListener
@@ -163,6 +165,15 @@ class VlmClient(Node):
         self.declare_parameter("jpeg_quality", 80)
         self.declare_parameter("request_timeout_s", 8.0)
         self.declare_parameter("prompt", _DEFAULT_PROMPT)
+        # Majority-vote dedup: a non-empty room detection that hasn't been
+        # corroborated by another frame in the last vote_window_s at a similar
+        # pose (bucketed to vote_bucket_m) is published with confidence
+        # multiplied by vote_singleton_factor. Once two detections agree at
+        # the same pose bucket, full confidence is passed through.
+        self.declare_parameter("vote_window_s", 2.0)
+        self.declare_parameter("vote_buffer_size", 3)
+        self.declare_parameter("vote_bucket_m", 0.5)
+        self.declare_parameter("vote_singleton_factor", 0.5)
 
         ns = self.get_parameter("namespace").value
         self._color_topic = (
@@ -209,9 +220,19 @@ class VlmClient(Node):
         self._lock = threading.Lock()
         self._latest_image: np.ndarray | None = None
         self._image_stamp = 0.0
+        self._image_ros_stamp: TimeMsg | None = None
         self._speed = 0.0
         self._last_periodic = 0.0
         self._busy = False
+        # Recent detections for majority-vote dedup: each entry is
+        # (room, bucket_x, bucket_y, ts).
+        self._vote_window = max(float(self.get_parameter("vote_window_s").value), 0.1)
+        self._vote_buffer_size = max(int(self.get_parameter("vote_buffer_size").value), 1)
+        self._vote_bucket = max(float(self.get_parameter("vote_bucket_m").value), 0.05)
+        self._vote_singleton_factor = max(
+            min(float(self.get_parameter("vote_singleton_factor").value), 1.0), 0.0
+        )
+        self._recent_detections: list[tuple[str, int, int, float]] = []
 
         sensor_qos = QoSProfile(
             depth=5,
@@ -249,6 +270,9 @@ class VlmClient(Node):
         with self._lock:
             self._latest_image = cv
             self._image_stamp = time.time()
+            # Hold the ROS header stamp so _lookup_pose() can query TF at the
+            # exact moment of capture, not whenever the VLM happens to reply.
+            self._image_ros_stamp = msg.header.stamp
 
     def _on_odom(self, msg: Odometry) -> None:
         v = msg.twist.twist.linear
@@ -309,6 +333,7 @@ class VlmClient(Node):
             self._busy = True
             img = None if self._latest_image is None else self._latest_image.copy()
             stamp = self._image_stamp
+            ros_stamp = self._image_ros_stamp
         if img is None:
             with self._lock:
                 self._busy = False
@@ -326,13 +351,18 @@ class VlmClient(Node):
             answer, error = self._call_vlm(b64, room_hint, prompt_override)
             latency_ms = (time.time() - t0) * 1000.0
             parsed = self._parse_answer(answer) if not prompt_override else {}
-            pose = self._lookup_pose()
+            pose = self._lookup_pose(ros_stamp)
+            raw_room = str(parsed.get("room", "") or "").strip().upper()
+            raw_conf = float(parsed.get("confidence") or 0.0)
+            adjusted_conf, vote_count = self._apply_vote(raw_room, pose, raw_conf)
             obs = {
                 "kind": kind,
                 "intent": intent,
                 "room_hint": room_hint,
-                "room": parsed.get("room", ""),
-                "confidence": float(parsed.get("confidence") or 0.0),
+                "room": raw_room,
+                "confidence": adjusted_conf,
+                "raw_confidence": raw_conf,
+                "vote_count": vote_count,
                 "reason": parsed.get("reason", ""),
                 "text": answer or error,
                 "status": "ok" if not error else "error",
@@ -346,8 +376,10 @@ class VlmClient(Node):
             msg.data = json_dumps(obs)
             self._pub_obs.publish(msg)
             if obs["room"]:
+                vote_note = f" vote={vote_count}/{self._vote_buffer_size}"
                 self.get_logger().info(
-                    f"vlm[{kind}] -> room={obs['room']} conf={obs['confidence']:.2f} ({latency_ms:.0f} ms)"
+                    f"vlm[{kind}] -> room={obs['room']} conf={obs['confidence']:.2f}"
+                    f" (raw={raw_conf:.2f}{vote_note}, {latency_ms:.0f} ms)"
                 )
             elif kind == "answer":
                 snippet = (answer or error or "").strip().replace("\n", " ")[:80]
@@ -430,21 +462,75 @@ class VlmClient(Node):
             return {"room": m.group(1), "confidence": 0.5}
         return {}
 
-    def _lookup_pose(self) -> dict[str, float]:
+    def _lookup_pose(self, image_stamp: TimeMsg | None = None) -> dict[str, float]:
+        # Query TF at the *image capture time* so the pose attached to a
+        # detection matches where the robot actually was when it took the
+        # picture — not where it ended up by the time the VLM replied (which
+        # can be hundreds of ms later for remote VLLM endpoints).
+        if image_stamp is not None:
+            stamp = RclpyTime.from_msg(image_stamp)
+        else:
+            stamp = rclpy.time.Time()
         try:
             tf = self._tf_buffer.lookup_transform(
                 self._home_frame,
                 self._base_frame,
-                rclpy.time.Time(),
+                stamp,
                 timeout=Duration(seconds=0.2),
             )
         except TransformException:
-            return {}
+            # Fall back to "latest available" — better an approximate pose
+            # than none, but log throttled so we know when we lose precision.
+            if image_stamp is None:
+                return {}
+            try:
+                tf = self._tf_buffer.lookup_transform(
+                    self._home_frame,
+                    self._base_frame,
+                    rclpy.time.Time(),
+                    timeout=Duration(seconds=0.2),
+                )
+            except TransformException:
+                return {}
+            self.get_logger().warn(
+                "TF lookup at image stamp failed; using latest TF (pose may be stale)",
+                throttle_duration_sec=5.0,
+            )
         return {
             "x": float(tf.transform.translation.x),
             "y": float(tf.transform.translation.y),
             "yaw": quaternion_to_yaw_rad(tf.transform.rotation),
         }
+
+    def _apply_vote(
+        self, room: str, pose: dict[str, float], raw_conf: float,
+    ) -> tuple[float, int]:
+        """Majority-vote dedup over a small ring of recent detections.
+
+        Returns (adjusted_confidence, vote_count). Empty rooms bypass the
+        vote entirely and pass through with their original confidence.
+        """
+        if not room:
+            return raw_conf, 0
+        now = time.time()
+        bx = int(round(float(pose.get("x", 0.0) or 0.0) / self._vote_bucket))
+        by = int(round(float(pose.get("y", 0.0) or 0.0) / self._vote_bucket))
+        with self._lock:
+            # Drop expired entries first.
+            cutoff = now - self._vote_window
+            self._recent_detections = [
+                d for d in self._recent_detections if d[3] >= cutoff
+            ]
+            count = 1 + sum(
+                1 for r, ex, ey, _ts in self._recent_detections
+                if r == room and ex == bx and ey == by
+            )
+            self._recent_detections.append((room, bx, by, now))
+            if len(self._recent_detections) > self._vote_buffer_size:
+                self._recent_detections = self._recent_detections[-self._vote_buffer_size:]
+        if count >= 2:
+            return raw_conf, count
+        return raw_conf * self._vote_singleton_factor, count
 
 
 def main() -> None:
