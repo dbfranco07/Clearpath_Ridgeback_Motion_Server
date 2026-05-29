@@ -58,8 +58,13 @@ class FrontierExplorer(Node):
         self.declare_parameter("nav_action", "navigate_to_pose")
         self.declare_parameter("base_frame", "")
         self.declare_parameter("home_frame", "map")
-        self.declare_parameter("min_frontier_size_cells", 10)
-        self.declare_parameter("goal_blacklist_radius_m", 0.5)
+        # 25 cells (~1.25 m at 0.05 res) is comfortably above clutter strips
+        # while a real doorway frontier is typically 30-60 cells.
+        self.declare_parameter("min_frontier_size_cells", 25)
+        # 1.0 m so a single failed cluster blanks out the whole local patch,
+        # preventing the explorer from rediscovering the same trap by
+        # shifting the centroid 50-60 cm.
+        self.declare_parameter("goal_blacklist_radius_m", 1.0)
         self.declare_parameter("replan_period_s", 3.0)
         self.declare_parameter("max_attempts_per_goal", 2)
         self.declare_parameter("goal_padding_m", 0.3)
@@ -69,6 +74,13 @@ class FrontierExplorer(Node):
         self.declare_parameter("score_w_recency", 0.4)
         self.declare_parameter("score_w_blacklist_prox", 0.8)
         self.declare_parameter("score_w_hint_align", 0.5)
+        # Penalty for clutter-induced "leaky" frontiers. Real openings
+        # (doorways) have very few obstacle cells within 1 m of the
+        # centroid; clutter forests (chair legs, fences) are dense with
+        # them. This term is the difference between this honest signal
+        # and the honeypot trap.
+        self.declare_parameter("score_w_clutter", 0.7)
+        self.declare_parameter("clutter_radius_m", 1.0)
         self.declare_parameter("recency_window_s", 60.0)
         self.declare_parameter("info_gain_radius_m", 2.0)
         self.declare_parameter("max_distance_cap_m", 8.0)
@@ -86,6 +98,8 @@ class FrontierExplorer(Node):
         self._w_recency = float(self.get_parameter("score_w_recency").value)
         self._w_blacklist = float(self.get_parameter("score_w_blacklist_prox").value)
         self._w_hint = float(self.get_parameter("score_w_hint_align").value)
+        self._w_clutter = float(self.get_parameter("score_w_clutter").value)
+        self._clutter_radius = max(float(self.get_parameter("clutter_radius_m").value), 0.1)
         self._recency_window = max(float(self.get_parameter("recency_window_s").value), 1.0)
         self._info_radius = max(float(self.get_parameter("info_gain_radius_m").value), 0.1)
         self._max_dist_cap = max(float(self.get_parameter("max_distance_cap_m").value), 0.1)
@@ -128,7 +142,8 @@ class FrontierExplorer(Node):
             f"frontier_explorer ready (min_size={self._min_size}, "
             f"blacklist_r={self._blacklist_radius}m, replan={self._replan_period}s, "
             f"score_w[info={self._w_info},dist={self._w_dist},rec={self._w_recency},"
-            f"black={self._w_blacklist},hint={self._w_hint}], min_score={self._min_score})"
+            f"black={self._w_blacklist},clutter={self._w_clutter},hint={self._w_hint}], "
+            f"min_score={self._min_score})"
         )
 
     # --- callbacks ----------------------------------------------------------
@@ -233,14 +248,19 @@ class FrontierExplorer(Node):
         shifted[:, :-1] |= unknown[:, 1:]
         frontier = free & shifted
 
-        # Erode near obstacles slightly so we don't try to drive into walls.
-        for _ in range(1):
+        # Erode 2 cells (~10 cm) near obstacles to kill thin LiDAR-stripe
+        # frontiers between clutter (chair/table legs, fences). Those
+        # generate scoring honeypots that look like high-info goals but
+        # are unreachable. Real openings (doorways) survive easily.
+        for _ in range(2):
             obstacle_neighbor = np.zeros_like(obstacle)
             obstacle_neighbor[1:, :] |= obstacle[:-1, :]
             obstacle_neighbor[:-1, :] |= obstacle[1:, :]
             obstacle_neighbor[:, 1:] |= obstacle[:, :-1]
             obstacle_neighbor[:, :-1] |= obstacle[:, 1:]
             frontier &= ~obstacle_neighbor
+            # Grow obstacle for the next iteration so erosion compounds.
+            obstacle = obstacle | obstacle_neighbor
 
         # Connected-components via flood fill (BFS).
         visited = np.zeros_like(frontier)
@@ -362,6 +382,9 @@ class FrontierExplorer(Node):
             cnorm = math.hypot(cx, cy)
             if cnorm > 1e-6:
                 hint_term = max(0.0, (cx * hint.get("dx", 0.0) + cy * hint.get("dy", 0.0)) / cnorm)
+        # Clutter penalty: candidates surrounded by obstacle cells are
+        # almost certainly LiDAR-strip honeypots, not real openings.
+        clutter_term = self._clutter_fraction(grid, world)
         # Tiny cluster-size boost so genuine ties prefer the bigger frontier.
         size_bonus = 0.01 * min(size, 100) / 100.0
         return (
@@ -369,6 +392,7 @@ class FrontierExplorer(Node):
             - self._w_dist * distance_term
             - self._w_recency * recency_term
             - self._w_blacklist * blacklist_term
+            - self._w_clutter * clutter_term
             + self._w_hint * hint_term
             + size_bonus
         )
@@ -401,6 +425,36 @@ class FrontierExplorer(Node):
             return 0.0
         unknown = int(np.count_nonzero(window < 0))
         return unknown / float(total)
+
+    def _clutter_fraction(self, grid: OccupancyGrid, world: tuple[float, float]) -> float:
+        """Fraction of obstacle cells inside clutter_radius around the goal.
+
+        A real doorway / open-room frontier has very few obstacle cells
+        within ~1 m of its centroid. A LiDAR-strip honeypot is dense with
+        them. Returns a value in [0, 1].
+        """
+        info = grid.info
+        res = float(info.resolution)
+        if res <= 0.0:
+            return 0.0
+        w, h = int(info.width), int(info.height)
+        ox, oy = float(info.origin.position.x), float(info.origin.position.y)
+        gx = int((world[0] - ox) / res)
+        gy = int((world[1] - oy) / res)
+        r_cells = max(int(self._clutter_radius / res), 1)
+        x0 = max(0, gx - r_cells)
+        x1 = min(w, gx + r_cells + 1)
+        y0 = max(0, gy - r_cells)
+        y1 = min(h, gy + r_cells + 1)
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        data = np.asarray(grid.data, dtype=np.int8).reshape((h, w))
+        window = data[y0:y1, x0:x1]
+        total = window.size
+        if total == 0:
+            return 0.0
+        obstacle = int(np.count_nonzero(window > 50))
+        return obstacle / float(total)
 
     def _lookup_robot_pose(self) -> tuple[float, float] | None:
         try:

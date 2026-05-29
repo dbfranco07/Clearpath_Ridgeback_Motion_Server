@@ -121,7 +121,11 @@ controller_server:
       vx_samples: 14
       vy_samples: 14
       vtheta_samples: 16
-      sim_time: 1.7
+      # 2.5 s rollout. At max_vel_x 0.15 that's ~37 cm of forward
+      # lookahead, enough for DWB to see and avoid a corner before the
+      # footprint reaches it. The previous 1.7 s only looked 25 cm ahead
+      # — barely past the front of the robot.
+      sim_time: 2.5
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 1.0
@@ -174,7 +178,11 @@ local_costmap:
       # strafing. Use the actual rectangular footprint.
       footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
       # 5 cm padding absorbs URDF/sensor-mount slop and small TF jitter.
-      footprint_padding: 0.05
+      # 8 cm padding (was 5). Extra 3 cm uniform buffer absorbs the
+      # remaining corner clipping: LiDAR sees the corner late as the robot
+      # rounds it, and the inflation kernel finishes outside the padded
+      # footprint by ~7 cm — plenty of margin even when TF jitters.
+      footprint_padding: 0.08
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
@@ -192,11 +200,12 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # 0.70 > circumscribed radius (√(0.48² + 0.40²) ≈ 0.625), so corners
-        # are covered when rotating in place. Sharper decay (3.0) keeps
-        # narrow corridors traversable despite the larger radius.
+        # 0.75 gives ~12 cm of soft cost buffer beyond the padded
+        # circumscribed radius (0.625 + 0.08 padding = 0.705) — enough
+        # room for DWB to swing the corner-of-robot around a wall corner.
+        # Sharp decay (3.0) keeps narrow doorways still traversable.
         cost_scaling_factor: 3.0
-        inflation_radius: 0.70
+        inflation_radius: 0.75
       always_send_full_costmap: true
 
 global_costmap:
@@ -211,7 +220,11 @@ global_costmap:
       rolling_window: false
       track_unknown_space: true
       footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
-      footprint_padding: 0.05
+      # 8 cm padding (was 5). Extra 3 cm uniform buffer absorbs the
+      # remaining corner clipping: LiDAR sees the corner late as the robot
+      # rounds it, and the inflation kernel finishes outside the padded
+      # footprint by ~7 cm — plenty of margin even when TF jitters.
+      footprint_padding: 0.08
       resolution: 0.05
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
