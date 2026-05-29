@@ -190,7 +190,18 @@ local_costmap:
       # Corner safety is handled by ObstacleFootprint critic + 0.75 m
       # inflation + 2.5 s sim_time, not by the padding.
       footprint_padding: 0.03
-      plugins: ["obstacle_layer", "inflation_layer"]
+      # static_layer added to the LOCAL costmap (it was already in global)
+      # so DWB and the behavior_server's "Collision Ahead" check see the
+      # SLAM-mapped walls behind the robot. The Hokuyo UST-10LX is 270°
+      # front-mounted: live LiDAR misses the rear ~90° wedge entirely.
+      # Without the static layer here, the robot would happily back into
+      # a wall it had mapped two minutes earlier — the local costmap
+      # showed empty space because no live ray was hitting that wall.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: nav2_costmap_2d::StaticLayer
+        map_subscribe_transient_local: true
+        subscribe_to_updates: true
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
