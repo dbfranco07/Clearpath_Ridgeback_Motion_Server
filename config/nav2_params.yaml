@@ -290,9 +290,16 @@ planner_server:
       # `worldToMap failed` log lines per goal whenever a frontier was
       # near the map boundary.
       tolerance: 0.6
-      # A* (directed) sometimes finds a valid path through marginal-cost
-      # cells where the Dijkstra potential-field flood stalls.
-      use_astar: true
+      # use_astar reverted to false (Dijkstra). A* repeatedly hit
+      # "Failed to create a plan from potential when a legal potential was
+      # found" on fresh/sparse maps — the A* backtrace can't follow the
+      # gradient through flat-cost regions of unknown space (allow_unknown
+      # makes large swaths cost-equal). Dijkstra's full potential flood
+      # gives a smooth gradient everywhere reachable, so getPlanFromPotential
+      # always succeeds. Slightly slower per plan but correct on tabula-rasa
+      # exploration starts. If Dijkstra stalls in dense corridors later,
+      # consider migrating to SmacPlanner2D rather than flipping back.
+      use_astar: false
       allow_unknown: true
 
 smoother_server:
@@ -339,6 +346,12 @@ behavior_server:
     max_rotational_vel: 0.20
     min_rotational_vel: 0.08
     rotational_acc_lim: 0.25
+    # The default spin time_allowance is 10 s, but at max_rotational_vel
+    # 0.20 the 1.57 rad spin needs ~8.5 s of cruise + ~0.8 s accel +
+    # ~0.8 s decel ≈ 10.1 s — every spin recovery times out at the
+    # boundary with "Exceeded time allowance". 20 s is comfortably above
+    # worst-case so spin can actually complete.
+    spin.time_allowance: 20.0
 
 waypoint_follower:
   ros__parameters:
