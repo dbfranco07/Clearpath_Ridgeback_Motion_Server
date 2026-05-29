@@ -68,6 +68,12 @@ class FrontierExplorer(Node):
         self.declare_parameter("replan_period_s", 3.0)
         self.declare_parameter("max_attempts_per_goal", 2)
         self.declare_parameter("goal_padding_m", 0.3)
+        # Reject frontier candidates whose centroid is within this many cells
+        # of the SLAM map edge. The global_costmap (static_layer) trails SLAM
+        # by 1-2 update cycles when the map grows, so edge-cell goals can
+        # transiently land outside the costmap, producing worldToMap-fail
+        # spam from the planner until the goal aborts.
+        self.declare_parameter("edge_margin_cells", 4)
         # Weighted scoring (see _score_cluster). Higher = preferred.
         self.declare_parameter("score_w_info_gain", 1.0)
         self.declare_parameter("score_w_distance", 0.6)
@@ -96,6 +102,7 @@ class FrontierExplorer(Node):
         self._replan_period = float(self.get_parameter("replan_period_s").value)
         self._max_attempts = int(self.get_parameter("max_attempts_per_goal").value)
         self._goal_padding = float(self.get_parameter("goal_padding_m").value)
+        self._edge_margin = int(self.get_parameter("edge_margin_cells").value)
         self._base_frame = self.get_parameter("base_frame").value or "base_link"
         self._home_frame = self.get_parameter("home_frame").value
         self._w_info = float(self.get_parameter("score_w_info_gain").value)
@@ -302,7 +309,20 @@ class FrontierExplorer(Node):
                 count += 1
                 stack.extend(((cy + 1, cx), (cy - 1, cx), (cy, cx + 1), (cy, cx - 1)))
             if count >= self._min_size:
-                clusters.append((sum_x // count, sum_y // count, count))
+                cx_centroid = sum_x // count
+                cy_centroid = sum_y // count
+                # Drop centroids near the SLAM map boundary — the global
+                # costmap may not have grown to match yet, and sending a
+                # Nav2 goal at an off-costmap pose produces worldToMap-fail
+                # spam until the BT recovery cascade aborts the goal.
+                if (
+                    cx_centroid < self._edge_margin
+                    or cx_centroid >= w - self._edge_margin
+                    or cy_centroid < self._edge_margin
+                    or cy_centroid >= h - self._edge_margin
+                ):
+                    continue
+                clusters.append((cx_centroid, cy_centroid, count))
         return clusters
 
     def _pick_best_cluster(

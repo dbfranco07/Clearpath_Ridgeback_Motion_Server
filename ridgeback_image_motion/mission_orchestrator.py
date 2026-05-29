@@ -46,6 +46,7 @@ try:
         IDLE_MAP_COMPLETE,
         json_dumps,
         json_loads,
+        normalize_room_id,
         yaw_to_quaternion,
     )
 except ImportError:
@@ -54,6 +55,7 @@ except ImportError:
         IDLE_MAP_COMPLETE,
         json_dumps,
         json_loads,
+        normalize_room_id,
         yaw_to_quaternion,
     )
 
@@ -220,7 +222,9 @@ class MissionOrchestrator(Node):
     def _on_goal(self, msg: String) -> None:
         payload = json_loads(msg.data)
         intent = (payload.get("intent") or "").upper()
-        room = (payload.get("room") or "").strip().upper()
+        # Normalize so "Room 205" / "RM 205" / "205" all map to "205" — the
+        # same form that normalize_room_id produces from VLM observations.
+        room = normalize_room_id(payload.get("room") or "")
         command = payload.get("command") or ""
         self.get_logger().info(f"mission goal received: intent={intent} room={room}")
         with self._lock:
@@ -262,7 +266,10 @@ class MissionOrchestrator(Node):
             state = self._state
         if not target or state not in ("EXPLORING", "CONFIRMING", "APPROACHING_ROOM"):
             return
-        room = (evt.get("room") or "").strip().upper()
+        # VLM emits things like "RM 205" — normalize to bare digit form so it
+        # matches the operator's "205". Without this, every high-confidence
+        # observation is silently dropped and the mission never advances.
+        room = normalize_room_id(evt.get("room") or "")
         if room != target:
             return
         confidence = float(evt.get("confidence") or 0.0)

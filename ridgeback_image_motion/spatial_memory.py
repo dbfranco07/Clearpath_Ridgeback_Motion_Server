@@ -24,9 +24,17 @@ from rclpy.node import Node
 from std_msgs.msg import String
 
 try:
-    from ridgeback_image_motion.autonomy_common import json_dumps, json_loads
+    from ridgeback_image_motion.autonomy_common import (
+        json_dumps,
+        json_loads,
+        normalize_room_id,
+    )
 except ImportError:
-    from autonomy_common import json_dumps, json_loads  # type: ignore[no-redef]
+    from autonomy_common import (  # type: ignore[no-redef]
+        json_dumps,
+        json_loads,
+        normalize_room_id,
+    )
 
 
 _DEFAULT_DB = Path.home() / ".ridgeback" / "spatial_memory.sqlite"
@@ -80,7 +88,7 @@ class SpatialMemoryNode(Node):
     # --- callbacks ----------------------------------------------------------
     def _on_observation(self, msg: String) -> None:
         evt = json_loads(msg.data)
-        room = str(evt.get("room") or "").strip().upper()
+        room = normalize_room_id(str(evt.get("room") or ""))
         confidence = float(evt.get("confidence") or 0.0)
         if not room or confidence < self._min_confidence:
             return
@@ -112,7 +120,7 @@ class SpatialMemoryNode(Node):
 
     def _on_query(self, msg: String) -> None:
         req = json_loads(msg.data)
-        room = str(req.get("room") or "").strip().upper()
+        room = normalize_room_id(str(req.get("room") or ""))
         request_id = req.get("request_id", "")
         if not room:
             self._publish_result(request_id, room, False)
@@ -141,7 +149,7 @@ class SpatialMemoryNode(Node):
                 self._db.commit()
                 self.get_logger().info("memory: cleared all rooms (session reset)")
                 return
-            room = str(req.get("room") or "").strip().upper()
+            room = normalize_room_id(str(req.get("room") or ""))
             if not room:
                 return
             self._db.execute("DELETE FROM rooms WHERE room=?", (room,))

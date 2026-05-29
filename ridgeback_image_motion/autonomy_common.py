@@ -33,6 +33,25 @@ ACTIVE_MISSION_STATES = {
 IDLE_MAP_COMPLETE = "IDLE_MAP_COMPLETE"
 
 
+def normalize_room_id(s: str) -> str:
+    """Canonical room ID from any source string.
+
+    'Room 205', 'RM 205', 'rm.205', 'R 205', '205', 'room#205A' -> '205' / '205A'.
+    Used to make orchestrator/memory/VLM string comparisons robust to the
+    prefix the VLM tends to emit. Returns "" if no room-like token found.
+    """
+    if not s:
+        return ""
+    lowered = s.strip().lower()
+    m = re.search(r"(?:room|rm|r)\s*[#.:]?\s*([a-z]?\d{2,4}[a-z]?)", lowered)
+    if m:
+        return m.group(1).upper()
+    m = re.search(r"\b([a-z]?\d{2,4}[a-z]?)\b", lowered)
+    if m:
+        return m.group(1).upper()
+    return s.strip().upper()
+
+
 def parse_intent_and_room(text: str) -> dict[str, str]:
     """Parse an operator command into {intent, room}.
 
