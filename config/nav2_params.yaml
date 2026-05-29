@@ -124,8 +124,13 @@ controller_server:
       # gentle, not the snappy 32-scale default. Angular max_vel / accel are
       # also low (see above). Oscillation is high to suppress flip-flop when
       # the frontier replan picks a different bearing.
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      BaseObstacle.scale: 0.02
+      # ObstacleFootprint (not BaseObstacle) rolls the full rectangular
+      # footprint over the costmap during trajectory scoring — required for
+      # a holonomic base that strafes close to walls. BaseObstacle samples
+      # only the center point and lets corners clip obstacles.
+      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      ObstacleFootprint.scale: 0.5
+      ObstacleFootprint.sum_scores: false
       PathAlign.scale: 12.0
       PathAlign.forward_point_distance: 0.2
       GoalAlign.scale: 8.0
@@ -155,6 +160,8 @@ local_costmap:
       # so DWB could plan paths that clipped door frames during holonomic
       # strafing. Use the actual rectangular footprint.
       footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
+      # 5 cm padding absorbs URDF/sensor-mount slop and small TF jitter.
+      footprint_padding: 0.05
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
@@ -172,8 +179,11 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 2.5
-        inflation_radius: 0.55
+        # 0.70 > circumscribed radius (√(0.48² + 0.40²) ≈ 0.625), so corners
+        # are covered when rotating in place. Sharper decay (3.0) keeps
+        # narrow corridors traversable despite the larger radius.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.70
       always_send_full_costmap: true
 
 global_costmap:
@@ -188,6 +198,7 @@ global_costmap:
       rolling_window: false
       track_unknown_space: true
       footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
+      footprint_padding: 0.05
       resolution: 0.05
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
@@ -206,8 +217,8 @@ global_costmap:
           data_type: LaserScan
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 2.5
-        inflation_radius: 0.65
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.75
       always_send_full_costmap: true
 
 planner_server:
