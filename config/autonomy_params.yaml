@@ -35,9 +35,24 @@ safety_controller:
     scan_topic: ""                  # auto: /<namespace>/sensors/lidar2d_0/scan
     namespace: r100_0140
     fov_block_topic: /safety/fov_block
-    fov_min_clearance_forward_m: 0.45
-    fov_min_clearance_lateral_m: 0.35
-    fov_min_clearance_rot_m: 0.30
+    # These are LAST-RESORT near-collision backstops, NOT the primary obstacle
+    # avoider (Nav2's costmap + real footprint + ObstacleFootprint critic does
+    # that). safety_controller adds the footprint extent on top of these values
+    # before vetoing (forward +0.48, lateral +0.40, rot +0.625 circumscribed),
+    # and the LiDAR sits at the robot CENTER. So the effective veto distance
+    # from the robot's CENTER is (value + footprint):
+    #   forward 0.15 -> fires at 0.63 m  (~0.15 m ahead of the front bumper)
+    #   lateral 0.12 -> fires at 0.52 m  (~0.12 m beside the body)
+    #   rot     0.10 -> fires at 0.725 m
+    # The OLD values (0.45/0.35/0.30 -> 0.93/0.75/0.925 m) demanded ~0.5 m of
+    # standoff from every surface, which boxed the robot in on x+y+theta in any
+    # normal hallway/doorway (dashboard showed walls at 0.85 m) -> cmd_vel_mux
+    # zeroed all axes -> Nav2 "Failed to make progress". At 0.15 m/s the
+    # stopping distance is a few cm, so 0.15 m forward clearance still halts the
+    # robot before contact with a person stepping into its path.
+    fov_min_clearance_forward_m: 0.15
+    fov_min_clearance_lateral_m: 0.12
+    fov_min_clearance_rot_m: 0.10
     fov_block_hysteresis_s: 0.30
     fov_scan_max_age_s: 0.5
 
