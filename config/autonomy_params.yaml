@@ -166,6 +166,29 @@ vlm_client:
     motion_threshold_mps: 0.05
     jpeg_quality: 80
     request_timeout_s: 8.0
+    # Majority-vote corroboration. The code confirms at count >= 2 (i.e. "seen
+    # twice = full confidence"); below that the confidence is multiplied by
+    # vote_singleton_factor (0.5) to suppress single-frame misreads (e.g. the
+    # stray '305' in the logs). The problem in the field was that the count
+    # never reached 2, so a genuine, repeated 205 read was stuck at 0.95*0.5 =
+    # 0.47 and never cleared mission_orchestrator.target_match_confidence (0.7),
+    # so the robot saw the room but never approached/confirmed it. Two reasons,
+    # both fixed here:
+    #   - vote_window_s 8.0 (was 2.0 default): VLM latency ~0.8 s + period 3 s
+    #     means consecutive sightings are ~1-4 s apart; the 2 s window expired
+    #     the first sighting before the second arrived.
+    #   - vote_bucket_m 3.0 (was 0.5 default, recently *reduced* by commit
+    #     44f7933 which made this worse): the robot creeps while reading a sign,
+    #     so a 0.5 m pose bucket filed each sighting under a different cell and
+    #     they never matched. 3 m groups all reads from one approach to a door.
+    #   - vote_buffer_size 5 (was 3): keep enough history to span the window.
+    # Trade-off: two misreads of the SAME wrong room within 8 s / 3 m would now
+    # also confirm. Acceptable given the VLM's raw confidence is high and a
+    # repeated identical misread is far rarer than a one-off.
+    vote_window_s: 8.0
+    vote_buffer_size: 5
+    vote_bucket_m: 3.0
+    vote_singleton_factor: 0.5
     prompt: |
       You are a building navigator. Look at this image and extract any visible
       room number sign or door plate (e.g. '202', 'B312', '101A').
