@@ -119,9 +119,16 @@ controller_server:
       decel_lim_x: -0.4
       decel_lim_y: -0.4
       decel_lim_theta: -0.20
-      vx_samples: 14
-      vy_samples: 14
-      vtheta_samples: 16
+      # Trajectory count is the dominant DWB cost. 14*14*16 = 3136 rollouts,
+      # each rolling the FULL rectangular footprint over the costmap
+      # (ObstacleFootprint critic) for 2.5 s -> the controller cannot finish
+      # within 100 ms on the Orin while SLAM/frontier/web share the CPU.
+      # That missed 10 Hz loop is the #1 cause of the stuttering motion.
+      # 10*8*12 = 960 rollouts (~70% fewer) lets it hold 10 Hz; the
+      # velocity_smoother below fills in fine smoothness.
+      vx_samples: 10
+      vy_samples: 8
+      vtheta_samples: 12
       # 2.5 s rollout. At max_vel_x 0.15 that's ~37 cm of forward
       # lookahead, enough for DWB to see and avoid a corner before the
       # footprint reaches it. The previous 1.7 s only looked 25 cm ahead
@@ -202,14 +209,17 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # 0.85 extends the soft cost zone past the circumscribed radius
-        # so the robot is pushed off walls during corner rounding. The
-        # inscribed (lethal) radius is unchanged at 0.43 m — doors of
-        # 0.86 m+ still plan through. cost_scaling_factor 2.5 (was 3.0)
-        # gives a gentler decay so high cost lingers a bit further out,
-        # providing more lateral "push" for DWB.
-        cost_scaling_factor: 2.5
-        inflation_radius: 0.85
+        # inflation_radius 0.85 was the doorway/return-home killer: a 0.9 m
+        # door has its ENTIRE width swallowed by inflation (needs >1.7 m to
+        # leave any low-cost center), so the local controller could not find
+        # an acceptable-cost path through openings and the robot stalled.
+        # Hard collision safety comes from the real footprint + the
+        # ObstacleFootprint critic, NOT from inflation -- so inflation only
+        # needs to be a thin "prefer clearance" buffer. 0.45 is the smallest
+        # sane value (must be >= inscribed radius 0.43). Steeper scaling (3.0)
+        # keeps a navigable low-cost center down corridors and through doors.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.45
       always_send_full_costmap: true
 
 global_costmap:
@@ -248,8 +258,12 @@ global_costmap:
           data_type: LaserScan
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        cost_scaling_factor: 2.5
-        inflation_radius: 0.85
+        # Global slightly larger than local (0.55 vs 0.45) so global paths
+        # prefer the centerline of corridors, while the local controller can
+        # still squeeze closer when a doorway requires it. Was 0.85, which
+        # closed room openings and made the return-home goal unplannable.
+        cost_scaling_factor: 3.0
+        inflation_radius: 0.55
       always_send_full_costmap: true
 
 planner_server:
@@ -265,7 +279,12 @@ planner_server:
       # A larger tolerance (we had 1.5) generated hundreds of
       # `worldToMap failed` log lines per goal whenever a frontier was
       # near the map boundary.
-      tolerance: 0.6
+      # 0.75 m: when "return to start" lands on a cell that is now near a
+      # mapped wall (start was captured before SLAM thickened the walls),
+      # this lets NavFn accept the nearest reachable free cell instead of
+      # aborting with "failed to create plan". Still well under the 1.5 that
+      # caused worldToMap spam at map edges.
+      tolerance: 0.75
       # A* (directed) sometimes finds a valid path through marginal-cost
       # cells where the Dijkstra potential-field flood stalls.
       use_astar: true
