@@ -109,15 +109,10 @@ class MissionOrchestrator(Node):
 
         # Behaviour params
         self.declare_parameter("periodic_vlm_period_s", 3.0)
-        # 0.45 lets singleton VLM detections through. The voting layer in
-        # vlm_client multiplies a single high-raw observation (e.g. raw=0.95)
-        # by vote_singleton_factor=0.5 -> ~0.47. Threshold 0.7 was silently
-        # dropping every one of those even when the model was clearly seeing
-        # the right sign, because the robot was moving between frames so
-        # the pose-bucket vote couldn't aggregate. With raw conf typically
-        # 0.90-1.0 for genuine sign reads, 0.45 still rejects low-quality
-        # guesses without requiring corroboration the robot can't provide.
-        self.declare_parameter("target_match_confidence", 0.45)
+        # Require a corroborated/high-confidence VLM read before acting on a
+        # room match — guards against single-frame false positives steering
+        # the robot to the wrong door.
+        self.declare_parameter("target_match_confidence", 0.7)
         self.declare_parameter("max_explore_time_s", 600.0)
         self.declare_parameter("approach_offset_m", 0.8)
         self.declare_parameter("memory_lookup_timeout_s", 1.0)
@@ -137,8 +132,11 @@ class MissionOrchestrator(Node):
         self._no_frontiers_required = int(self.get_parameter("no_frontiers_streak_required").value)
         self._no_frontiers_streak = 0
 
-        # State
-        self._lock = threading.Lock()
+        # State. RLock (reentrant) so a callback that already holds the lock
+        # can call a helper that re-acquires it without self-deadlocking. The
+        # original plain Lock deadlocked the confirm-timeout -> return-home
+        # path; RLock makes that whole class of nested-acquire bugs impossible.
+        self._lock = threading.RLock()
         self._state = "IDLE"
         self._intent = ""
         self._target_room = ""
@@ -385,8 +383,12 @@ class MissionOrchestrator(Node):
         msg = String()
         msg.data = json_dumps({"request_id": request_id, "room": room})
         self._pub_memory_query.publish(msg)
-        # If memory doesn't reply within timeout, treat as miss.
-        threading.Timer(self._memory_timeout, self._memory_timeout_check, args=[request_id]).start()
+        # If memory doesn't reply within timeout, treat as miss. Executor-thread
+        # timer so the miss path (which may begin exploration / send a Nav2
+        # goal) never touches node entities from a foreign thread.
+        self._schedule_once(
+            self._memory_timeout, lambda: self._memory_timeout_check(request_id)
+        )
         self._publish_state("checking_memory", note=f"room={room}")
 
     def _memory_timeout_check(self, request_id: str) -> None:
@@ -459,14 +461,17 @@ class MissionOrchestrator(Node):
         self._pub_vlm_trigger.publish(msg)
         self._publish_state("confirming", note=f"room={target}")
         # Give the VLM ~6 s to confirm; if no observation, return-home anyway.
-        threading.Timer(6.0, self._confirm_timeout).start()
+        # Executor-thread timer (not threading.Timer) so the downstream
+        # _begin_return_home -> Nav2 action client call stays on the executor.
+        self._schedule_once(6.0, self._confirm_timeout)
 
     def _confirm_timeout(self) -> None:
         # Read state under the lock, RELEASE it, then call the next-step
-        # method. _begin_return_home acquires self._lock itself; nesting the
-        # acquisitions deadlocked the timer thread because self._lock is a
-        # plain (non-reentrant) Lock — the log line printed and then the
-        # thread hung forever waiting on itself.
+        # method. _begin_return_home acquires self._lock itself; holding it
+        # across that call (plus the Nav2 wait_for_server inside) would block
+        # every other callback for the duration. self._lock is an RLock now so
+        # nesting no longer deadlocks, but releasing first is still the right
+        # pattern — this used to hang here on a plain Lock.
         with self._lock:
             should_proceed = self._state == "CONFIRMING"
         if not should_proceed:
@@ -539,6 +544,23 @@ class MissionOrchestrator(Node):
         ps.pose.position.y = y
         ps.pose.orientation = yaw_to_quaternion(yaw)
         return ps
+
+    def _schedule_once(self, delay_s: float, callback) -> None:
+        # One-shot timer that fires on the executor thread. threading.Timer
+        # runs the callback in a foreign thread; calling the Nav2 action client
+        # or any node entity from there races the single-threaded executor
+        # (rclpy entities are not thread-safe). Routing deferred work through a
+        # rclpy timer keeps every state transition on the executor thread.
+        box: dict[str, Any] = {}
+
+        def _fire() -> None:
+            timer = box.get("timer")
+            if timer is not None:
+                timer.cancel()
+                self.destroy_timer(timer)
+            callback()
+
+        box["timer"] = self.create_timer(delay_s, _fire)
 
     def _send_nav_goal(self, pose: PoseStamped, on_done) -> None:
         if not self._action.wait_for_server(timeout_sec=10.0):

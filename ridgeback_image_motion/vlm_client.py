@@ -172,12 +172,7 @@ class VlmClient(Node):
         # the same pose bucket, full confidence is passed through.
         self.declare_parameter("vote_window_s", 2.0)
         self.declare_parameter("vote_buffer_size", 3)
-        # Bucket 2.0 m (was 0.5). At 0.15 m/s the robot can move ~30 cm
-        # between two periodic VLM reads spaced ~2 s apart — well inside
-        # 2 m, so consecutive reads of the same sign actually corroborate
-        # instead of landing in different buckets and counting as
-        # independent singletons.
-        self.declare_parameter("vote_bucket_m", 2.0)
+        self.declare_parameter("vote_bucket_m", 0.5)
         self.declare_parameter("vote_singleton_factor", 0.5)
 
         ns = self.get_parameter("namespace").value

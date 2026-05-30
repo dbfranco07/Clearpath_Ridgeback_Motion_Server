@@ -97,17 +97,12 @@ controller_server:
     FollowPath:
       plugin: dwb_core::DWBLocalPlanner
       debug_trajectory_details: false
-      # Forward-only at the controller. The reverse band (-0.05) was added
-      # back when inflation closed corridors and every forward rollout hit
-      # lethal; with local inflation now at 0.65/4.0 there's room ahead, so
-      # the reverse band stopped serving its purpose and started causing
-      # problems instead — at doorways DWB found that a tiny reverse cost
-      # less than threading the door (door centerline near inscribed) and
-      # the robot would drift backward away from its goal. 0.0 forces DWB
-      # to only choose forward+rotate+strafe rollouts. The behavior_server's
-      # backup recovery is independent of DWB and still drives reverse when
-      # the robot genuinely needs to escape.
-      min_vel_x: 0.0
+      # Allow tiny reverse (-0.05 m/s) so DWB's lowest-cost rollout can
+      # nudge the robot ~5-10 cm off a wall when it has parked too close
+      # and every forward trajectory rolls through the inscribed (lethal)
+      # band. Not enough velocity to be "driving backward" — just enough
+      # to break loose. The behavior_server's backup recovery also benefits.
+      min_vel_x: -0.05
       min_vel_y: -0.15
       max_vel_x: 0.15
       max_vel_y: 0.15
@@ -124,14 +119,9 @@ controller_server:
       decel_lim_x: -0.4
       decel_lim_y: -0.4
       decel_lim_theta: -0.20
-      # DWB samples reduced from 14/14/16 (= 3,136 trajectories/cycle) to
-      # 8/8/10 (= 640) — a ~5x cut. Jetson Orin Nano was missing the 10 Hz
-      # control loop continuously while also running SLAM, costmap inflation,
-      # VLM and the web dashboard. 8 samples per linear axis still gives
-      # good resolution at 0.15 m/s max velocity (~3.75 cm granularity).
-      vx_samples: 8
-      vy_samples: 8
-      vtheta_samples: 10
+      vx_samples: 14
+      vy_samples: 14
+      vtheta_samples: 16
       # 2.5 s rollout. At max_vel_x 0.15 that's ~37 cm of forward
       # lookahead, enough for DWB to see and avoid a corner before the
       # footprint reaches it. The previous 1.7 s only looked 25 cm ahead
@@ -154,20 +144,9 @@ controller_server:
       # a holonomic base that strafes close to walls. BaseObstacle samples
       # only the center point and lets corners clip obstacles.
       critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
-      # Reverted to 0.5 (the d9b78ad value that successfully threaded
-      # doorways). Higher values (1.2, 3.0) penalize all rollouts at a
-      # doorway because the footprint sits between both jambs no matter
-      # what — so DWB has no winner and the robot stalls at the door.
-      # Corner-clipping protection now relies on the tightened inflation
-      # (0.65/4.0) instead of a heavier critic.
       ObstacleFootprint.scale: 0.5
       ObstacleFootprint.sum_scores: false
-      # PathAlign bumped 12 -> 18 so DWB stays tightly centered on the
-      # global plan when threading narrow openings (doorways, corridor
-      # mouths). Without this, rollouts that drifted laterally by 5-10 cm
-      # at the door could still score well on PathDist (still "near" the
-      # path) but bury the footprint corner into a door jamb.
-      PathAlign.scale: 18.0
+      PathAlign.scale: 12.0
       PathAlign.forward_point_distance: 0.2
       GoalAlign.scale: 8.0
       GoalAlign.forward_point_distance: 0.2
@@ -206,18 +185,7 @@ local_costmap:
       # Corner safety is handled by ObstacleFootprint critic + 0.75 m
       # inflation + 2.5 s sim_time, not by the padding.
       footprint_padding: 0.03
-      # static_layer added to the LOCAL costmap (it was already in global)
-      # so DWB and the behavior_server's "Collision Ahead" check see the
-      # SLAM-mapped walls behind the robot. The Hokuyo UST-10LX is 270°
-      # front-mounted: live LiDAR misses the rear ~90° wedge entirely.
-      # Without the static layer here, the robot would happily back into
-      # a wall it had mapped two minutes earlier — the local costmap
-      # showed empty space because no live ray was hitting that wall.
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
-      static_layer:
-        plugin: nav2_costmap_2d::StaticLayer
-        map_subscribe_transient_local: true
-        subscribe_to_updates: true
+      plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -234,17 +202,14 @@ local_costmap:
           obstacle_min_range: 0.0
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # LOCAL inflation kept slightly tighter than global. 0.65 m radius with
-        # 4.0 scaling: enough soft-cost push to bias DWB off walls, but the
-        # band is narrow enough that ~1 m corridors and standard doorways
-        # still have plannable non-lethal cells in the middle. The previous
-        # 0.85/2.5 values closed corridors entirely (inscribed 0.43 m from
-        # each wall = 0.86 m of lethal, larger than the corridor) and
-        # behavior_server aborted spin/backup with "Collision Ahead" on
-        # every recovery attempt. Corner safety is also reinforced by DWB's
-        # ObstacleFootprint critic (scale 1.2).
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.65
+        # 0.85 extends the soft cost zone past the circumscribed radius
+        # so the robot is pushed off walls during corner rounding. The
+        # inscribed (lethal) radius is unchanged at 0.43 m — doors of
+        # 0.86 m+ still plan through. cost_scaling_factor 2.5 (was 3.0)
+        # gives a gentler decay so high cost lingers a bit further out,
+        # providing more lateral "push" for DWB.
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.85
       always_send_full_costmap: true
 
 global_costmap:
@@ -283,15 +248,8 @@ global_costmap:
           data_type: LaserScan
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # Global matched to local (0.65/4.0) so global plans actually route
-        # through doorways. The previous 0.85/2.5 made door-centerline cells
-        # essentially blocked in the global costmap (inscribed 0.43 m × 2 =
-        # 0.86 m equals door width), so NavFn often picked detours through
-        # unknown space instead of through the door — which the local
-        # costmap then couldn't follow, triggering planner replan loops at
-        # the doorway approach.
-        cost_scaling_factor: 4.0
-        inflation_radius: 0.65
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.85
       always_send_full_costmap: true
 
 planner_server:
@@ -308,16 +266,9 @@ planner_server:
       # `worldToMap failed` log lines per goal whenever a frontier was
       # near the map boundary.
       tolerance: 0.6
-      # use_astar reverted to false (Dijkstra). A* repeatedly hit
-      # "Failed to create a plan from potential when a legal potential was
-      # found" on fresh/sparse maps — the A* backtrace can't follow the
-      # gradient through flat-cost regions of unknown space (allow_unknown
-      # makes large swaths cost-equal). Dijkstra's full potential flood
-      # gives a smooth gradient everywhere reachable, so getPlanFromPotential
-      # always succeeds. Slightly slower per plan but correct on tabula-rasa
-      # exploration starts. If Dijkstra stalls in dense corridors later,
-      # consider migrating to SmacPlanner2D rather than flipping back.
-      use_astar: false
+      # A* (directed) sometimes finds a valid path through marginal-cost
+      # cells where the Dijkstra potential-field flood stalls.
+      use_astar: true
       allow_unknown: true
 
 smoother_server:
@@ -351,25 +302,13 @@ behavior_server:
     global_frame: map
     robot_base_frame: base_link
     transform_tolerance: 1.0
-    # Reduced 2.0 -> 1.0 so spin/backup recoveries don't abort prematurely
-    # when surrounded by tighter inflation. At max_rotational_vel 0.20 the
-    # old 2.0 s lookahead projected 23° of rotation before checking the
-    # footprint — in narrow corridors that always landed on inflation, so
-    # every recovery aborted instantly with "Collision Ahead". 1.0 s checks
-    # only ~11° ahead, enough to catch real collisions without false aborts.
-    simulate_ahead_time: 1.0
+    simulate_ahead_time: 2.0
     # Spin/backup recoveries previously jerked at 0.6 rad/s² — that was
     # the loudest yaw event during planning failures. Match the DWB
     # angular budget so recoveries feel like the rest of motion.
     max_rotational_vel: 0.20
     min_rotational_vel: 0.08
     rotational_acc_lim: 0.25
-    # The default spin time_allowance is 10 s, but at max_rotational_vel
-    # 0.20 the 1.57 rad spin needs ~8.5 s of cruise + ~0.8 s accel +
-    # ~0.8 s decel ≈ 10.1 s — every spin recovery times out at the
-    # boundary with "Exceeded time allowance". 20 s is comfortably above
-    # worst-case so spin can actually complete.
-    spin.time_allowance: 20.0
 
 waypoint_follower:
   ros__parameters:
