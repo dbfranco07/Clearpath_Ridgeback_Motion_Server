@@ -195,9 +195,12 @@ local_costmap:
       # 3 cm padding — just enough for TF jitter and URDF rounding.
       # Larger values push the inscribed (lethal) radius past 0.43 m,
       # which makes standard 0.81-0.91 m office doors unplannable.
-      # Corner safety is handled by ObstacleFootprint critic + 0.75 m
-      # inflation + 2.5 s sim_time, not by the padding.
-      footprint_padding: 0.03
+      # Corner safety is handled by ObstacleFootprint critic + inflation,
+      # not by the padding. Padding 0.0 (was 0.03): at 0.05 m resolution the
+      # 0.03 padding pushed the inscribed/lethal radius to 0.43 m, leaving a
+      # ~0.9 m door with under 1 free cell at center -> "stuck at door". 0.0
+      # gives inscribed 0.40 (the true half-width) -> ~2 free cells to thread.
+      footprint_padding: 0.0
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
@@ -244,8 +247,9 @@ global_costmap:
       # Larger values push the inscribed (lethal) radius past 0.43 m,
       # which makes standard 0.81-0.91 m office doors unplannable.
       # Corner safety is handled by ObstacleFootprint critic + 0.75 m
-      # inflation + 2.5 s sim_time, not by the padding.
-      footprint_padding: 0.03
+      # inflation, not by the padding. 0.0 (was 0.03) so the global plan can
+      # form through a ~0.9 m door (inscribed 0.40 instead of 0.43).
+      footprint_padding: 0.0
       resolution: 0.05
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
