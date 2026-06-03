@@ -55,6 +55,11 @@ class FrontierExplorer(Node):
         self.declare_parameter("status_topic", "/frontier/status")
         self.declare_parameter("cancel_topic", "/frontier/cancel")
         self.declare_parameter("hint_topic", "/frontier/hint")
+        # External "this opening is too narrow / impassable" hints (e.g. from
+        # passage_monitor). A point published here is blacklisted so the
+        # explorer reroutes away from it instead of repeatedly trying to thread
+        # a gap the robot doesn't fit through.
+        self.declare_parameter("blacklist_point_topic", "/frontier/blacklist_point")
         self.declare_parameter("nav_action", "navigate_to_pose")
         self.declare_parameter("base_frame", "")
         self.declare_parameter("home_frame", "map")
@@ -154,6 +159,12 @@ class FrontierExplorer(Node):
         self.create_subscription(
             String, self.get_parameter("hint_topic").value, self._on_hint, 10
         )
+        self.create_subscription(
+            String,
+            self.get_parameter("blacklist_point_topic").value,
+            self._on_blacklist_point,
+            10,
+        )
         self._pub_status = self.create_publisher(
             String, self.get_parameter("status_topic").value, _LATCHED_QOS
         )
@@ -198,6 +209,37 @@ class FrontierExplorer(Node):
                 "target_room": str(payload.get("target_room") or "").upper(),
                 "active": norm > 1e-6,
             }
+
+    def _on_blacklist_point(self, msg: String) -> None:
+        """Blacklist an externally-flagged impassable point (e.g. narrow gap).
+
+        Adds the point to the blacklist so future cluster scoring avoids it,
+        and cancels the in-flight goal if it sits near the flagged point so
+        Nav2 stops trying to thread it and the next tick reroutes.
+        """
+        payload = json_loads(msg.data, default={})
+        try:
+            px = float(payload["x"])
+            py = float(payload["y"])
+        except (KeyError, TypeError, ValueError):
+            return
+        point = (round(px, 2), round(py, 2))
+        with self._lock:
+            if point not in self._blacklist:
+                self._blacklist.append(point)
+            near_current = (
+                self._current_goal is not None
+                and self._dist(point, self._current_goal) < self._blacklist_radius
+            )
+            handle = self._goal_handle if near_current else None
+            if near_current:
+                self._current_goal = None
+                self._goal_handle = None
+        if handle is not None:
+            self.get_logger().info(
+                f"blacklisting impassable point {point}; cancelling current goal to reroute"
+            )
+            handle.cancel_goal_async()
 
     # --- main loop ----------------------------------------------------------
     def _tick(self) -> None:

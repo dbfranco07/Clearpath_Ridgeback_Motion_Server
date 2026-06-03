@@ -1076,6 +1076,8 @@ class DashboardNode(Node):
         self.declare_parameter("frontier_status_topic", "/frontier/status")
         self.declare_parameter("vlm_observation_topic", "/vlm/observation")
         self.declare_parameter("vlm_trigger_topic", "/vlm/trigger")
+        self.declare_parameter("landmark_topic", "/room/landmarks")
+        self.declare_parameter("passage_status_topic", "/passage/status")
         self.declare_parameter("teleop_max_linear", 0.5)
         self.declare_parameter("teleop_max_lateral", 0.5)
         self.declare_parameter("teleop_max_angular", 1.5)
@@ -1103,6 +1105,8 @@ class DashboardNode(Node):
             "frontier_status": self.get_parameter("frontier_status_topic").value,
             "vlm_observation": self.get_parameter("vlm_observation_topic").value,
             "vlm_trigger": self.get_parameter("vlm_trigger_topic").value,
+            "landmarks": self.get_parameter("landmark_topic").value,
+            "passage_status": self.get_parameter("passage_status_topic").value,
             "fov_block": self.get_parameter("fov_block_topic").value,
         }
         self._teleop_max = (
@@ -1138,6 +1142,14 @@ class DashboardNode(Node):
         self._map_width: int = 0
         self._map_height: int = 0
         self._map_png: bytes | None = None
+        # Base grayscale-as-BGR map + geometry, kept so room landmarks can be
+        # re-overlaid whenever either the map or the landmark set changes.
+        self._map_base: Any = None
+        self._map_origin_x: float = 0.0
+        self._map_origin_y: float = 0.0
+        self._map_res: float = 0.05
+        self._landmarks: list[dict[str, Any]] = []
+        self._passage: dict[str, Any] = {}
         self._safety_latched: bool = True
         self._safety_override: bool = False
         self._mission_state: dict[str, Any] = {}
@@ -1169,6 +1181,8 @@ class DashboardNode(Node):
         self.create_subscription(String, self._params["frontier_status"], self._on_frontier_status, 10)
         self.create_subscription(String, self._params["vlm_observation"], self._on_vlm, 10)
         self.create_subscription(String, self._params["fov_block"], self._on_fov_block, _LATCHED_QOS)
+        self.create_subscription(String, self._params["landmarks"], self._on_landmarks, _LATCHED_QOS)
+        self.create_subscription(String, self._params["passage_status"], self._on_passage, 10)
 
         # Publishers
         self._pub_teleop = self.create_publisher(Twist, self._params["teleop"], 10)
@@ -1277,20 +1291,76 @@ class DashboardNode(Node):
             return
         data = np.asarray(msg.data, dtype=np.int8).reshape((h, w))
         # Map -1 (unknown) → 127, 0..100 → 255..0 grayscale.
-        img = np.full((h, w), 127, dtype=np.uint8)
+        gray = np.full((h, w), 127, dtype=np.uint8)
         known = data >= 0
-        img[known] = (255 - (data[known].astype(np.int32) * 255 // 100)).astype(np.uint8)
-        # Flip vertically so +y is up.
-        img = cv2.flip(img, 0)
+        gray[known] = (255 - (data[known].astype(np.int32) * 255 // 100)).astype(np.uint8)
+        # Flip vertically so +y is up (display convention).
+        gray = cv2.flip(gray, 0)
+        # Keep a BGR base so the landmark overlay can draw colored markers/text.
+        base = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        meta = f"{w}x{h} @{info.resolution:.2f}m"
+        with self._lock:
+            self._map_base = base
+            self._map_width = w
+            self._map_height = h
+            self._map_res = float(info.resolution)
+            self._map_origin_x = float(info.origin.position.x)
+            self._map_origin_y = float(info.origin.position.y)
+            self._map_meta = meta
+        self._render_map()
+
+    def _render_map(self) -> None:
+        """Compose room-landmark markers over the base map and cache the PNG.
+
+        Projects each landmark's map (x, y) to the (vertically flipped) image
+        and draws a dot + the room number, so rooms appear on the SLAM map
+        alongside the LiDAR walls. Safe to call on every map or landmark update.
+        """
+        with self._lock:
+            base = self._map_base
+            if base is None:
+                return
+            h, w = base.shape[:2]
+            res = self._map_res
+            ox, oy = self._map_origin_x, self._map_origin_y
+            landmarks = list(self._landmarks)
+        img = base.copy()
+        if res > 0.0:
+            for lm in landmarks:
+                try:
+                    col = int((float(lm["x"]) - ox) / res)
+                    row = int((float(lm["y"]) - oy) / res)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                px = col
+                py = (h - 1) - row  # account for the vertical flip
+                if not (0 <= px < w and 0 <= py < h):
+                    continue
+                room = str(lm.get("room", ""))
+                cv2.circle(img, (px, py), 4, (0, 90, 255), -1)  # orange dot (BGR)
+                cv2.circle(img, (px, py), 6, (0, 0, 0), 1)
+                cv2.putText(
+                    img, room, (px + 7, py + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 90, 255), 1, cv2.LINE_AA,
+                )
         ok, buf = cv2.imencode(".png", img)
         if not ok:
             return
-        meta = f"{w}x{h} @{info.resolution:.2f}m"
         with self._lock:
             self._map_png = bytes(buf)
-            self._map_meta = meta
-            self._map_width = w
-            self._map_height = h
+
+    def _on_landmarks(self, msg: String) -> None:
+        payload = json_loads(msg.data, default={})
+        landmarks = payload.get("landmarks")
+        if not isinstance(landmarks, list):
+            return
+        with self._lock:
+            self._landmarks = landmarks
+        self._render_map()
+
+    def _on_passage(self, msg: String) -> None:
+        with self._lock:
+            self._passage = json_loads(msg.data, default={})
 
     def _on_safety(self, msg: Bool) -> None:
         with self._lock:
@@ -1436,7 +1506,9 @@ class DashboardNode(Node):
                     "height": self._map_height,
                     "meta": self._map_meta or "WAITING",
                     "image_url": "/api/map.png",
+                    "landmarks": list(self._landmarks),
                 },
+                "passage": dict(self._passage),
                 "safety": {
                     "risk_level": "OVERRIDE" if self._safety_override else ("DANGER" if self._safety_latched else "OK"),
                     "stop_recommended": self._safety_latched and not self._safety_override,
@@ -1459,8 +1531,19 @@ class DashboardNode(Node):
                 },
                 "memory": {
                     "mission_count": self._mission_state.get("mission_count", 0),
-                    "location_count": self._mission_state.get("location_count", 0),
-                    "recent_locations": self._mission_state.get("recent_locations", []),
+                    # Confirmed room landmarks (VLM + LiDAR agreement) double as
+                    # the dashboard's "stored locations" list.
+                    "location_count": len(self._landmarks),
+                    "recent_locations": [
+                        {
+                            "label": lm.get("room", ""),
+                            "room_number": lm.get("room", ""),
+                            "x": lm.get("x", 0.0),
+                            "y": lm.get("y", 0.0),
+                            "confidence": lm.get("confidence", 0.0),
+                        }
+                        for lm in self._landmarks
+                    ],
                 },
                 "vlm": {"events": list(self._vlm_events)},
                 "chat_history": list(self._chat_history),

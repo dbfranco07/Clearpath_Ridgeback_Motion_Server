@@ -84,14 +84,26 @@ frontier_explorer:
     status_topic: /frontier/status
     cancel_topic: /frontier/cancel
     hint_topic: /frontier/hint
+    blacklist_point_topic: /frontier/blacklist_point
     nav_action: navigate_to_pose
     base_frame: ""                  # auto: base_link (matches orchestrator)
     home_frame: map
-    min_frontier_size_cells: 10
-    goal_blacklist_radius_m: 0.5
-    replan_period_s: 6.0
+    # These were drifting BELOW the code's documented doorway-friendly defaults
+    # (frontier_explorer.py), so the explorer chased tiny clutter strips and
+    # replanned too often — a messier map and a harder return home. Re-aligned:
+    #   min_frontier_size_cells 25 (was 10): a real doorway frontier is 30-60
+    #     cells; 10 chased chair-leg LiDAR stripes.
+    #   goal_blacklist_radius_m 1.0 (was 0.5): one failed cluster blanks the
+    #     whole local patch so we don't rediscover the same trap 50 cm over.
+    #   replan_period_s 3.0 (was 6.0): pick a fresh winner with up-to-date map.
+    #   min_score_threshold 0.15 (was 0.10): 0.10 candidates were marginal
+    #     frontiers the planner kept failing to reach (recovery cascade).
+    min_frontier_size_cells: 25
+    goal_blacklist_radius_m: 1.0
+    replan_period_s: 3.0
     max_attempts_per_goal: 2
     goal_padding_m: 0.3
+    edge_margin_cells: 16
     # Weighted scoring: pick the frontier with the largest info gain per
     # meter, penalised by recency of visits and proximity to blacklist.
     # If best_score < min_score_threshold, publish state="no_frontiers"
@@ -101,10 +113,37 @@ frontier_explorer:
     score_w_recency: 0.4
     score_w_blacklist_prox: 0.8
     score_w_hint_align: 0.5
+    # Clutter penalty: candidates ringed by obstacle cells are LiDAR-strip
+    # honeypots, not real openings. Kept explicit so it isn't silently lost
+    # if the code default ever changes.
+    score_w_clutter: 0.7
+    clutter_radius_m: 1.0
     recency_window_s: 60.0
     info_gain_radius_m: 2.0
     max_distance_cap_m: 8.0
-    min_score_threshold: 0.10
+    min_score_threshold: 0.15
+
+passage_monitor:
+  ros__parameters:
+    namespace: r100_0140
+    scan_topic: ""          # auto: /<namespace>/sensors/lidar2d_0/scan
+    odom_topic: ""          # auto: /<namespace>/platform/odom/filtered
+    status_topic: /passage/status
+    blacklist_point_topic: /frontier/blacklist_point
+    home_frame: map
+    base_frame: ""          # auto: base_link
+    # required_width = robot_width + 2*safety_margin = 0.80 + 0.30 = 1.10 m.
+    # Doors here are 1.2-1.6 m, so this trips only on genuinely tight pinch
+    # points / partially-open doors — the explicit "do I fit?" backstop.
+    robot_width_m: 0.80
+    safety_margin_m: 0.15
+    forward_min_m: 0.15
+    forward_max_m: 1.8
+    lateral_window_m: 1.5
+    min_speed_mps: 0.03
+    block_streak_required: 3
+    reroute_on_block: true
+    publish_rate_hz: 5.0
 
 mission_orchestrator:
   ros__parameters:
@@ -144,6 +183,18 @@ spatial_memory:
     observation_topic: /vlm/observation
     query_topic: /memory/query
     result_topic: /memory/result
+    # Map-landmark promotion. A stored room is published on landmark_topic
+    # (and overlaid on the dashboard map) only when the VLM read is
+    # corroborated (vote_count >= landmark_min_votes) AND the SLAM map has
+    # >= landmark_min_occupied_cells occupied cells within landmark_agree_radius_m
+    # of the detection (a real door sits in a wall). This is the "VLM and LiDAR
+    # agreement" gate — it rejects numbers 'seen' across open space.
+    map_topic: /map
+    landmark_topic: /room/landmarks
+    landmark_min_votes: 2
+    require_lidar_agreement: true
+    landmark_agree_radius_m: 0.8
+    landmark_min_occupied_cells: 3
 
 vlm_client:
   ros__parameters:
@@ -154,13 +205,14 @@ vlm_client:
     observation_topic: /vlm/observation
     home_frame: map
     base_frame: ""          # auto: <namespace>/base_link
-    # Deployment .env wins over these defaults:
+    # Deployment .env wins over these defaults (kept in sync with .env/.env.example
+    # so the documented default doesn't contradict what actually gets served):
     #   VLM_ENDPOINT=http://202.92.159.240
     #   VLM_PORT=8000
-    #   VLM_MODEL_NAME=Qwen/Qwen3.6-27B
+    #   VLM_MODEL_NAME=Qwen/Qwen3.5-27B
     #   VLM_THINK=false
     vlm_url: http://202.92.159.240:8000/v1
-    vlm_model: Qwen/Qwen3.6-27B
+    vlm_model: Qwen/Qwen3.5-27B
     api_key_env: VLM_API_KEY
     period_s: 3.0
     motion_threshold_mps: 0.05
@@ -214,6 +266,8 @@ ridgeback_dashboard:
     frontier_status_topic: /frontier/status
     vlm_observation_topic: /vlm/observation
     vlm_trigger_topic: /vlm/trigger
+    landmark_topic: /room/landmarks
+    passage_status_topic: /passage/status
     teleop_max_linear: 0.5
     teleop_max_lateral: 0.5
     teleop_max_angular: 1.5

@@ -1,0 +1,60 @@
+<!--
+  Custom NavigateToPose behavior tree for the Ridgeback.
+
+  Identical to the ROS 2 Humble default
+  navigate_to_pose_w_replanning_and_recovery.xml except the recovery
+  BackUp distance is reduced from 0.30 m to 0.10 m.
+
+  WHY: the Hokuyo UST-10LX is a 270 deg LiDAR and is BLIND in the rear
+  ~90 deg. When Nav2 runs its BackUp recovery, the local costmap has no
+  obstacle data behind the robot, so BackUp's own collision check sees the
+  rear as clear and reverses into walls it cannot see (backs too much in
+  the hall and hits the wall). We cannot make backup safe (no rear sensing),
+  so we minimise the blind reverse to 10 cm: just enough to break free of
+  a front obstacle during recovery, not enough to cross a hallway backwards.
+
+  BT.CPP v3 syntax (Humble). error_code_id output ports are intentionally
+  omitted: a declared but unprovided output port is harmless in BT.CPP v3,
+  whereas providing a port a given patch release does not declare is a hard
+  parse error, so omitting is the version robust choice.
+
+  Only navigate_to_pose is overridden because mission_orchestrator and
+  frontier_explorer exclusively use the NavigateToPose action
+  (nav_action: navigate_to_pose); navigate_through_poses is never invoked.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ReactiveFallback name="ComputePathToPoseRecoveryFallback">
+              <GoalUpdated/>
+              <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+            </ReactiveFallback>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ReactiveFallback name="FollowPathRecoveryFallback">
+            <GoalUpdated/>
+            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+          </ReactiveFallback>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Spin spin_dist="1.57"/>
+          <Wait wait_duration="5.0"/>
+          <BackUp backup_dist="0.10" backup_speed="0.05"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

@@ -13,6 +13,7 @@ twist_mux input.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 
@@ -108,16 +109,20 @@ def _nav2_node(
     name: str,
     params_file: str,
     extra_remappings: list[tuple[str, str]] | None = None,
+    extra_parameters: list | None = None,
 ) -> Node:
     remappings = [("/tf", "tf"), ("/tf_static", "tf_static")]
     if extra_remappings:
         remappings.extend(extra_remappings)
+    parameters: list = [params_file]
+    if extra_parameters:
+        parameters.extend(extra_parameters)
     return Node(
         package=package,
         executable=executable,
         name=name,
         output="screen",
-        parameters=[params_file],
+        parameters=parameters,
         remappings=remappings,
         emulate_tty=True,
     )
@@ -249,6 +254,23 @@ def _setup(context, *args, **kwargs):
                     nav2_params_file,
                 ])
             )
+            # Custom short-backup BT lives next to nav2_params.yaml in the
+            # workspace config/ dir (same dir nav2_params_file is read from).
+            # Empty string -> bt_navigator keeps Nav2's stock tree.
+            _short_backup_bt = os.path.join(
+                os.path.dirname(nav2_params_file), "nav2_bt_short_backup.xml"
+            )
+            if os.path.isfile(_short_backup_bt):
+                actions.append(LogInfo(msg=[
+                    "[autonomy] NavigateToPose BT overridden (short backup): ",
+                    _short_backup_bt,
+                ]))
+            else:
+                actions.append(LogInfo(msg=[
+                    "[autonomy] WARN short-backup BT not found, using Nav2 default: ",
+                    _short_backup_bt,
+                ]))
+                _short_backup_bt = ""
             # Avoid nav2_bringup's RewrittenYaml temp-file layer here. On the
             # Jetson it was producing a /tmp/launch_params_* file that behaved
             # like the default Nav2 config (goal_checker/static_layer/no DWB
@@ -291,6 +313,16 @@ def _setup(context, *args, **kwargs):
                     "bt_navigator",
                     "bt_navigator",
                     nav2_params_file,
+                    # Override the NavigateToPose tree with our short-backup
+                    # variant (BackUp 0.10 m instead of 0.30 m -- the rear is a
+                    # LiDAR blind spot, see the XML header). Resolved next to
+                    # nav2_params.yaml so there's no hardcoded home path. Falls
+                    # back to Nav2's stock tree if the file is missing, so a bad
+                    # pull can't take the whole nav stack down.
+                    extra_parameters=(
+                        [{"default_nav_to_pose_bt_xml": _short_backup_bt}]
+                        if _short_backup_bt else None
+                    ),
                 ),
                 _nav2_node(
                     "nav2_waypoint_follower",
@@ -342,6 +374,17 @@ def _setup(context, *args, **kwargs):
                 package="ridgeback_image_motion",
                 executable="spatial_memory.py",
                 name="spatial_memory",
+                output="screen",
+                parameters=common_params,
+                emulate_tty=True,
+            ),
+            # Doorway/gap fit gate. Jetson-side only (consumes the bridged scan
+            # + odom); feeds /frontier/blacklist_point so the explorer reroutes
+            # away from openings the robot doesn't fit through.
+            Node(
+                package="ridgeback_image_motion",
+                executable="passage_monitor.py",
+                name="passage_monitor",
                 output="screen",
                 parameters=common_params,
                 emulate_tty=True,

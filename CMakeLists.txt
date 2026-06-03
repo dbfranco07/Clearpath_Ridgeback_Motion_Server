@@ -25,6 +25,7 @@ install(PROGRAMS
   ridgeback_image_motion/cmd_vel_mux.py
   ridgeback_image_motion/frontier_explorer.py
   ridgeback_image_motion/mission_orchestrator.py
+  ridgeback_image_motion/passage_monitor.py
   ridgeback_image_motion/vlm_client.py
   ridgeback_image_motion/spatial_memory.py
   ridgeback_image_motion/jetson_watchdog.py
@@ -39,10 +40,10 @@ install(DIRECTORY ridgeback_image_motion/launch/
   FILES_MATCHING PATTERN "*.launch.py"
 )
 
-# Install config files
+# Install config files (yaml params + custom Nav2 behavior-tree xml)
 install(DIRECTORY config/
   DESTINATION share/${PROJECT_NAME}/config
-  FILES_MATCHING PATTERN "*.yaml"
+  FILES_MATCHING PATTERN "*.yaml" PATTERN "*.xml"
 )
 
 ament_package()

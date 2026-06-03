@@ -24,6 +24,7 @@ Outputs:
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 import uuid
@@ -33,6 +34,7 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped, Twist
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.node import Node
@@ -117,6 +119,29 @@ class MissionOrchestrator(Node):
         self.declare_parameter("approach_offset_m", 0.8)
         self.declare_parameter("memory_lookup_timeout_s", 1.0)
         self.declare_parameter("tick_period_s", 1.0)
+        # Return-home robustness. The start cell is often borderline by the time
+        # the robot comes back (captured before SLAM thickened walls; reached
+        # from a new bearing where inflation now bites). A single Nav2 attempt
+        # failing used to ABORT and strand the robot. Instead retry up to N
+        # times, clearing both costmaps between tries so transient LiDAR noise
+        # at the goal doesn't permanently block the plan. On exhaustion we stop
+        # but LEAVE THE BASE STEERABLE so the operator can teleop the last bit.
+        self.declare_parameter("max_return_attempts", 4)
+        self.declare_parameter("return_retry_delay_s", 2.0)
+        self.declare_parameter("clear_costmap_on_return", True)
+        self.declare_parameter(
+            "clear_local_costmap_service",
+            "/local_costmap/clear_entirely_local_costmap",
+        )
+        self.declare_parameter(
+            "clear_global_costmap_service",
+            "/global_costmap/clear_entirely_global_costmap",
+        )
+        # Home capture retries: map->base_link may not be buffered the instant
+        # the operator fires a goal. Retry on the executor (non-blocking) rather
+        # than erroring the whole mission.
+        self.declare_parameter("home_capture_max_retries", 6)
+        self.declare_parameter("home_capture_retry_delay_s", 0.5)
 
         ns = self.get_parameter("namespace").value
         self._home_frame = self.get_parameter("home_frame").value
@@ -131,6 +156,11 @@ class MissionOrchestrator(Node):
         self._idle_on_no_frontiers = bool(self.get_parameter("enter_idle_on_no_frontiers").value)
         self._no_frontiers_required = int(self.get_parameter("no_frontiers_streak_required").value)
         self._no_frontiers_streak = 0
+        self._max_return_attempts = int(self.get_parameter("max_return_attempts").value)
+        self._return_retry_delay = float(self.get_parameter("return_retry_delay_s").value)
+        self._clear_costmap_on_return = bool(self.get_parameter("clear_costmap_on_return").value)
+        self._home_capture_max_retries = int(self.get_parameter("home_capture_max_retries").value)
+        self._home_capture_retry_delay = float(self.get_parameter("home_capture_retry_delay_s").value)
 
         # State. RLock (reentrant) so a callback that already holds the lock
         # can call a helper that re-acquires it without self-deadlocking. The
@@ -154,6 +184,14 @@ class MissionOrchestrator(Node):
         # fails, the saved coord is stale and we should drop it and
         # fall back to exploration.
         self._approach_source = "vlm"
+        # When true (GO_TO_ROOM / EXPLORE missions), every terminal outcome of
+        # the outbound leg — target found+confirmed, target never found, map
+        # complete, or explore timeout — funnels into return-home instead of
+        # leaving the robot parked wherever it stopped. This is the core
+        # "go somewhere AND come back" contract.
+        self._return_after = False
+        # Counts failed Nav2 attempts on the current return-home leg.
+        self._return_attempts = 0
         # One-shot flag: clear spatial_memory the first time we capture
         # a home pose in this process lifetime. The SLAM frame is rebuilt
         # from scratch every session (tabula rasa per CLAUDE.md) so prior
@@ -213,6 +251,16 @@ class MissionOrchestrator(Node):
 
         self._action = ActionClient(self, NavigateToPose, self.get_parameter("nav_action").value)
 
+        # Costmap clearing services, used between return-home retries to wipe
+        # transient obstacle marks (LiDAR ghosts, a person who walked past the
+        # start) that can otherwise wall off the home cell.
+        self._clear_local_cli = self.create_client(
+            ClearEntireCostmap, self.get_parameter("clear_local_costmap_service").value
+        )
+        self._clear_global_cli = self.create_client(
+            ClearEntireCostmap, self.get_parameter("clear_global_costmap_service").value
+        )
+
         self._publish_state("ready")
         self._cancel_frontier(True)
         self._timer = self.create_timer(
@@ -237,6 +285,9 @@ class MissionOrchestrator(Node):
             self._intent = intent
             self._target_room = room
             self._command = command
+            # Cleared here; _begin_explore / _begin_find_room re-arm it. Keeps a
+            # later QUERY/STOP from inheriting a previous mission's auto-return.
+            self._return_after = False
 
         if intent in ("STOP",):
             self._abort("operator_stop")
@@ -321,11 +372,21 @@ class MissionOrchestrator(Node):
         if self._no_frontiers_streak < self._no_frontiers_required:
             return
         self._no_frontiers_streak = 0
-        if self._idle_on_no_frontiers:
-            # Map is closed. Don't abort (which slams the hard stop and
-            # leaves the operator with no recovery path) — transition to
-            # IDLE_MAP_COMPLETE so the dashboard can offer the next move.
-            note = "target_not_found" if target else "map_complete"
+        # Map is closed (target never seen, or free-explore finished). Honor the
+        # "and come back" contract: if this mission should return home and we
+        # have a home pose, drive back instead of parking the robot out in the
+        # building. Falls through to IDLE_MAP_COMPLETE only when return isn't
+        # applicable (e.g. a bare RETURN-less query) or home was never captured.
+        note = "target_not_found" if target else "map_complete"
+        with self._lock:
+            should_return = self._return_after and self._home_pose is not None
+        if should_return:
+            self.get_logger().info(f"map complete ({note}) — returning home")
+            self._begin_return_home()
+        elif self._idle_on_no_frontiers:
+            # Don't abort (which slams the hard stop and leaves the operator
+            # with no recovery path) — transition to IDLE_MAP_COMPLETE so the
+            # dashboard can offer the next move.
             self._enter_idle_map_complete(note)
         else:
             self._abort("no_frontiers")
@@ -361,8 +422,11 @@ class MissionOrchestrator(Node):
 
     # --- mission flow -------------------------------------------------------
     def _begin_explore(self) -> None:
-        if not self._capture_home():
-            return
+        with self._lock:
+            self._return_after = True
+        self._ensure_home_then(self._explore_after_home)
+
+    def _explore_after_home(self) -> None:
         with self._lock:
             self._state = "EXPLORING"
             self._mission_start_ts = time.time()
@@ -372,8 +436,11 @@ class MissionOrchestrator(Node):
         self._publish_state("exploring")
 
     def _begin_find_room(self, room: str) -> None:
-        if not self._capture_home():
-            return
+        with self._lock:
+            self._return_after = True
+        self._ensure_home_then(lambda: self._find_room_after_home(room))
+
+    def _find_room_after_home(self, room: str) -> None:
         # Try memory first.
         request_id = uuid.uuid4().hex
         self._memory_pending[request_id] = {
@@ -390,6 +457,29 @@ class MissionOrchestrator(Node):
             self._memory_timeout, lambda: self._memory_timeout_check(request_id)
         )
         self._publish_state("checking_memory", note=f"room={room}")
+
+    def _ensure_home_then(self, proceed, attempt: int = 0) -> None:
+        """Capture the home pose (with non-blocking retries), then run proceed.
+
+        map->base_link is usually already buffered, so _capture_home returns
+        immediately. When it isn't (goal fired the instant nodes came up), we
+        retry on an executor timer instead of blocking the spin loop or
+        erroring the mission outright.
+        """
+        if self._capture_home():
+            proceed()
+            return
+        if attempt < self._home_capture_max_retries:
+            self.get_logger().warn(
+                f"home capture not ready, retry {attempt + 1}/{self._home_capture_max_retries}"
+            )
+            self._schedule_once(
+                self._home_capture_retry_delay,
+                lambda: self._ensure_home_then(proceed, attempt + 1),
+            )
+            return
+        self.get_logger().error("home capture failed after retries — TF unavailable")
+        self._publish_state("error", note="tf_unavailable")
 
     def _memory_timeout_check(self, request_id: str) -> None:
         if request_id in self._memory_pending:
@@ -410,15 +500,51 @@ class MissionOrchestrator(Node):
         self._publish_state("exploring")
 
     def _begin_approach(self, x: float, y: float, yaw: float, source: str = "vlm") -> None:
-        # Apply small offset *toward* the robot so we stop in front of the marker.
         with self._lock:
             self._state = "APPROACHING_ROOM"
             self._target_pose = (x, y, yaw)
             self._approach_source = source
         self._cancel_frontier(True)
-        ps = self._make_pose(x, y, yaw)
+        # Stop approach_offset_m short of the detection pose, along the line
+        # from where the robot is now to the target, and face the target. The
+        # detection pose is where the robot stood when it read the sign, so
+        # halting a bit before it keeps the sign in camera view for the confirm
+        # read instead of driving on top of it (and never reverses — if we're
+        # already within the offset we just hold position and confirm).
+        gx, gy, gyaw = self._offset_goal(x, y, yaw)
+        ps = self._make_pose(gx, gy, gyaw)
         self._send_nav_goal(ps, on_done=self._on_approach_done)
         self._publish_state("approaching", note=f"source={source}")
+
+    def _offset_goal(self, tx: float, ty: float, tyaw: float) -> tuple[float, float, float]:
+        if self._approach_offset <= 0.0:
+            return tx, ty, tyaw
+        robot = self._lookup_robot_xy()
+        if robot is None:
+            return tx, ty, tyaw
+        dx, dy = tx - robot[0], ty - robot[1]
+        dist = math.hypot(dx, dy)
+        # Already at/within the offset: don't create a goal behind us (the rear
+        # is a LiDAR blind spot). Hold current position, just aim at the target.
+        if dist <= self._approach_offset:
+            heading = math.atan2(dy, dx) if dist > 1e-3 else tyaw
+            return robot[0], robot[1], heading
+        ux, uy = dx / dist, dy / dist
+        gx = tx - ux * self._approach_offset
+        gy = ty - uy * self._approach_offset
+        return gx, gy, math.atan2(dy, dx)
+
+    def _lookup_robot_xy(self) -> tuple[float, float] | None:
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                self._home_frame,
+                self._base_frame,
+                rclpy.time.Time(),
+                timeout=Duration(seconds=0.2),
+            )
+        except TransformException:
+            return None
+        return (float(tf.transform.translation.x), float(tf.transform.translation.y))
 
     def _on_approach_done(self, status: int) -> None:
         if status != GoalStatus.STATUS_SUCCEEDED:
@@ -487,17 +613,77 @@ class MissionOrchestrator(Node):
             return
         with self._lock:
             self._state = "RETURNING_TO_START"
+            self._return_attempts = 0
         self._cancel_frontier(True)
-        self._send_nav_goal(home, on_done=self._on_return_done)
+        self._send_nav_goal(
+            home, on_done=self._on_return_done, on_fail=self._on_return_send_failed
+        )
         self._publish_state("returning")
 
-    def _on_return_done(self, status: int) -> None:
-        if status != GoalStatus.STATUS_SUCCEEDED:
-            self._abort(f"return_failed_status_{status}")
-            return
+    def _resend_return_home(self) -> None:
+        # Re-issue the home goal after a failed attempt. State stays
+        # RETURNING_TO_START and the attempt counter is preserved across the
+        # retry. Bail if the operator changed the mission in the meantime.
         with self._lock:
-            self._state = "DONE"
-        self._publish_state("done")
+            home = self._home_pose
+            state = self._state
+        if home is None or state != "RETURNING_TO_START":
+            return
+        self._cancel_frontier(True)
+        self._send_nav_goal(
+            home, on_done=self._on_return_done, on_fail=self._on_return_send_failed
+        )
+
+    def _on_return_send_failed(self, reason: str) -> None:
+        # Couldn't hand the goal to Nav2 (server momentarily down / rejected).
+        # Treat as one failed attempt and funnel into the same retry path
+        # rather than aborting the whole mission.
+        self.get_logger().warn(f"return-home goal send failed: {reason}")
+        self._on_return_done(GoalStatus.STATUS_ABORTED)
+
+    def _on_return_done(self, status: int) -> None:
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            with self._lock:
+                self._state = "DONE"
+            self._publish_state("done", note="returned")
+            return
+        # Return-home failed. Retry with a costmap clear so a transient mark at
+        # the start cell (LiDAR ghost, a person who walked past) can't
+        # permanently wall off the goal. We deliberately do NOT _abort here:
+        # the hard-stop + ABORTED was exactly what stranded the robot.
+        with self._lock:
+            self._return_attempts += 1
+            attempt = self._return_attempts
+            home = self._home_pose
+        if home is not None and attempt <= self._max_return_attempts:
+            self.get_logger().warn(
+                f"return-home attempt {attempt}/{self._max_return_attempts} failed "
+                f"(status {status}); clearing costmaps and retrying"
+            )
+            self._publish_state("returning", note=f"return_retry_{attempt}")
+            if self._clear_costmap_on_return:
+                self._clear_costmaps()
+            self._schedule_once(self._return_retry_delay, self._resend_return_home)
+            return
+        # Retries exhausted. Stop trying but leave the base STEERABLE (no hard
+        # stop) so the operator can teleop the final stretch. Distinct terminal
+        # state so the dashboard can flag "couldn't auto-return".
+        self.get_logger().error(
+            f"return-home failed after {attempt - 1} retries (last status {status})"
+        )
+        with self._lock:
+            self._state = "RETURN_FAILED"
+        self._publish_state("return_failed", note=f"last_status_{status}")
+
+    def _clear_costmaps(self) -> None:
+        # Fire-and-forget: we are on the executor thread, so never block on the
+        # response. A not-yet-available service (Nav2 still coming up) is skipped.
+        for cli in (self._clear_local_cli, self._clear_global_cli):
+            try:
+                if cli.service_is_ready():
+                    cli.call_async(ClearEntireCostmap.Request())
+            except Exception:
+                pass
 
     # --- helpers ------------------------------------------------------------
     def _capture_home(self) -> bool:
@@ -505,15 +691,16 @@ class MissionOrchestrator(Node):
             if self._home_pose is not None:
                 return True
         try:
+            # Short timeout: _ensure_home_then retries on an executor timer, so
+            # blocking the spin loop here would only starve the TF listener.
             tf = self._tf_buffer.lookup_transform(
                 self._home_frame,
                 self._base_frame,
                 rclpy.time.Time(),
-                timeout=Duration(seconds=1.5),
+                timeout=Duration(seconds=0.5),
             )
         except TransformException as exc:
-            self.get_logger().warn(f"could not capture home pose: {exc}")
-            self._publish_state("error", note="tf_unavailable")
+            self.get_logger().warn(f"could not capture home pose yet: {exc}")
             return False
         ps = PoseStamped()
         ps.header = tf.header
@@ -562,9 +749,13 @@ class MissionOrchestrator(Node):
 
         box["timer"] = self.create_timer(delay_s, _fire)
 
-    def _send_nav_goal(self, pose: PoseStamped, on_done) -> None:
+    def _send_nav_goal(self, pose: PoseStamped, on_done, on_fail=None) -> None:
+        # on_fail handles "couldn't even hand the goal to Nav2" (server down,
+        # rejected, send raised). Defaults to _abort; the return-home path
+        # supplies a handler that retries instead of stranding the robot.
+        fail = on_fail or self._abort
         if not self._action.wait_for_server(timeout_sec=10.0):
-            self._abort("nav2_unavailable")
+            fail("nav2_unavailable")
             return
         goal = NavigateToPose.Goal()
         goal.pose = pose
@@ -574,10 +765,10 @@ class MissionOrchestrator(Node):
             try:
                 handle = f.result()
             except Exception as exc:
-                self._abort(f"send_goal_failed:{exc}")
+                fail(f"send_goal_failed:{exc}")
                 return
             if not handle.accepted:
-                self._abort("goal_rejected")
+                fail("goal_rejected")
                 return
             self._goal_handle = handle
             handle.get_result_async().add_done_callback(
@@ -664,7 +855,15 @@ class MissionOrchestrator(Node):
                 msg.data = target
                 self._pub_vlm_trigger.publish(msg)
             if elapsed > self._max_explore_time:
-                self._abort("max_explore_time")
+                with self._lock:
+                    should_return = self._return_after and self._home_pose is not None
+                if should_return:
+                    self.get_logger().warn(
+                        "max explore time reached — returning home"
+                    )
+                    self._begin_return_home()
+                else:
+                    self._abort("max_explore_time")
 
 
 def main() -> None:
