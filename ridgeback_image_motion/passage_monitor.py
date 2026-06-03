@@ -25,7 +25,6 @@ import math
 import threading
 import time
 
-import numpy as np
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.duration import Duration
@@ -37,58 +36,10 @@ from tf2_ros import Buffer, TransformException, TransformListener
 
 try:
     from ridgeback_image_motion.autonomy_common import json_dumps, quaternion_to_yaw_rad
+    from ridgeback_image_motion.autonomy_geometry import passage_width
 except ImportError:
     from autonomy_common import json_dumps, quaternion_to_yaw_rad  # type: ignore[no-redef]
-
-
-def passage_width(
-    ranges,
-    angle_min: float,
-    angle_increment: float,
-    range_min: float,
-    range_max: float,
-    heading: float,
-    forward_min: float,
-    forward_max: float,
-    lateral_window: float,
-) -> float:
-    """Free lateral width of the opening ahead, along `heading`.
-
-    Pure function (numpy) so it can be unit-tested without ROS. Projects each
-    valid scan return into the travel frame (forward along heading, left
-    positive), keeps only points inside the forward window and lateral band,
-    and returns nearest-left-clear + nearest-right-clear. Returns +inf when no
-    obstacle bounds the corridor on a given side within the window.
-    """
-    ranges = np.asarray(ranges, dtype=np.float32)
-    n = ranges.size
-    if n == 0:
-        return float("inf")
-    angles = angle_min + np.arange(n, dtype=np.float32) * angle_increment
-    valid = np.isfinite(ranges) & (ranges >= range_min) & (ranges <= range_max)
-    if not np.any(valid):
-        return float("inf")
-    r = ranges[valid]
-    a = angles[valid]
-    px = r * np.cos(a)
-    py = r * np.sin(a)
-    # Rotate into the travel frame (forward along heading, left positive).
-    c, s = math.cos(heading), math.sin(heading)
-    forward = px * c + py * s
-    lateral = -px * s + py * c
-    band = (
-        (forward >= forward_min)
-        & (forward <= forward_max)
-        & (np.abs(lateral) <= lateral_window)
-    )
-    if not np.any(band):
-        return float("inf")
-    lat = lateral[band]
-    left = lat[lat >= 0.0]
-    right = lat[lat < 0.0]
-    left_clear = float(np.min(left)) if left.size else lateral_window
-    right_clear = float(-np.max(right)) if right.size else lateral_window
-    return left_clear + right_clear
+    from autonomy_geometry import passage_width  # type: ignore[no-redef]
 
 
 class PassageMonitor(Node):

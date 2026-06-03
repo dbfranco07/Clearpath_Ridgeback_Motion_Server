@@ -19,7 +19,6 @@ import threading
 import time
 from pathlib import Path
 
-import numpy as np
 import rclpy
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
@@ -32,12 +31,14 @@ try:
         json_loads,
         normalize_room_id,
     )
+    from ridgeback_image_motion.autonomy_geometry import lidar_agrees
 except ImportError:
     from autonomy_common import (  # type: ignore[no-redef]
         json_dumps,
         json_loads,
         normalize_room_id,
     )
+    from autonomy_geometry import lidar_agrees  # type: ignore[no-redef]
 
 
 _DEFAULT_DB = Path.home() / ".ridgeback" / "spatial_memory.sqlite"
@@ -52,42 +53,23 @@ _LATCHED_QOS = QoSProfile(
 )
 
 
-def lidar_agrees(
-    grid: OccupancyGrid,
-    x: float,
-    y: float,
-    radius_m: float,
-    min_occupied_cells: int,
-    occupied_threshold: int = 50,
+def _grid_agrees(
+    grid: OccupancyGrid, x: float, y: float, radius_m: float, min_cells: int
 ) -> bool:
-    """True if the SLAM map has real structure (a wall/door frame) near (x, y).
-
-    A genuine room sign sits in a wall, so a corroborated VLM read should have
-    occupied cells nearby. A number 'seen' across open space (reflection, a
-    poster on a far wall, a misread) won't. Pure function for unit testing.
-    """
+    """OccupancyGrid wrapper around the pure autonomy_geometry.lidar_agrees."""
     info = grid.info
-    res = float(info.resolution)
-    if res <= 0.0:
-        return False
-    w, h = int(info.width), int(info.height)
-    if w == 0 or h == 0:
-        return False
-    ox = float(info.origin.position.x)
-    oy = float(info.origin.position.y)
-    gx = int((x - ox) / res)
-    gy = int((y - oy) / res)
-    r_cells = max(int(radius_m / res), 1)
-    x0 = max(0, gx - r_cells)
-    x1 = min(w, gx + r_cells + 1)
-    y0 = max(0, gy - r_cells)
-    y1 = min(h, gy + r_cells + 1)
-    if x1 <= x0 or y1 <= y0:
-        return False
-    data = np.asarray(grid.data, dtype=np.int16).reshape((h, w))
-    window = data[y0:y1, x0:x1]
-    occupied = int(np.count_nonzero(window > occupied_threshold))
-    return occupied >= min_occupied_cells
+    return lidar_agrees(
+        grid.data,
+        int(info.width),
+        int(info.height),
+        float(info.origin.position.x),
+        float(info.origin.position.y),
+        float(info.resolution),
+        x,
+        y,
+        radius_m,
+        min_cells,
+    )
 
 
 class SpatialMemoryNode(Node):
@@ -191,45 +173,64 @@ class SpatialMemoryNode(Node):
         is_landmark = votes >= self._landmark_min_votes
         if is_landmark and self._require_agreement:
             grid = self._map
-            is_landmark = grid is not None and lidar_agrees(
+            is_landmark = grid is not None and _grid_agrees(
                 grid, x, y, self._agree_radius, self._agree_min_cells
             )
 
-        changed_landmark = False
+        # Decide the DB write under the lock; do all logging/publishing AFTER
+        # releasing it — _publish_landmarks re-acquires _db_lock, which is a
+        # plain (non-reentrant) Lock, so calling it while held would deadlock.
+        stored = False
+        final_landmark = False
+        publish_needed = False
         with self._db_lock:
             row = self._db.execute(
                 "SELECT x, y, confidence, landmark FROM rooms WHERE room=?", (room,)
             ).fetchone()
             if row is not None:
                 ex, ey, ec, elm = row
+                elm = int(elm or 0)
                 if math.hypot(x - ex, y - ey) < self._dedup_radius and ec >= confidence:
-                    # Keep the better-located/-confident pose, but a new
-                    # corroborated+agreeing sighting can still PROMOTE an
-                    # existing room to a landmark.
-                    if is_landmark and not int(elm or 0):
+                    # Keep the better-located/-confident pose, but a corroborated
+                    # +agreeing sighting can still PROMOTE the room to a landmark.
+                    if is_landmark and not elm:
                         self._db.execute(
                             "UPDATE rooms SET landmark=1 WHERE room=?", (room,)
                         )
                         self._db.commit()
-                        changed_landmark = True
-                    if changed_landmark:
-                        self._publish_landmarks()
-                    return
-                # Don't demote an existing landmark on a non-agreeing update.
-                landmark_flag = 1 if (is_landmark or int(elm or 0)) else 0
+                        final_landmark = True
+                        publish_needed = True
+                else:
+                    # Better pose: rewrite. Never demote an existing landmark.
+                    landmark_flag = 1 if (is_landmark or elm) else 0
+                    self._db.execute(
+                        "INSERT OR REPLACE INTO rooms VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (room, x, y, yaw, confidence, ts, landmark_flag),
+                    )
+                    self._db.commit()
+                    stored = True
+                    final_landmark = bool(landmark_flag)
+                    # Republish if it is (still) a landmark — its pose moved.
+                    publish_needed = final_landmark
             else:
                 landmark_flag = 1 if is_landmark else 0
-            self._db.execute(
-                "INSERT OR REPLACE INTO rooms VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (room, x, y, yaw, confidence, ts, landmark_flag),
+                self._db.execute(
+                    "INSERT OR REPLACE INTO rooms VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (room, x, y, yaw, confidence, ts, landmark_flag),
+                )
+                self._db.commit()
+                stored = True
+                final_landmark = bool(landmark_flag)
+                publish_needed = final_landmark
+
+        if stored:
+            self.get_logger().info(
+                f"memory: stored {room} @ ({x:.2f},{y:.2f}) conf={confidence:.2f} "
+                f"votes={votes} landmark={'yes' if final_landmark else 'no'}"
             )
-            self._db.commit()
-            changed_landmark = bool(landmark_flag)
-        self.get_logger().info(
-            f"memory: stored {room} @ ({x:.2f},{y:.2f}) conf={confidence:.2f} "
-            f"votes={votes} landmark={'yes' if changed_landmark else 'no'}"
-        )
-        if changed_landmark:
+        elif publish_needed:
+            self.get_logger().info(f"memory: promoted {room} to landmark")
+        if publish_needed:
             self._publish_landmarks()
 
     def _on_query(self, msg: String) -> None:
@@ -257,21 +258,25 @@ class SpatialMemoryNode(Node):
                                     is no longer valid).
         """
         req = json_loads(msg.data, default={})
+        # Publish AFTER releasing _db_lock — _publish_landmarks re-acquires it
+        # (non-reentrant Lock), so publishing while held would deadlock.
+        publish_needed = False
         with self._db_lock:
             if bool(req.get("clear_all")):
                 self._db.execute("DELETE FROM rooms")
                 self._db.commit()
                 self.get_logger().info("memory: cleared all rooms (session reset)")
-                self._publish_landmarks()
-                return
-            room = normalize_room_id(str(req.get("room") or ""))
-            if not room:
-                return
-            self._db.execute("DELETE FROM rooms WHERE room=?", (room,))
-            self._db.commit()
-        self.get_logger().info(f"memory: forgot {room}")
-        # A forgotten room may have been a landmark — refresh the latched set.
-        self._publish_landmarks()
+                publish_needed = True
+            else:
+                room = normalize_room_id(str(req.get("room") or ""))
+                if room:
+                    self._db.execute("DELETE FROM rooms WHERE room=?", (room,))
+                    self._db.commit()
+                    self.get_logger().info(f"memory: forgot {room}")
+                    # A forgotten room may have been a landmark — refresh.
+                    publish_needed = True
+        if publish_needed:
+            self._publish_landmarks()
 
     def _publish_landmarks(self) -> None:
         """Publish the current landmark set (latched) for the dashboard/RViz."""

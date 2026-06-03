@@ -20,6 +20,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # Install Python executables
 install(PROGRAMS
   ridgeback_image_motion/autonomy_common.py
+  ridgeback_image_motion/autonomy_geometry.py
   ridgeback_image_motion/motion_server.py
   ridgeback_image_motion/safety_controller.py
   ridgeback_image_motion/cmd_vel_mux.py
