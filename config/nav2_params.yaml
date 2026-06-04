@@ -191,15 +191,14 @@ local_costmap:
       # so DWB could plan paths that clipped door frames during holonomic
       # strafing. Use the actual rectangular footprint.
       footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
-      # Padding restores a small corner-safety buffer against clipping door
-      # frames during holonomic strafing. It was zeroed ONLY because the field
-      # had ~0.9 m doors (inscribed 0.43 left under 1 free cell at center).
-      # Operator confirms real openings here are 1.5-2x robot width (~1.2-1.6 m),
-      # so we can afford 0.04 m again: inscribed ~0.44 m still leaves a wide
-      # low-cost center in a 1.2 m door (>7 free cells) while giving DWB's
-      # ObstacleFootprint critic a margin so corners don't graze. If you ever
-      # face genuinely ~0.9 m doors again, drop this back to 0.0.
-      footprint_padding: 0.04
+      # Padding MUST stay 0.0: field testing showed any padding (0.03-0.04)
+      # pushes the inscribed/lethal radius past ~0.43 m, which leaves a real
+      # doorway with under 1 free cell at center -> the robot creeps at the
+      # threshold and cannot get out the door. The doors here are tighter than
+      # the "1.5-2x width" estimate, so the inscribed radius must equal the true
+      # half-width (0.40 m). Corner safety comes from the ObstacleFootprint
+      # critic + inflation, NOT from padding.
+      footprint_padding: 0.0
       plugins: ["obstacle_layer", "inflation_layer"]
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
@@ -242,11 +241,10 @@ global_costmap:
       rolling_window: false
       track_unknown_space: true
       footprint: "[[0.48, 0.40], [0.48, -0.40], [-0.48, -0.40], [-0.48, 0.40]]"
-      # Match local: 0.04 m corner-safety buffer. Doors here are 1.2-1.6 m, so
-      # inscribed ~0.44 m still forms a global plan straight through them while
-      # keeping the planned centerline off the frames. Set back to 0.0 only if
-      # you return to ~0.9 m doorways.
-      footprint_padding: 0.04
+      # Match local: 0.0. Any padding inflates the inscribed radius past the
+      # door's free center and the global plan can't form through it (robot
+      # gets stuck at the doorway). Keep at the true half-width.
+      footprint_padding: 0.0
       resolution: 0.05
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       static_layer:
@@ -265,15 +263,14 @@ global_costmap:
           data_type: LaserScan
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
-        # Global larger than local (0.60 vs 0.45) so global paths hug the
-        # centerline of corridors and approach doorways square-on, while the
-        # local controller can still squeeze closer when a 1.2-1.6 m opening
-        # requires it. A 1.2 m door (half-width 0.6 m) still keeps its exact
-        # center at low cost at 0.60, so the global plan threads it. Was 0.85,
-        # which closed room openings and made return-home unplannable; 0.55
-        # worked but left global plans grazing corridor walls.
+        # Global slightly larger than local (0.55 vs 0.45) so global paths
+        # prefer the corridor centerline, while the local controller can still
+        # squeeze closer when a doorway requires it. 0.60 was too much: it
+        # inflated the full width of a real (tight) door so the global plan
+        # couldn't thread it and the robot stalled at the threshold. Was 0.85,
+        # which closed room openings entirely. 0.55 is the known-good value.
         cost_scaling_factor: 3.0
-        inflation_radius: 0.60
+        inflation_radius: 0.55
       always_send_full_costmap: true
 
 planner_server:

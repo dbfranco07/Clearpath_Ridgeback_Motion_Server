@@ -88,19 +88,15 @@ frontier_explorer:
     nav_action: navigate_to_pose
     base_frame: ""                  # auto: base_link (matches orchestrator)
     home_frame: map
-    # These were drifting BELOW the code's documented doorway-friendly defaults
-    # (frontier_explorer.py), so the explorer chased tiny clutter strips and
-    # replanned too often — a messier map and a harder return home. Re-aligned:
-    #   min_frontier_size_cells 25 (was 10): a real doorway frontier is 30-60
-    #     cells; 10 chased chair-leg LiDAR stripes.
-    #   goal_blacklist_radius_m 1.0 (was 0.5): one failed cluster blanks the
-    #     whole local patch so we don't rediscover the same trap 50 cm over.
-    #   replan_period_s 3.0 (was 6.0): pick a fresh winner with up-to-date map.
-    #   min_score_threshold 0.15 (was 0.10): 0.10 candidates were marginal
-    #     frontiers the planner kept failing to reach (recovery cascade).
-    min_frontier_size_cells: 25
-    goal_blacklist_radius_m: 1.0
-    replan_period_s: 3.0
+    # Original known-good exploration values. A field regression showed the
+    # tighter doorway tuning (larger blacklist radius / bigger min frontier)
+    # could trap the robot inside a room: goal_blacklist_radius_m 1.0 blanks a
+    # whole ~1 m doorway after a single failed goal beyond it, and a 25-cell
+    # minimum can ignore a partially-seen doorway frontier. Keep these at the
+    # values that let the robot reliably target and pass through doorways.
+    min_frontier_size_cells: 10
+    goal_blacklist_radius_m: 0.5
+    replan_period_s: 6.0
     max_attempts_per_goal: 2
     goal_padding_m: 0.3
     edge_margin_cells: 16
@@ -121,7 +117,7 @@ frontier_explorer:
     recency_window_s: 60.0
     info_gain_radius_m: 2.0
     max_distance_cap_m: 8.0
-    min_score_threshold: 0.15
+    min_score_threshold: 0.10
 
 passage_monitor:
   ros__parameters:
@@ -132,17 +128,22 @@ passage_monitor:
     blacklist_point_topic: /frontier/blacklist_point
     home_frame: map
     base_frame: ""          # auto: base_link
-    # required_width = robot_width + 2*safety_margin = 0.80 + 0.30 = 1.10 m.
-    # Doors here are 1.2-1.6 m, so this trips only on genuinely tight pinch
-    # points / partially-open doors — the explicit "do I fit?" backstop.
+    # required_width = robot_width + 2*safety_margin.
+    # IMPORTANT: reroute_on_block is FALSE by default. The doors here are tight
+    # (close to the robot width), so an active reroute would blacklist the very
+    # doorway the robot must pass and trap it in the room. Keep this node
+    # ADVISORY: it publishes /passage/status for the dashboard but does NOT
+    # blacklist/reroute. Only enable reroute in genuinely wide-corridor
+    # environments after confirming required_width is below the real door width.
+    # safety_margin 0.08 -> required ~0.96 m so a ~1.0 m door reads as "fits".
     robot_width_m: 0.80
-    safety_margin_m: 0.15
+    safety_margin_m: 0.08
     forward_min_m: 0.15
-    forward_max_m: 1.8
-    lateral_window_m: 1.5
+    forward_max_m: 1.6
+    lateral_window_m: 1.2
     min_speed_mps: 0.03
     block_streak_required: 3
-    reroute_on_block: true
+    reroute_on_block: false
     publish_rate_hz: 5.0
 
 mission_orchestrator:

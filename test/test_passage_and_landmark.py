@@ -149,13 +149,21 @@ def test_passage_monitor_is_jetson_launched_not_on_ridgeback() -> None:
     assert "passage_monitor" not in start  # robot side stays motion_server-only
 
 
-def test_costmap_padding_restored_for_roomy_doors() -> None:
+def test_costmap_padding_zero_so_robot_clears_tight_doors() -> None:
+    # Padding MUST stay 0.0: any padding inflates the inscribed radius past a
+    # tight door's free center and the robot gets stuck at the threshold.
     nav2 = read_repo_file("config", "nav2_params.yaml")
-    assert "footprint_padding: 0.04" in nav2
+    assert "footprint_padding: 0.04" not in nav2
+    assert nav2.count("footprint_padding: 0.0") >= 2  # local + global
 
 
-def test_frontier_config_realigned_to_doorway_intent() -> None:
+def test_passage_monitor_is_advisory_not_blocking_by_default() -> None:
+    # With tight doors, an active reroute would blacklist the doorway and trap
+    # the robot in the room. The fit gate must default to report-only.
     params = read_repo_file("config", "autonomy_params.yaml")
-    assert "min_frontier_size_cells: 25" in params
-    assert "min_score_threshold: 0.15" in params
+    assert "reroute_on_block: false" in params
+
+
+def test_landmark_topic_wired_through_config() -> None:
+    params = read_repo_file("config", "autonomy_params.yaml")
     assert "landmark_topic: /room/landmarks" in params
