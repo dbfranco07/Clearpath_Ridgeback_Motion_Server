@@ -51,6 +51,7 @@ try:
         normalize_room_id,
         yaw_to_quaternion,
     )
+    from ridgeback_image_motion.autonomy_geometry import decimate_path
 except ImportError:
     from autonomy_common import (  # type: ignore[no-redef]
         ACTIVE_MISSION_STATES,
@@ -60,6 +61,7 @@ except ImportError:
         normalize_room_id,
         yaw_to_quaternion,
     )
+    from autonomy_geometry import decimate_path  # type: ignore[no-redef]
 
 
 _LATCHED_QOS = QoSProfile(
@@ -142,6 +144,14 @@ class MissionOrchestrator(Node):
         # than erroring the whole mission.
         self.declare_parameter("home_capture_max_retries", 6)
         self.declare_parameter("home_capture_retry_delay_s", 0.5)
+        # Breadcrumb return: record the outbound path and retrace it home so
+        # return follows ground the robot has already driven (every leg is
+        # feasible) instead of betting on one long global plan back through
+        # doorways. trail_spacing = how often to drop a crumb while driving out;
+        # return_waypoint_spacing = how coarsely to retrace it (fewer stops).
+        self.declare_parameter("trail_spacing_m", 0.5)
+        self.declare_parameter("return_waypoint_spacing_m", 2.0)
+        self.declare_parameter("trail_max_points", 600)
 
         ns = self.get_parameter("namespace").value
         self._home_frame = self.get_parameter("home_frame").value
@@ -161,6 +171,9 @@ class MissionOrchestrator(Node):
         self._clear_costmap_on_return = bool(self.get_parameter("clear_costmap_on_return").value)
         self._home_capture_max_retries = int(self.get_parameter("home_capture_max_retries").value)
         self._home_capture_retry_delay = float(self.get_parameter("home_capture_retry_delay_s").value)
+        self._trail_spacing = float(self.get_parameter("trail_spacing_m").value)
+        self._return_wp_spacing = float(self.get_parameter("return_waypoint_spacing_m").value)
+        self._trail_max_points = int(self.get_parameter("trail_max_points").value)
 
         # State. RLock (reentrant) so a callback that already holds the lock
         # can call a helper that re-acquires it without self-deadlocking. The
@@ -192,6 +205,12 @@ class MissionOrchestrator(Node):
         self._return_after = False
         # Counts failed Nav2 attempts on the current return-home leg.
         self._return_attempts = 0
+        # Breadcrumb trail (map-frame x,y) recorded while driving out, and the
+        # reverse waypoint sequence used to retrace it home.
+        self._trail: list[tuple[float, float]] = []
+        self._return_path: list[PoseStamped] = []
+        self._return_idx = 0
+        self._return_wp_attempts = 0
         # One-shot flag: clear spatial_memory the first time we capture
         # a home pose in this process lifetime. The SLAM frame is rebuilt
         # from scratch every session (tabula rasa per CLAUDE.md) so prior
@@ -427,6 +446,7 @@ class MissionOrchestrator(Node):
         self._ensure_home_then(self._explore_after_home)
 
     def _explore_after_home(self) -> None:
+        self._reset_trail()
         with self._lock:
             self._state = "EXPLORING"
             self._mission_start_ts = time.time()
@@ -441,6 +461,7 @@ class MissionOrchestrator(Node):
         self._ensure_home_then(lambda: self._find_room_after_home(room))
 
     def _find_room_after_home(self, room: str) -> None:
+        self._reset_trail()
         # Try memory first.
         request_id = uuid.uuid4().hex
         self._memory_pending[request_id] = {
@@ -608,69 +629,103 @@ class MissionOrchestrator(Node):
     def _begin_return_home(self) -> None:
         with self._lock:
             home = self._home_pose
+            trail = list(self._trail)
         if home is None:
             self._publish_state("error", note="no_home_pose")
             return
+        path = self._build_return_path(trail, home)
         with self._lock:
             self._state = "RETURNING_TO_START"
-            self._return_attempts = 0
+            self._return_path = path
+            self._return_idx = 0
+            self._return_wp_attempts = 0
         self._cancel_frontier(True)
-        self._send_nav_goal(
-            home, on_done=self._on_return_done, on_fail=self._on_return_send_failed
-        )
-        self._publish_state("returning")
+        # Clear once up front so wall-thickening / transient marks accumulated
+        # over the mission don't block the first leg's plan.
+        if self._clear_costmap_on_return:
+            self._clear_costmaps()
+        self._publish_state("returning", note=f"waypoints={len(path)}")
+        self._send_return_waypoint()
 
-    def _resend_return_home(self) -> None:
-        # Re-issue the home goal after a failed attempt. State stays
-        # RETURNING_TO_START and the attempt counter is preserved across the
-        # retry. Bail if the operator changed the mission in the meantime.
+    def _build_return_path(self, trail: list, home: PoseStamped) -> list:
+        # Retrace the outbound trail in reverse, decimated to return-waypoint
+        # spacing, then finish at the exact home pose. Each consecutive pair was
+        # physically driven, so every leg is plannable even when a single long
+        # plan straight home is not (the "hard time in grid plan" case).
+        reversed_trail = list(reversed(trail))
+        decimated = decimate_path(reversed_trail, self._return_wp_spacing)
+        poses: list[PoseStamped] = []
+        prev: tuple[float, float] | None = None
+        for (x, y) in decimated:
+            yaw = math.atan2(y - prev[1], x - prev[0]) if prev is not None else 0.0
+            poses.append(self._make_pose(x, y, yaw))
+            prev = (x, y)
+        poses.append(home)  # precise start pose + captured orientation
+        return poses
+
+    def _send_return_waypoint(self) -> None:
         with self._lock:
-            home = self._home_pose
-            state = self._state
-        if home is None or state != "RETURNING_TO_START":
-            return
-        self._cancel_frontier(True)
-        self._send_nav_goal(
-            home, on_done=self._on_return_done, on_fail=self._on_return_send_failed
-        )
-
-    def _on_return_send_failed(self, reason: str) -> None:
-        # Couldn't hand the goal to Nav2 (server momentarily down / rejected).
-        # Treat as one failed attempt and funnel into the same retry path
-        # rather than aborting the whole mission.
-        self.get_logger().warn(f"return-home goal send failed: {reason}")
-        self._on_return_done(GoalStatus.STATUS_ABORTED)
-
-    def _on_return_done(self, status: int) -> None:
-        if status == GoalStatus.STATUS_SUCCEEDED:
+            if self._state != "RETURNING_TO_START":
+                return
+            idx = self._return_idx
+            path = list(self._return_path)
+        if idx >= len(path):
             with self._lock:
                 self._state = "DONE"
             self._publish_state("done", note="returned")
             return
-        # Return-home failed. Retry with a costmap clear so a transient mark at
-        # the start cell (LiDAR ghost, a person who walked past) can't
-        # permanently wall off the goal. We deliberately do NOT _abort here:
-        # the hard-stop + ABORTED was exactly what stranded the robot.
+        is_last = idx >= len(path) - 1
+        self._publish_state("returning", note=f"waypoint_{idx + 1}/{len(path)}")
+        self._send_nav_goal(
+            path[idx],
+            on_done=lambda status: self._on_return_waypoint_done(status, is_last),
+            on_fail=lambda reason: self._on_return_waypoint_done(
+                GoalStatus.STATUS_ABORTED, is_last
+            ),
+        )
+
+    def _on_return_waypoint_done(self, status: int, is_last: bool) -> None:
+        if status == GoalStatus.STATUS_SUCCEEDED:
+            if is_last:
+                with self._lock:
+                    self._state = "DONE"
+                self._publish_state("done", note="returned")
+                return
+            with self._lock:
+                self._return_idx += 1
+                self._return_wp_attempts = 0
+            self._send_return_waypoint()
+            return
+        # Leg failed. Retry it a few times with a costmap clear; if still stuck,
+        # SKIP to the next breadcrumb (the trail is dense, so skipping one leg
+        # still makes progress). We never _abort here — that stranded the robot.
         with self._lock:
-            self._return_attempts += 1
-            attempt = self._return_attempts
-            home = self._home_pose
-        if home is not None and attempt <= self._max_return_attempts:
+            self._return_wp_attempts += 1
+            attempt = self._return_wp_attempts
+            idx = self._return_idx
+            n = len(self._return_path)
+        if attempt <= self._max_return_attempts:
             self.get_logger().warn(
-                f"return-home attempt {attempt}/{self._max_return_attempts} failed "
-                f"(status {status}); clearing costmaps and retrying"
+                f"return waypoint {idx + 1}/{n} failed (status {status}); "
+                f"clear+retry {attempt}/{self._max_return_attempts}"
             )
-            self._publish_state("returning", note=f"return_retry_{attempt}")
+            self._publish_state("returning", note=f"waypoint_{idx + 1}_retry_{attempt}")
             if self._clear_costmap_on_return:
                 self._clear_costmaps()
-            self._schedule_once(self._return_retry_delay, self._resend_return_home)
+            self._schedule_once(self._return_retry_delay, self._send_return_waypoint)
             return
-        # Retries exhausted. Stop trying but leave the base STEERABLE (no hard
-        # stop) so the operator can teleop the final stretch. Distinct terminal
-        # state so the dashboard can flag "couldn't auto-return".
-        self.get_logger().error(
-            f"return-home failed after {attempt - 1} retries (last status {status})"
-        )
+        if not is_last and idx + 1 < n:
+            self.get_logger().warn(
+                f"return waypoint {idx + 1}/{n} unreachable; skipping to next breadcrumb"
+            )
+            with self._lock:
+                self._return_idx += 1
+                self._return_wp_attempts = 0
+            self._send_return_waypoint()
+            return
+        # Final waypoint (home) unreachable after retries: stop but stay
+        # STEERABLE (no hard stop) so the operator can teleop the last bit.
+        self.get_logger().error("return-home final waypoint unreachable after retries")
         with self._lock:
             self._state = "RETURN_FAILED"
         self._publish_state("return_failed", note=f"last_status_{status}")
@@ -731,6 +786,31 @@ class MissionOrchestrator(Node):
         ps.pose.position.y = y
         ps.pose.orientation = yaw_to_quaternion(yaw)
         return ps
+
+    def _reset_trail(self) -> None:
+        # Start a fresh breadcrumb trail at the home pose so the reverse path
+        # always terminates back at the start.
+        with self._lock:
+            home = self._home_pose
+            self._trail = []
+            if home is not None:
+                self._trail.append((home.pose.position.x, home.pose.position.y))
+
+    def _record_breadcrumb(self) -> None:
+        # Append the current robot position to the outbound trail once it has
+        # moved at least trail_spacing from the last crumb. Cheap TF read on the
+        # 1 Hz tick; the trail is what return-home retraces.
+        xy = self._lookup_robot_xy()
+        if xy is None:
+            return
+        with self._lock:
+            if self._trail:
+                lx, ly = self._trail[-1]
+                if math.hypot(xy[0] - lx, xy[1] - ly) < self._trail_spacing:
+                    return
+            self._trail.append((float(xy[0]), float(xy[1])))
+            if len(self._trail) > self._trail_max_points:
+                self._trail = self._trail[-self._trail_max_points:]
 
     def _schedule_once(self, delay_s: float, callback) -> None:
         # One-shot timer that fires on the executor thread. threading.Timer
@@ -847,6 +927,10 @@ class MissionOrchestrator(Node):
             state = self._state
             elapsed = time.time() - self._mission_start_ts if self._mission_start_ts else 0.0
             target = self._target_room
+        # Drop breadcrumbs along the outbound leg so return-home can retrace
+        # ground the robot has actually driven.
+        if state in ("EXPLORING", "APPROACHING_ROOM", "CONFIRMING"):
+            self._record_breadcrumb()
         if state == "EXPLORING":
             now = time.time()
             if (now - self._last_periodic_vlm) >= self._periodic_vlm_period and target:

@@ -109,6 +109,11 @@ frontier_explorer:
     score_w_recency: 0.4
     score_w_blacklist_prox: 0.8
     score_w_hint_align: 0.5
+    # Directional persistence: bias toward continuing in the last committed
+    # direction so the robot doesn't dither between the two arms of a hallway
+    # T-junction. Raise if it still hesitates at junctions; lower if it over-
+    # commits and ignores a clearly better frontier behind it.
+    score_w_persist: 0.6
     # Clutter penalty: candidates ringed by obstacle cells are LiDAR-strip
     # honeypots, not real openings. Kept explicit so it isn't silently lost
     # if the code default ever changes.
@@ -168,6 +173,15 @@ mission_orchestrator:
     approach_offset_m: 0.8
     memory_lookup_timeout_s: 1.0
     tick_period_s: 1.0
+    # Return-home robustness. Retrace the outbound breadcrumb trail home (every
+    # leg was physically driven, so it's feasible even when one long plan back
+    # fails) and retry each leg with a costmap clear before skipping it.
+    max_return_attempts: 4
+    return_retry_delay_s: 2.0
+    clear_costmap_on_return: true
+    trail_spacing_m: 0.5            # crumb drop interval while driving out
+    return_waypoint_spacing_m: 2.0  # how coarsely to retrace on the way home
+    trail_max_points: 600
     # Frontier hint to bias exploration toward a directional preference
     # (e.g. unknown target room). Empty hint = no bias (default scoring).
     frontier_hint_topic: /frontier/hint

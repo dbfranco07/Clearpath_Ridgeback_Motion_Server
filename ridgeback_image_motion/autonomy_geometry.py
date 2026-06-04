@@ -66,6 +66,25 @@ def passage_width(
     return left_clear + right_clear
 
 
+def decimate_path(
+    points: Sequence[tuple[float, float]], min_spacing: float
+) -> list[tuple[float, float]]:
+    """Thin a polyline so consecutive kept points are >= min_spacing apart.
+
+    The first point is always kept; subsequent points are dropped until one is
+    at least min_spacing from the last kept point. Used to turn a dense
+    breadcrumb trail into a manageable set of return waypoints. Pure helper.
+    """
+    out: list[tuple[float, float]] = []
+    for p in points:
+        if not out:
+            out.append((float(p[0]), float(p[1])))
+            continue
+        if math.hypot(p[0] - out[-1][0], p[1] - out[-1][1]) >= min_spacing:
+            out.append((float(p[0]), float(p[1])))
+    return out
+
+
 def count_occupied_near(
     data: Sequence[int],
     width: int,

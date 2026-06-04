@@ -286,12 +286,13 @@ planner_server:
       # A larger tolerance (we had 1.5) generated hundreds of
       # `worldToMap failed` log lines per goal whenever a frontier was
       # near the map boundary.
-      # 0.75 m: when "return to start" lands on a cell that is now near a
-      # mapped wall (start was captured before SLAM thickened the walls),
-      # this lets NavFn accept the nearest reachable free cell instead of
-      # aborting with "failed to create plan". Still well under the 1.5 that
-      # caused worldToMap spam at map edges.
-      tolerance: 0.75
+      # 1.0 m: when "return to start" lands on a cell that is now near a
+      # mapped wall (start was captured before SLAM thickened the walls), this
+      # lets NavFn accept the nearest reachable free cell instead of aborting
+      # with "failed to create plan". Home is an interior goal (not near the map
+      # edge), so the larger tolerance search won't hit the worldToMap-spam that
+      # 1.5 caused at frontier goals near the boundary.
+      tolerance: 1.0
       # A* (directed) sometimes finds a valid path through marginal-cost
       # cells where the Dijkstra potential-field flood stalls.
       use_astar: true

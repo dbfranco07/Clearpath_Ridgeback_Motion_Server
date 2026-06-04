@@ -87,6 +87,12 @@ class FrontierExplorer(Node):
         self.declare_parameter("score_w_recency", 0.4)
         self.declare_parameter("score_w_blacklist_prox", 0.8)
         self.declare_parameter("score_w_hint_align", 0.5)
+        # Directional persistence: reward frontiers in the same direction as the
+        # goal we last committed to. Without this, at a hallway T-junction the
+        # two arms score almost equally and the robot dithers ("not sure left or
+        # right"), re-aiming every goal cycle and making no progress. With it,
+        # the robot commits to one arm, explores it, then takes the other.
+        self.declare_parameter("score_w_persist", 0.6)
         # Penalty for clutter-induced "leaky" frontiers. Real openings
         # (doorways) have very few obstacle cells within 1 m of the
         # centroid; clutter forests (chair legs, fences) are dense with
@@ -117,6 +123,7 @@ class FrontierExplorer(Node):
         self._w_recency = float(self.get_parameter("score_w_recency").value)
         self._w_blacklist = float(self.get_parameter("score_w_blacklist_prox").value)
         self._w_hint = float(self.get_parameter("score_w_hint_align").value)
+        self._w_persist = float(self.get_parameter("score_w_persist").value)
         self._w_clutter = float(self.get_parameter("score_w_clutter").value)
         self._clutter_radius = max(float(self.get_parameter("clutter_radius_m").value), 0.1)
         self._recency_window = max(float(self.get_parameter("recency_window_s").value), 1.0)
@@ -138,6 +145,9 @@ class FrontierExplorer(Node):
         self._blacklist: list[tuple[float, float]] = []
         self._visited: list[tuple[float, float, float]] = []  # (x, y, ts)
         self._hint: dict[str, Any] = {}  # {dx, dy, target_room}
+        # World-frame goal the explorer last committed to; anchors the
+        # directional-persistence term so it keeps pursuing one hallway arm.
+        self._committed_goal: tuple[float, float] | None = None
         self._last_error = ""
         self._frontier_count = 0
         self._last_replan = 0.0
@@ -187,11 +197,14 @@ class FrontierExplorer(Node):
     def _on_cancel(self, msg: Bool) -> None:
         with self._lock:
             self._cancelled = bool(msg.data)
-            if self._cancelled and self._goal_handle is not None:
-                self.get_logger().info("frontier exploration cancelled by mission")
-                self._goal_handle.cancel_goal_async()
-                self._goal_handle = None
-                self._current_goal = None
+            if self._cancelled:
+                # Drop directional commitment so a fresh mission starts unbiased.
+                self._committed_goal = None
+                if self._goal_handle is not None:
+                    self.get_logger().info("frontier exploration cancelled by mission")
+                    self._goal_handle.cancel_goal_async()
+                    self._goal_handle = None
+                    self._current_goal = None
 
     def _on_hint(self, msg: String) -> None:
         payload = json_loads(msg.data, default={})
@@ -389,6 +402,7 @@ class FrontierExplorer(Node):
             hint = dict(self._hint) if self._hint.get("active") else {}
             visited = list(self._visited)
             blacklist = list(self._blacklist)
+            committed = self._committed_goal
 
         # Drop visit history older than 2× the recency window — it can never
         # contribute meaningfully and grows unbounded otherwise.
@@ -413,7 +427,7 @@ class FrontierExplorer(Node):
                         self._blacklist.append(world)
                 continue
             score = self._score_cluster(
-                world, size, grid, robot, visited, blacklist, hint, now,
+                world, size, grid, robot, visited, blacklist, hint, committed, now,
             )
             if best is None or score > best[1] or (
                 math.isclose(score, best[1]) and size > best[2]
@@ -432,6 +446,7 @@ class FrontierExplorer(Node):
         visited: list[tuple[float, float, float]],
         blacklist: list[tuple[float, float]],
         hint: dict[str, Any],
+        committed: tuple[float, float] | None,
         now: float,
     ) -> float:
         info_gain = self._info_gain(grid, world)
@@ -465,6 +480,19 @@ class FrontierExplorer(Node):
             cnorm = math.hypot(cx, cy)
             if cnorm > 1e-6:
                 hint_term = max(0.0, (cx * hint.get("dx", 0.0) + cy * hint.get("dy", 0.0)) / cnorm)
+        # Directional persistence: cosine between (robot->candidate) and
+        # (robot->last committed goal). Only when there's no explicit operator
+        # hint, so an operator direction always wins. This is what breaks the
+        # symmetric-junction tie: once committed to one arm, candidates down
+        # that arm get a bonus and the robot stops flip-flopping.
+        persist_term = 0.0
+        if not hint and committed is not None and robot is not None:
+            gx, gy = committed[0] - robot[0], committed[1] - robot[1]
+            cx2, cy2 = world[0] - robot[0], world[1] - robot[1]
+            gnorm = math.hypot(gx, gy)
+            cnorm2 = math.hypot(cx2, cy2)
+            if gnorm > 1e-6 and cnorm2 > 1e-6:
+                persist_term = max(0.0, (cx2 * gx + cy2 * gy) / (cnorm2 * gnorm))
         # Clutter penalty: candidates surrounded by obstacle cells are
         # almost certainly LiDAR-strip honeypots, not real openings.
         clutter_term = self._clutter_fraction(grid, world)
@@ -477,6 +505,7 @@ class FrontierExplorer(Node):
             - self._w_blacklist * blacklist_term
             - self._w_clutter * clutter_term
             + self._w_hint * hint_term
+            + self._w_persist * persist_term
             + size_bonus
         )
 
@@ -579,6 +608,7 @@ class FrontierExplorer(Node):
 
         with self._lock:
             self._current_goal = goal
+            self._committed_goal = goal
             self._active = True
             self._attempts[goal] = self._attempts.get(goal, 0) + 1
             self._visited.append((goal[0], goal[1], time.time()))

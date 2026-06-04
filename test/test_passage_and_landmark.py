@@ -11,6 +11,7 @@ import math
 
 from ridgeback_image_motion.autonomy_geometry import (
     count_occupied_near,
+    decimate_path,
     lidar_agrees,
     passage_width,
 )
@@ -121,19 +122,40 @@ def test_count_occupied_ignores_unknown_and_free() -> None:
 
 # --- return-home robustness (source contracts) -----------------------------
 
-def test_return_home_retries_instead_of_stranding() -> None:
+def test_decimate_path_thins_to_min_spacing() -> None:
+    pts = [(0.0, 0.0), (0.2, 0.0), (0.4, 0.0), (1.2, 0.0), (1.3, 0.0), (2.5, 0.0)]
+    out = decimate_path(pts, 1.0)
+    # First always kept; then only points >= 1.0 from the last kept one.
+    assert out[0] == (0.0, 0.0)
+    for a, b in zip(out, out[1:]):
+        assert abs(b[0] - a[0]) >= 1.0 - 1e-9
+    assert out[-1] == (2.5, 0.0)
+
+
+def test_return_home_retraces_breadcrumb_trail() -> None:
     src = read_repo_file("ridgeback_image_motion", "mission_orchestrator.py")
-    # Retry path with bounded attempts + costmap clearing, and a terminal that
-    # leaves the base steerable rather than the old silent abort.
+    # Breadcrumb-based return: record a trail, retrace it as waypoints, retry +
+    # clear costmaps per leg, and a terminal that leaves the base steerable
+    # rather than the old silent abort.
     for token in (
         "max_return_attempts",
-        "_resend_return_home",
+        "_record_breadcrumb",
+        "_build_return_path",
+        "_send_return_waypoint",
         "_clear_costmaps",
         "ClearEntireCostmap",
         "RETURN_FAILED",
         "_return_after",
     ):
         assert token in src, f"missing return-home robustness token: {token}"
+
+
+def test_frontier_has_directional_persistence() -> None:
+    src = read_repo_file("ridgeback_image_motion", "frontier_explorer.py")
+    # Junction dithering fix: a persistence term anchored on the committed goal.
+    assert "_committed_goal" in src
+    assert "persist_term" in src
+    assert "score_w_persist" in src
 
 
 def test_terminal_explore_outcomes_route_to_return_home() -> None:
