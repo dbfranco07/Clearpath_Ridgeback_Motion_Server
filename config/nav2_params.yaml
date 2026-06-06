@@ -1,5 +1,8 @@
 # Nav2 parameters — no map_server, no AMCL (slam_toolbox owns map+TF).
-# Holonomic controller. Output topic: /cmd_vel/nav (consumed by cmd_vel_mux).
+# Holonomic controller. DWB -> /cmd_vel/nav_raw -> velocity_smoother ->
+# /cmd_vel/nav (consumed by cmd_vel_mux). The smoother resamples the coarse
+# 10 Hz DWB output into 20 Hz accel-bounded commands; wiring it out of this
+# path (stock cmd_vel/cmd_vel_smoothed topics) is what makes motion jerky.
 # Local costmap uses LiDAR only initially; depth pointcloud can be added later.
 
 lifecycle_manager_navigation:
@@ -71,7 +74,7 @@ controller_server:
   ros__parameters:
     use_sim_time: false
     controller_frequency: 10.0
-    cmd_vel_topic: /cmd_vel/nav
+    cmd_vel_topic: /cmd_vel/nav_raw
     odom_topic: /r100_0140/platform/odom/filtered
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.001

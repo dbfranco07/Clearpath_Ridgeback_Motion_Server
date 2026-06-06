@@ -281,7 +281,13 @@ def _setup(context, *args, **kwargs):
                     "controller_server",
                     "controller_server",
                     nav2_params_file,
-                    extra_remappings=[("cmd_vel", "/cmd_vel/nav")],
+                    # Controller output feeds the velocity_smoother (below),
+                    # NOT the mux directly. DWB runs at 10 Hz with coarse
+                    # sampling; the smoother resamples to 20 Hz accel-bounded
+                    # commands before /cmd_vel/nav. behavior_server keeps
+                    # publishing /cmd_vel/nav directly so recoveries bypass
+                    # the smoother.
+                    extra_remappings=[("cmd_vel", "/cmd_vel/nav_raw")],
                 ),
                 _nav2_node(
                     "nav2_smoother",
@@ -335,6 +341,15 @@ def _setup(context, *args, **kwargs):
                     "velocity_smoother",
                     "velocity_smoother",
                     nav2_params_file,
+                    # Sits between the controller and the mux. Stock nav2
+                    # topics (cmd_vel / cmd_vel_smoothed) leave it orphaned
+                    # here because the controller is remapped to /cmd_vel/nav*,
+                    # so the raw 10 Hz DWB steps would otherwise reach the
+                    # wheels unsmoothed (the #1 source of jerky motion).
+                    extra_remappings=[
+                        ("cmd_vel", "/cmd_vel/nav_raw"),
+                        ("cmd_vel_smoothed", "/cmd_vel/nav"),
+                    ],
                 ),
                 Node(
                     package="nav2_lifecycle_manager",
