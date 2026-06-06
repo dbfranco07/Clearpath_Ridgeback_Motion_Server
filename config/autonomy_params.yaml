@@ -123,6 +123,24 @@ frontier_explorer:
     info_gain_radius_m: 2.0
     max_distance_cap_m: 8.0
     min_score_threshold: 0.10
+    # No-progress watchdog. Nav2's own progress_checker (0.10 m / 10 s) x
+    # max_attempts_per_goal (2) only abandons a stalled goal after ~30-60 s of
+    # recovery dancing. This trips faster: if the robot moves < stuck_progress_m
+    # within stuck_timeout_s of a goal being sent, cancel and re-target a
+    # different frontier next tick. Gated on MOTION, not wall-clock, so slow
+    # doorway threading at the 0.15 m/s cap isn't aborted. A trip is a soft
+    # defer (recency steers the next pick away; the Nav2 attempts budget is
+    # rolled back so a transiently-stuck tight doorway is NOT blacklisted). Only
+    # after stuck_max_strikes repeated trips on the SAME frontier is it hard-
+    # blacklisted. On each trip both costmaps are cleared so the re-target plans
+    # against a fresh costmap (static-layer /map speckle is handled separately
+    # by the DenoiseLayer in nav2_params.yaml).
+    stuck_timeout_s: 8.0
+    stuck_progress_m: 0.08
+    stuck_max_strikes: 3
+    clear_costmap_on_stuck: true
+    clear_local_costmap_service: /local_costmap/clear_entirely_local_costmap
+    clear_global_costmap_service: /global_costmap/clear_entirely_global_costmap
 
 passage_monitor:
   ros__parameters:

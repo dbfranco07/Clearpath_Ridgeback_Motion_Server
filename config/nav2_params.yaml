@@ -202,7 +202,7 @@ local_costmap:
       # half-width (0.40 m). Corner safety comes from the ObstacleFootprint
       # critic + inflation, NOT from padding.
       footprint_padding: 0.0
-      plugins: ["obstacle_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "denoise_layer", "inflation_layer"]
       obstacle_layer:
         plugin: nav2_costmap_2d::ObstacleLayer
         enabled: true
@@ -217,6 +217,16 @@ local_costmap:
           raytrace_min_range: 0.0
           obstacle_max_range: 6.0
           obstacle_min_range: 0.0
+      # Strips isolated salt-and-pepper obstacle cells (LiDAR speckle, scan
+      # smear) BEFORE inflation sprays 0.45 m of cost around each one. Must sit
+      # between marking and inflation. minimal_group_size 2 / 8-connectivity
+      # removes only lone single cells -- any cell touching another obstacle
+      # (i.e. a real, contiguous wall) survives, so door frames are untouched.
+      denoise_layer:
+        plugin: nav2_costmap_2d::DenoiseLayer
+        enabled: true
+        minimal_group_size: 2
+        group_connectivity_type: 8
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         # inflation_radius 0.85 was the doorway/return-home killer: a 0.9 m
@@ -249,7 +259,7 @@ global_costmap:
       # gets stuck at the doorway). Keep at the true half-width.
       footprint_padding: 0.0
       resolution: 0.05
-      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      plugins: ["static_layer", "obstacle_layer", "denoise_layer", "inflation_layer"]
       static_layer:
         plugin: nav2_costmap_2d::StaticLayer
         map_subscribe_transient_local: true
@@ -264,6 +274,16 @@ global_costmap:
           clearing: true
           marking: true
           data_type: LaserScan
+      # Removes the isolated /map speckle (visible as black islands inside
+      # rooms) that the static_layer marks, BEFORE the 0.55 m inflation turns
+      # each speck into a cost blob that merges into a virtual wall and blocks
+      # the global plan out of a room. Placed after static+obstacle marking,
+      # before inflation. Lone cells only -- contiguous walls survive.
+      denoise_layer:
+        plugin: nav2_costmap_2d::DenoiseLayer
+        enabled: true
+        minimal_group_size: 2
+        group_connectivity_type: 8
       inflation_layer:
         plugin: nav2_costmap_2d::InflationLayer
         # Global slightly larger than local (0.55 vs 0.45) so global paths

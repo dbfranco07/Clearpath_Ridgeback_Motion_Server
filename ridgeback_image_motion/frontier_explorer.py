@@ -25,6 +25,7 @@ import rclpy
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose
+from nav2_msgs.srv import ClearEntireCostmap
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -109,6 +110,28 @@ class FrontierExplorer(Node):
         # Safe to raise because of the no_frontiers debounce in the
         # orchestrator (3 consecutive reports required).
         self.declare_parameter("min_score_threshold", 0.15)
+        # No-progress watchdog. Nav2's own progress_checker (0.10 m / 10 s) plus
+        # max_attempts_per_goal=2 only declares a goal dead after ~30-60 s of
+        # recovery dancing. This is a faster escape: if the robot moves less
+        # than stuck_progress_m within stuck_timeout_s of a goal being sent,
+        # cancel cleanly and let the next tick re-target a different frontier.
+        # IMPORTANT: gated on *motion*, not pure wall-clock -- at 0.15 m/s,
+        # legitimately threading a tight doorway creeps, and we must NOT yank
+        # the robot off a door it is slowly passing. A watchdog trip is a soft
+        # DEFER (cancel -> recency penalty steers the next pick elsewhere; the
+        # Nav2 attempts budget is rolled back so a transiently-stuck doorway
+        # isn't blacklisted). Only after stuck_max_strikes repeated trips on the
+        # same frontier do we hard-blacklist it.
+        self.declare_parameter("stuck_timeout_s", 8.0)
+        self.declare_parameter("stuck_progress_m", 0.08)
+        self.declare_parameter("stuck_max_strikes", 3)
+        self.declare_parameter("clear_costmap_on_stuck", True)
+        self.declare_parameter(
+            "clear_local_costmap_service", "/local_costmap/clear_entirely_local_costmap"
+        )
+        self.declare_parameter(
+            "clear_global_costmap_service", "/global_costmap/clear_entirely_global_costmap"
+        )
 
         self._min_size = int(self.get_parameter("min_frontier_size_cells").value)
         self._blacklist_radius = float(self.get_parameter("goal_blacklist_radius_m").value)
@@ -130,6 +153,10 @@ class FrontierExplorer(Node):
         self._info_radius = max(float(self.get_parameter("info_gain_radius_m").value), 0.1)
         self._max_dist_cap = max(float(self.get_parameter("max_distance_cap_m").value), 0.1)
         self._min_score = float(self.get_parameter("min_score_threshold").value)
+        self._stuck_timeout = float(self.get_parameter("stuck_timeout_s").value)
+        self._stuck_progress = float(self.get_parameter("stuck_progress_m").value)
+        self._stuck_max_strikes = int(self.get_parameter("stuck_max_strikes").value)
+        self._clear_costmap_on_stuck = bool(self.get_parameter("clear_costmap_on_stuck").value)
 
         self._lock = threading.Lock()
         self._map: OccupancyGrid | None = None
@@ -152,6 +179,10 @@ class FrontierExplorer(Node):
         self._frontier_count = 0
         self._last_replan = 0.0
         self._last_score = 0.0
+        # No-progress watchdog bookkeeping.
+        self._goal_start_t = 0.0
+        self._goal_start_xy: tuple[float, float] | None = None
+        self._stuck_count: dict[tuple[float, float], int] = {}
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -179,6 +210,15 @@ class FrontierExplorer(Node):
             String, self.get_parameter("status_topic").value, _LATCHED_QOS
         )
         self._action = ActionClient(self, NavigateToPose, self.get_parameter("nav_action").value)
+        # Costmap-clear clients fired when the watchdog trips, so the next
+        # frontier goal plans against a costmap wiped of transient obstacle
+        # cells (the static-layer /map speckle is handled by the DenoiseLayer).
+        self._clear_local_cli = self.create_client(
+            ClearEntireCostmap, self.get_parameter("clear_local_costmap_service").value
+        )
+        self._clear_global_cli = self.create_client(
+            ClearEntireCostmap, self.get_parameter("clear_global_costmap_service").value
+        )
         self._timer = self.create_timer(1.0, self._tick)
 
         self.get_logger().info(
@@ -263,6 +303,12 @@ class FrontierExplorer(Node):
 
         if cancelled:
             self._publish_status("cancelled")
+            return
+        # No-progress watchdog: if the in-flight goal has stalled, cancel it
+        # here so the next tick re-targets, rather than waiting out Nav2's
+        # slower progress_checker + recovery cascade.
+        if active and self._check_stuck_watchdog():
+            self._publish_status("stuck_replan")
             return
         if active and not need_replan:
             self._publish_status("navigating")
@@ -580,6 +626,83 @@ class FrontierExplorer(Node):
             return None
         return (float(tf.transform.translation.x), float(tf.transform.translation.y))
 
+    # --- no-progress watchdog -----------------------------------------------
+    def _check_stuck_watchdog(self) -> bool:
+        """Cancel the in-flight goal if the robot has made no progress.
+
+        Returns True iff the watchdog tripped (goal cancelled). Gated on
+        *distance moved*, not pure elapsed time, so slow-but-real doorway
+        threading is never aborted. A trip is a soft defer (recency steers the
+        next pick away, Nav2 attempts budget rolled back) until stuck_max_strikes
+        repeated trips on the same frontier escalate to a hard blacklist.
+        """
+        with self._lock:
+            if not self._active or self._goal_start_xy is None:
+                return False
+            goal = self._current_goal
+            start_t = self._goal_start_t
+            start_xy = self._goal_start_xy
+
+        if (time.time() - start_t) < self._stuck_timeout:
+            return False
+
+        robot = self._lookup_robot_pose()
+        if robot is None:
+            # No pose this tick: re-arm rather than trip on missing TF.
+            with self._lock:
+                self._goal_start_t = time.time()
+            return False
+
+        moved = self._dist(robot, start_xy)
+        if moved >= self._stuck_progress:
+            # Real progress -> slide the window forward from the new pose.
+            with self._lock:
+                self._goal_start_t = time.time()
+                self._goal_start_xy = robot
+            return False
+
+        # Stalled. Record a strike and decide defer vs. blacklist.
+        with self._lock:
+            strikes = self._stuck_count.get(goal, 0) + 1 if goal is not None else 0
+            blacklisted = False
+            if goal is not None:
+                self._stuck_count[goal] = strikes
+                if strikes >= self._stuck_max_strikes:
+                    if goal not in self._blacklist:
+                        self._blacklist.append(goal)
+                    blacklisted = True
+                elif self._attempts.get(goal, 0) > 0:
+                    # Soft defer: don't let watchdog trips burn the Nav2 attempts
+                    # budget (that path blacklists, and would trap a tight door).
+                    self._attempts[goal] -= 1
+            handle = self._goal_handle
+            self._goal_handle = None
+            self._active = False
+            self._current_goal = None
+            self._goal_start_xy = None
+            self._last_error = "stuck_blacklisted" if blacklisted else "stuck_deferred"
+
+        self.get_logger().warn(
+            f"no-progress watchdog: moved {moved:.3f}m < {self._stuck_progress}m in "
+            f"~{self._stuck_timeout:.0f}s on goal {goal}; strike "
+            f"{strikes}/{self._stuck_max_strikes} -> "
+            f"{'blacklisted' if blacklisted else 'deferring to another frontier'}"
+        )
+        if handle is not None:
+            handle.cancel_goal_async()
+        if self._clear_costmap_on_stuck:
+            self._clear_costmaps()
+        return True
+
+    def _clear_costmaps(self) -> None:
+        # Fire-and-forget on the executor thread; skip a not-yet-ready service.
+        for cli in (self._clear_local_cli, self._clear_global_cli):
+            try:
+                if cli.service_is_ready():
+                    cli.call_async(ClearEntireCostmap.Request())
+            except Exception:
+                pass
+
     # --- nav2 plumbing ------------------------------------------------------
     def _send_goal(self, goal: tuple[float, float]) -> None:
         if not self._action.wait_for_server(timeout_sec=10.0):
@@ -612,6 +735,9 @@ class FrontierExplorer(Node):
             self._active = True
             self._attempts[goal] = self._attempts.get(goal, 0) + 1
             self._visited.append((goal[0], goal[1], time.time()))
+            # Arm the no-progress watchdog from this goal's start pose/time.
+            self._goal_start_t = time.time()
+            self._goal_start_xy = robot_xy
 
         self.get_logger().info(
             f"frontier goal -> ({goal[0]:.2f}, {goal[1]:.2f}) score={self._last_score:.3f}"
@@ -654,8 +780,11 @@ class FrontierExplorer(Node):
             self._active = False
             self._current_goal = None
             self._goal_handle = None
+            self._goal_start_xy = None
         if status == GoalStatus.STATUS_SUCCEEDED:
             self._last_error = ""
+            # Reached it -> forget any accumulated stuck strikes for this goal.
+            self._stuck_count.pop(goal, None)
         elif status == GoalStatus.STATUS_CANCELED:
             self._last_error = "cancelled"
         else:
